@@ -18,11 +18,11 @@ var ErrUnsupportedSemantics = errors.New("transition is not represented by the r
 // Config 与 models/raft/raft.cfg 的有界常量对应。Engine 创建 Adapter 和
 // Mapper 时应从同一份运行配置填充这些值，避免模型和 SUT 静默漂移。
 type Config struct {
-	NodeIDs        []core.NodeID
-	MaxValue       int
-	MaxLogIndex    uint64
-	LargestTerm    uint64
-	EmitLeaderNoOp bool
+	NodeIDs        []core.NodeID `json:"node_ids"`
+	MaxValue       int           `json:"max_value"`
+	MaxLogIndex    uint64        `json:"max_log_index"`
+	LargestTerm    uint64        `json:"largest_term"`
+	EmitLeaderNoOp bool          `json:"emit_leader_no_op"`
 }
 
 func DefaultConfig() Config {

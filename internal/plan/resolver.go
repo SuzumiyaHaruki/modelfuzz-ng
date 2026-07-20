@@ -15,8 +15,8 @@ const (
 // ResolverConfig 限制单条 PlanAction 的展开规模，避免一个错误计划产生过多
 // tick 或 Concrete Action。限制不属于 core.Action 的语义。
 type ResolverConfig struct {
-	MaxAdvanceTicks uint64
-	MaxBatch        int
+	MaxAdvanceTicks uint64 `json:"max_advance_ticks"`
+	MaxBatch        int    `json:"max_batch"`
 }
 
 func DefaultResolverConfig() ResolverConfig {

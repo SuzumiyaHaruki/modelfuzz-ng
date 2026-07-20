@@ -32,3 +32,6 @@ Timeout
 
 `raft.tla` 的动作名和参数保持与原 controlled TLC 的 `RaftActionMapper` 兼容，
 启动 TLC HTTP 服务时将本目录作为模型目录，并选择 `raft.tla`/`raft.cfg`。
+旧版 `ActionMapperFactory` 对模型文件名进行大小写敏感判断，因此必须通过
+`-mapperparams 'name=raft;port=2023'` 显式选择 `RaftActionMapper`；只传入小写
+`raft.tla` 会错误回退到默认 Mapper。

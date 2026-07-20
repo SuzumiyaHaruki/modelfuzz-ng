@@ -1,0 +1,41 @@
+# 基础 Raft 复制与提交实验（2026-07-20）
+
+## 目标
+
+验证一条 Plan 能连续经过 Plan Resolver、真实 etcd-raft、Trace、Raft Mapper
+和原 ModelFuzz controlled TLC，并检查真实节点与 TLA+ 最终状态的 leader、term、
+日志和 commit index 是否一致。
+
+## 配置
+
+- 3 个节点，`PreVote=false`、`CheckQuorum=false`；
+- `ElectionTick=10`、`HeartbeatTick=1`；
+- seed 为 42；
+- `MaxLogIndex=5`、`LargestTerm=5`；
+- CLI 使用 `-strict-plan`，不接受 partial、skipped 或 empty queue；
+- TLC 使用 `-mapperparams 'name=raft;port=2026'`。
+
+## 结果
+
+| Plan | Action | Effect | 模型事件 | TLC状态 | 真实Raft最终状态 | TLC最终状态 |
+|---|---:|---:|---:|---:|---|---|
+| `election-commit-node1` | 6 | 16 | 9 | 9 | n1 leader；n1/n2 log=1、commit=1 | 一致 |
+| `election-commit-node2` | 6 | 16 | 9 | 9 | n2 leader；n2/n3 log=1、commit=1 | 一致 |
+| `client-request-commit` | 9 | 22 | 13 | 12 | n1 leader；n1/n2 log=2、commit=2 | 一致 |
+
+客户端请求实验的最终日志为：
+
+```text
+n1: [(term=1,value=0), (term=1,value=1)]
+n2: [(term=1,value=0), (term=1,value=1)]
+```
+
+其中 value 0 是 leader no-op，value 1 是客户端请求。n1、n2 的真实
+`commit=applied=2`，TLC 中对应 `commitIndex=<<2,2,0>>`。
+
+TLC 状态数不保证恒等于“事件数+1”，因为服务端状态抽象可能合并连续重复状态。
+三个实验均返回 `status=completed`，没有发生解析降级、Runtime 错误、映射错误
+或模型执行错误。
+
+完整 JSON 产物保存在本地 `runs/basic-raft-20260720/`；`runs/` 默认被
+`.gitignore` 排除，避免把体积较大的实验输出提交到源码仓库。

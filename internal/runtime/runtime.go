@@ -28,10 +28,10 @@ var (
 // 单步限制用于改善输入质量，Runtime Limits 则防止任意调用方绕过 Plan 后
 // 造成无界 tick、Effect 或消息队列增长。
 type Limits struct {
-	MaxActions        uint64
-	MaxTicks          uint64
-	MaxEffects        uint64
-	MaxQueuedMessages int
+	MaxActions        uint64 `json:"max_actions"`
+	MaxTicks          uint64 `json:"max_ticks"`
+	MaxEffects        uint64 `json:"max_effects"`
+	MaxQueuedMessages int    `json:"max_queued_messages"`
 }
 
 // Config 保存一次可重放执行的稳定输入。

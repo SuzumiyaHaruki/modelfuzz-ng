@@ -33,7 +33,15 @@ replace go.etcd.io/raft/v3 => ../raft
 
 ```text
 modelfuzz-ng/
+├── cmd/
+│   └── modelfuzz-ng/
+│       ├── config.go
+│       ├── main.go
+│       ├── main_test.go
+│       └── output.go
 ├── docs/
+│   ├── experiments/
+│   │   └── basic-raft-20260720.md
 │   ├── project-structure.md
 │   └── timer-design.md
 ├── internal/
@@ -69,6 +77,7 @@ modelfuzz-ng/
 │   ├── model/
 │   │   ├── event.go
 │   │   ├── event_test.go
+│   │   ├── executor.go
 │   │   ├── mapper.go
 │   │   ├── transition.go
 │   │   ├── raft/
@@ -86,6 +95,12 @@ modelfuzz-ng/
 │   │   ├── result.go
 │   │   ├── selector.go
 │   │   └── sequence.go
+│   ├── engine/
+│   │   ├── doc.go
+│   │   ├── engine.go
+│   │   ├── engine_test.go
+│   │   ├── error.go
+│   │   └── result.go
 │   ├── runtime/
 │   │   ├── action.go
 │   │   ├── clock.go
@@ -96,6 +111,13 @@ modelfuzz-ng/
 │   │   └── runtime_test.go
 │   └── sut/
 │       └── adapter.go
+├── examples/
+│   ├── config.json
+│   └── plans/
+│       ├── client-request-commit.json
+│       ├── election-commit-node1.json
+│       ├── election-commit-node2.json
+│       └── election.json
 ├── models/
 │   └── raft/
 │       ├── README.md
@@ -109,7 +131,9 @@ modelfuzz-ng/
 当前阶段已经完成协议无关的 core 数据模型、最小 SUT 接口、基础 Runtime、
 可通过 Runtime 端到端运行的 `internal/adapters/etcdraft` 最小适配器，以及
 Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
-不依赖 LLM 的首版 Plan 数据结构和 Resolver。
+不依赖 LLM 的首版 Plan 数据结构和 Resolver。当前也已经具备 Engine 和 CLI，
+可以把 JSON Plan、真实 Raft、模型事件映射和可选的 controlled TLC 串成一次
+完整执行，并持久化全部中间产物。
 
 ## 4. 建议的目标目录
 
@@ -117,9 +141,11 @@ Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
 
 ```text
 modelfuzz-ng/
-├── cmd/                              # 近期：可执行程序入口
+├── cmd/                              # 已有：可执行程序入口
 │   └── modelfuzz-ng/
-│       └── main.go
+│       ├── main.go                   # run子命令和依赖组装
+│       ├── config.go                 # JSON配置及Raft/模型对齐检查
+│       └── output.go                 # 运行产物安全写入
 │
 ├── configs/                          # 近期：可复用运行配置
 │   ├── etcdraft-basic.yaml
@@ -182,10 +208,10 @@ modelfuzz-ng/
 │   │   ├── resolver.go               # PlanStep在线解析为Concrete Action
 │   │   └── *_test.go
 │   │
-│   ├── engine/                       # 近期：多次测试执行和反馈循环
-│   │   ├── engine.go                 # 主循环
-│   │   ├── execution.go              # 单次执行编排
-│   │   ├── budget.go                 # Action、tick、消息和时间预算
+│   ├── engine/                       # 已有：单条Plan完整执行编排
+│   │   ├── engine.go                 # Plan到模型执行的主循环
+│   │   ├── result.go                 # 状态和可持久化执行结果
+│   │   ├── error.go                  # 分层错误分类
 │   │   └── *_test.go
 │   │
 │   ├── policy/                       # 计划生成和调度策略
@@ -473,11 +499,12 @@ core
 3. 已完成 AdvanceTicks；
 4. 已完成 Link/Start/Count Selector解析；
 5. 已完成 resolved/partial/skipped/invalid/empty_queue解析结果；
-6. 待 Engine 执行已解析动作并生成Concrete ActionSequence。
+6. 已完成 Engine 执行已解析动作并生成Concrete ActionSequence；
+7. 已完成 CLI 读取JSON Plan并保存完整运行产物。
 
 ### 阶段三：形成基础fuzzer
 
-1. Engine循环；
+1. 已完成单条Plan的Engine循环，待增加多轮探索调度；
 2. Random Policy；
 3. 基础 Oracle；
 4. Coverage和Metrics；
