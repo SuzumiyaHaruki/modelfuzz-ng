@@ -58,8 +58,8 @@ java -cp 'class:lib/*:lib/gson/*' tlc2.TLCServer \
 
 每次运行必须使用一个尚不存在的输出目录，CLI 不会覆盖旧轨迹。目录中包含
 解析结果、Concrete Action、Trace、模型事件、模型状态以及汇总结果。当前轻量
-Raft 模型还不支持 crash/restart、snapshot、membership change 和多 entry
-`MsgApp`；包含这些语义的轨迹会明确以 `mapping_failed` 结束。
+Raft 模型还不支持 crash/restart、snapshot 和 membership change；Profile 会在
+修改真实 SUT 前拒绝可提前判断的不支持动作。
 
 ## 当前能力声明
 
@@ -82,7 +82,7 @@ Raft 模型还不支持 crash/restart、snapshot、membership change 和多 entr
 | 消息 | 当前处理方式 |
 |---|---|
 | `MsgVote`、`MsgVoteResp` | 映射为选举模型动作 |
-| `MsgApp`、`MsgAppResp` | 映射为复制和确认动作；`MsgApp` 当前只允许零或一条 entry |
+| `MsgApp`、`MsgAppResp` | 映射为复制和确认动作；成功的多 entry 批次按日志顺序展开为单 entry 模型事件 |
 | `MsgHeartbeat` | 映射为无 entry 的 `MsgApp`，保留 term、角色和 commit 传播 |
 | `MsgHeartbeatResp` | 当前 Profile 中明确 stutter |
 | `MsgReadIndex`、`MsgReadIndexResp` | 只读状态未进入模型，明确 stutter |
@@ -95,8 +95,10 @@ Raft 模型还不支持 crash/restart、snapshot、membership change 和多 entr
 - `election-commit-node1.json`：节点 1 当选并把 no-op 复制到节点 2后提交；
 - `election-commit-node2.json`：节点 2 当选并把 no-op 复制到节点 3后提交；
 - `client-request-commit.json`：节点 1 当选，随后复制并提交 no-op 和请求值 `1`。
+- `follower-catchup-multi-entry.json`：节点 2 落后三条客户端日志后，通过单个
+  多 entry `MsgApp` 追赶并提交。
 
-上述三条完整 Plan 已使用真实 etcd-raft 和 controlled TLC 运行，结果见
+上述完整 Plan 已使用真实 etcd-raft 和 controlled TLC 运行，结果见
 [`docs/experiments/basic-raft-20260720.md`](docs/experiments/basic-raft-20260720.md)。
 
 严格重放已有运行时，默认从 `trace.json` 同目录读取 `config.json`：
@@ -108,8 +110,8 @@ go run ./cmd/modelfuzz-ng replay \
 ```
 
 Replay 会逐步检查逻辑时间、MessageID/Link/Position、Effect、节点快照和
-ObservationDigest，并在第一处差异停止。三条完整示例的实际重放分别匹配
-`6/6`、`6/6` 和 `9/9` 个步骤。
+ObservationDigest，并在第一处差异停止。四条完整示例的实际重放分别匹配
+`6/6`、`6/6`、`9/9` 和 `11/11` 个步骤。
 
 ## 验证
 

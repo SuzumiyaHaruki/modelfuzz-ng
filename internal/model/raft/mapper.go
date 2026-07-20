@@ -143,13 +143,11 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 			event := effect.ModelEvent
 			switch event.Name {
 			case deliveredMessageEvent:
-				mapped, err := m.mapDeliveredMessage(event.Params)
+				mapped, err := m.mapDeliveredMessage(event.Params, transition.Record.Effects)
 				if err != nil {
 					return nil, err
 				}
-				if mapped != nil {
-					events = append(events, *mapped)
-				}
+				events = append(events, mapped...)
 			case "raft.snapshot_applied", "raft.config_changed":
 				return nil, fmt.Errorf("%w: model event %s", ErrUnsupportedSemantics, event.Name)
 			case "raft.entry_committed":
@@ -181,7 +179,7 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 	return events, nil
 }
 
-func (m *Mapper) mapDeliveredMessage(params map[string]any) (*model.Event, error) {
+func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effect) ([]model.Event, error) {
 	messageType, ok := params["type"].(string)
 	if !ok || messageType == "" {
 		return nil, fmt.Errorf("%w: delivered message has no type", ErrUnsupportedSemantics)
@@ -203,24 +201,21 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any) (*model.Event, error
 		normalized["index"] = uint64(0)
 		normalized["log_term"] = uint64(0)
 		normalized["entries"] = []map[string]any{}
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	case "MsgVote":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "log_term", "index")
 		if err != nil {
 			return nil, err
 		}
 		normalized["type"] = messageType
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	case "MsgVoteResp":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "reject")
 		if err != nil {
 			return nil, err
 		}
 		normalized["type"] = messageType
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	case "MsgApp":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "commit", "log_term", "index")
 		if err != nil {
@@ -230,24 +225,72 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any) (*model.Event, error
 		if err != nil {
 			return nil, fmt.Errorf("%w: MsgApp: %v", ErrUnsupportedSemantics, err)
 		}
-		if len(entries) > 1 {
-			return nil, fmt.Errorf("%w: MsgApp contains %d entries; model supports at most one", ErrUnsupportedSemantics, len(entries))
+		baseIndex := normalized["index"].(uint64)
+		if uint64(len(entries)) > m.config.MaxLogIndex-baseIndex {
+			return nil, fmt.Errorf("%w: MsgApp entries exceed MaxLogIndex %d", ErrUnsupportedSemantics, m.config.MaxLogIndex)
 		}
 		normalized["type"] = messageType
-		normalized["entries"] = entries
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		if len(entries) <= 1 {
+			normalized["entries"] = entries
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
+
+		rejected, found, err := appendResponse(effects, normalized["to"].(uint64), normalized["from"].(uint64))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: multi-entry MsgApp has no matching MsgAppResp", ErrUnsupportedSemantics)
+		}
+		if rejected {
+			// 原子批次被拒绝时，第一条单 entry 动作已足以表达日志不匹配；继续
+			// 展开可能让后续 entry 在错误前缀上被模型单独接受。
+			normalized["entries"] = entries[:1]
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
+
+		// 当前 controlled TLC 的 RaftActionMapper 只接受单 entry。成功批次按
+		// 日志顺序展开为一组模型事件，保持最终日志和 commit 与原子处理一致。
+		// 这些中间模型状态只属于映射实现，不对应额外的 SUT Action。
+		result := make([]model.Event, len(entries))
+		previousTerm := normalized["log_term"].(uint64)
+		for index, entry := range entries {
+			projected := make(map[string]any, len(normalized)+1)
+			for key, value := range normalized {
+				projected[key] = value
+			}
+			projected["index"] = baseIndex + uint64(index)
+			projected["log_term"] = previousTerm
+			projected["entries"] = []map[string]any{entry}
+			result[index] = model.NewEvent("DeliverMessage", projected)
+			previousTerm = entry["Term"].(uint64)
+		}
+		return result, nil
 	case "MsgAppResp":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "reject", "index")
 		if err != nil {
 			return nil, err
 		}
 		normalized["type"] = messageType
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	default:
 		return nil, fmt.Errorf("%w: delivered message type %s", ErrUnsupportedSemantics, messageType)
 	}
+}
+
+func appendResponse(effects []core.Effect, from, to uint64) (rejected, found bool, err error) {
+	for _, effect := range effects {
+		if effect.Kind != core.EffectSendMessage || effect.Message == nil ||
+			effect.Message.TypeHint != "MsgAppResp" || uint64(effect.Message.From) != from || uint64(effect.Message.To) != to {
+			continue
+		}
+		value, parseErr := strconv.ParseBool(effect.Message.Metadata["reject"])
+		if parseErr != nil {
+			return false, false, fmt.Errorf("%w: MsgAppResp has invalid reject metadata", ErrUnsupportedSemantics)
+		}
+		return value, true, nil
+	}
+	return false, false, nil
 }
 
 func (m *Mapper) normalizeMessage(params map[string]any, names ...string) (map[string]any, error) {

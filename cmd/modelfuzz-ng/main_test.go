@@ -151,7 +151,7 @@ func TestLoadCLIConfigInheritsModelNodeIDs(t *testing.T) {
 	}
 }
 
-func TestRunCLIPersistsPartialResultOnMappingFailure(t *testing.T) {
+func TestRunCLIPersistsUnsupportedResultBeforeMutation(t *testing.T) {
 	temporary := t.TempDir()
 	planPath := filepath.Join(temporary, "crash.json")
 	outputPath := filepath.Join(temporary, "run")
@@ -173,7 +173,8 @@ func TestRunCLIPersistsPartialResultOnMappingFailure(t *testing.T) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != engine.StatusMappingFailed || len(result.Trace.Steps) != 1 {
+	if result.Status != engine.StatusUnsupported || len(result.Trace.Steps) != 0 ||
+		result.Final.Nodes[0].Status != core.NodeRunning {
 		t.Fatalf("partial result = %+v", result)
 	}
 }

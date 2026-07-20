@@ -22,6 +22,7 @@
 | `election-commit-node1` | 6 | 16 | 9 | 9 | n1 leader；n1/n2 log=1、commit=1 | 一致 |
 | `election-commit-node2` | 6 | 16 | 9 | 9 | n2 leader；n2/n3 log=1、commit=1 | 一致 |
 | `client-request-commit` | 9 | 22 | 13 | 12 | n1 leader；n1/n2 log=2、commit=2 | 一致 |
+| `follower-catchup-multi-entry` | 11 | 26 | 17 | 16 | n1 leader；n1/n2 log=4、commit=4 | 一致 |
 
 客户端请求实验的最终日志为：
 
@@ -32,6 +33,19 @@ n2: [(term=1,value=0), (term=1,value=1)]
 
 其中 value 0 是 leader no-op，value 1 是客户端请求。n1、n2 的真实
 `commit=applied=2`，TLC 中对应 `commitIndex=<<2,2,0>>`。
+
+多 entry 追赶实验先让 leader 连续接收值 `1`、`2`、`3`，但只向节点 2 投递
+no-op。节点 2 确认 no-op 后，真实 etcd-raft 生成一个包含三条客户端 entry 的
+`MsgApp(index=1, entry_count=3)`。Mapper 依据同一步真实
+`MsgAppResp(reject=false,index=4)`，把该批次依次映射为 index `1`、`2`、`3`
+的三条模型事件。最终真实节点 1/2 的日志均为：
+
+```text
+[(term=1,value=0), (term=1,value=1), (term=1,value=2), (term=1,value=3)]
+```
+
+真实状态为 `commit=applied=4`，TLC 为 `commitIndex=<<4,4,0>>`，leader、term、
+日志内容和 commit index 全部一致。
 
 TLC 状态数不保证恒等于“事件数+1”，因为服务端状态抽象可能合并连续重复状态。
 三个实验均返回 `status=completed`，没有发生解析降级、Runtime 错误、映射错误
@@ -46,6 +60,7 @@ TLC 状态数不保证恒等于“事件数+1”，因为服务端状态抽象�
 | `election-commit-node1` | 6/6 | completed |
 | `election-commit-node2` | 6/6 | completed |
 | `client-request-commit` | 9/9 | completed |
+| `follower-catchup-multi-entry` | 11/11 | completed |
 
 自动测试另外覆盖了 MessageID、Effect 和 ObservationDigest 篡改。三类篡改均在
 第一处差异返回 `trace replay diverged`，且消息身份不一致时不会执行该 Action。

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"strconv"
 	"testing"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/adapters/etcdraft"
@@ -103,7 +104,7 @@ func TestMapperMapsElectionPath(t *testing.T) {
 
 func TestMapperRejectsSemanticsOutsideLightweightModel(t *testing.T) {
 	mapper := raftmodel.NewMapper()
-	record := deliveredRecord("MsgSnap", nil)
+	record := deliveredRecord("MsgSnap", nil, false)
 	transition, err := model.TransitionFromRecord(record)
 	if err != nil {
 		t.Fatal(err)
@@ -111,21 +112,55 @@ func TestMapperRejectsSemanticsOutsideLightweightModel(t *testing.T) {
 	if _, err := mapper.Map(transition); !errors.Is(err, raftmodel.ErrUnsupportedSemantics) {
 		t.Fatalf("snapshot mapping error = %v, want ErrUnsupportedSemantics", err)
 	}
+}
 
-	record = deliveredRecord("MsgApp", []map[string]any{
+func TestMapperExpandsAcceptedMultiEntryAppendInLogOrder(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	record := deliveredRecord("MsgApp", []map[string]any{
 		{"Term": uint64(1), "Data": "1"},
-		{"Term": uint64(1), "Data": "2"},
-	})
-	transition, err = model.TransitionFromRecord(record)
+		{"Term": uint64(2), "Data": "2"},
+	}, false)
+	transition, err := model.TransitionFromRecord(record)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mapper.Map(transition); !errors.Is(err, raftmodel.ErrUnsupportedSemantics) {
-		t.Fatalf("multi-entry mapping error = %v, want ErrUnsupportedSemantics", err)
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "DeliverMessage", "DeliverMessage")
+	for i, event := range events {
+		if event.Params["index"] != uint64(i) {
+			t.Fatalf("event %d index = %v, want %d", i, event.Params["index"], i)
+		}
+		entries := event.Params["entries"].([]map[string]any)
+		if len(entries) != 1 || entries[0]["Data"] != string(rune('1'+i)) {
+			t.Fatalf("event %d entries = %+v", i, entries)
+		}
+	}
+	if events[0].Params["log_term"] != uint64(0) || events[1].Params["log_term"] != uint64(1) {
+		t.Fatalf("expanded log terms = %v, %v", events[0].Params["log_term"], events[1].Params["log_term"])
 	}
 }
 
-func deliveredRecord(messageType string, entries []map[string]any) core.StepRecord {
+func TestMapperDoesNotPartiallyAcceptRejectedMultiEntryAppend(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	record := deliveredRecord("MsgApp", []map[string]any{
+		{"Term": uint64(1), "Data": "1"},
+		{"Term": uint64(1), "Data": "2"},
+	}, true)
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "DeliverMessage")
+}
+
+func deliveredRecord(messageType string, entries []map[string]any, rejected bool) core.StepRecord {
 	params := map[string]any{
 		"type": messageType, "from": uint64(1), "to": uint64(2),
 		"term": uint64(1), "commit": uint64(0), "log_term": uint64(0),
@@ -139,7 +174,10 @@ func deliveredRecord(messageType string, entries []map[string]any) core.StepReco
 		{ID: 2, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
 		{ID: 3, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
 	}
-	message := core.Message{ID: 1, From: 1, To: 2, SenderEpoch: 1, Sequence: 1}
+	message := core.Message{
+		ID: 2, From: 2, To: 1, SenderEpoch: 1, Sequence: 1, TypeHint: "MsgAppResp",
+		Metadata: map[string]string{"reject": strconv.FormatBool(rejected)},
+	}
 	return core.StepRecord{
 		Action: core.Action{Kind: core.ActionDeliver, Message: 1, Selector: &core.MessageSelector{
 			Link: core.LinkID{From: 1, To: 2}, Position: 0,

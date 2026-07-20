@@ -25,8 +25,13 @@ Timeout
 - 模型处理 `MsgVote`、`MsgVoteResp`、`MsgApp`、`MsgAppResp`。`MsgHeartbeat`
   被显式抽象为无 entry 的 `MsgApp`，从而保留 term、角色降级和 commit 传播；
   当前配置下确实不改变模型状态的响应/只读消息被显式标记为 stutter。
-- 一次 `MsgApp` 当前只支持零条或一条 entry；多 entry、未知消息、snapshot、
-  membership change 等超出轻量模型表达能力的转换会返回错误，不会静默忽略。
+- controlled TLC 的旧 `RaftActionMapper` 一次只接受一条 entry。NG Mapper 会先
+  根据真实 `MsgAppResp` 判断原子批次是否成功：成功的多 entry `MsgApp` 按日志
+  顺序展开为多个单 entry 模型事件；被拒绝的批次只映射前缀不匹配动作，避免
+  后续 entry 被模型错误接受。展开产生的中间状态只存在于模型侧，不对应额外
+  的 SUT Action。
+- 未知消息、snapshot、membership change 等超出轻量模型表达能力的转换会返回
+  错误，不会静默忽略。
 - 首版尚未建模 crash/restart、snapshot、membership change 和 PreVote；Mapper
   会明确拒绝当前模型不支持的 crash/restart 转换。
 

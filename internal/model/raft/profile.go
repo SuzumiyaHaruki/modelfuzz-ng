@@ -47,8 +47,12 @@ func (m *Mapper) ValidateAction(action core.Action, observation core.Observation
 			if err != nil || count < 0 {
 				return model.Unsupported(action, "MsgApp has no valid entry_count metadata")
 			}
-			if count > 1 {
-				return model.Unsupported(action, fmt.Sprintf("MsgApp contains %d entries; profile supports at most one", count))
+			index, err := strconv.ParseUint(message.Metadata["index"], 10, 64)
+			if err != nil || index > m.config.MaxLogIndex || uint64(count) > m.config.MaxLogIndex-index {
+				return model.Unsupported(action, fmt.Sprintf(
+					"MsgApp index %q plus %d entries exceeds MaxLogIndex %d",
+					message.Metadata["index"], count, m.config.MaxLogIndex,
+				))
 			}
 		default:
 			return model.Unsupported(action, "message type "+message.TypeHint+" is not represented")

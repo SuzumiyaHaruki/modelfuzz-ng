@@ -10,7 +10,7 @@ import (
 
 func TestProfileClassifiesBasicActions(t *testing.T) {
 	mapper := NewMapper()
-	observation := profileObservation("MsgVote", "0")
+	observation := profileObservation("MsgVote", "0", "0")
 	tests := []struct {
 		name      string
 		action    core.Action
@@ -32,16 +32,18 @@ func TestProfileClassifiesBasicActions(t *testing.T) {
 	}
 }
 
-func TestProfileRejectsUnsupportedAndMultiEntryMessages(t *testing.T) {
+func TestProfileRejectsUnsupportedAndOutOfBoundsMessages(t *testing.T) {
 	mapper := NewMapper()
 	for _, test := range []struct {
-		kind, count string
+		kind, count, index string
 	}{
-		{kind: "MsgSnap", count: "0"},
-		{kind: "MsgApp", count: "2"},
-		{kind: "MsgApp", count: "invalid"},
+		{kind: "MsgSnap", count: "0", index: "0"},
+		{kind: "MsgApp", count: "6", index: "0"},
+		{kind: "MsgApp", count: "invalid", index: "0"},
+		{kind: "MsgApp", count: "2", index: "4"},
+		{kind: "MsgApp", count: "1", index: "invalid"},
 	} {
-		observation := profileObservation(test.kind, test.count)
+		observation := profileObservation(test.kind, test.count, test.index)
 		err := mapper.ValidateAction(messageAction(core.ActionDeliver), observation)
 		if !errors.Is(err, model.ErrUnsupportedByProfile) {
 			t.Fatalf("%s/%s error = %v", test.kind, test.count, err)
@@ -49,7 +51,14 @@ func TestProfileRejectsUnsupportedAndMultiEntryMessages(t *testing.T) {
 	}
 }
 
-func profileObservation(kind, entryCount string) core.Observation {
+func TestProfileAcceptsBoundedMultiEntryAppend(t *testing.T) {
+	mapper := NewMapper()
+	if err := mapper.ValidateAction(messageAction(core.ActionDeliver), profileObservation("MsgApp", "3", "1")); err != nil {
+		t.Fatalf("bounded multi-entry append should be supported: %v", err)
+	}
+}
+
+func profileObservation(kind, entryCount, index string) core.Observation {
 	return core.Observation{
 		Nodes: []core.NodeObservation{
 			{ID: 1, Epoch: 1, Status: core.NodeRunning, Semantic: map[string]any{"role": "leader", "term": uint64(1), "last_index": uint64(0)}},
@@ -58,7 +67,7 @@ func profileObservation(kind, entryCount string) core.Observation {
 		},
 		Messages: []core.MessageObservation{{
 			ID: 1, From: 1, To: 2, SenderEpoch: 1, LinkSequence: 1,
-			TypeHint: kind, Metadata: map[string]string{"entry_count": entryCount},
+			TypeHint: kind, Metadata: map[string]string{"entry_count": entryCount, "index": index},
 		}},
 	}
 }
