@@ -7,10 +7,12 @@ Oracle 在每个真实 Raft Concrete Action 完成后检查：
 - 同一节点、同一 epoch 内 term、commit 和 applied 不得回退；
 - `applied <= commit <= last_index`；
 - 一条执行历史中，同一 term 不能出现两个不同 leader；
-- 当两个节点都满足 `applied=commit=last_index>0` 时，完整日志摘要必须一致。
+- 任意两个具有完整前缀的节点，在 `min(commitA, commitB)` 处的日志摘要必须一致；
+- 声明 committed-prefix 可用的节点，必须提供 Oracle 当前需要的比较检查点。
 
-最后一项只比较“整段日志均已提交”的节点。当前 Observation 没有 committed
-prefix 摘要，若节点还存在未提交尾部，完整日志摘要不同是合法状态，不能误报。
+Oracle 不再直接比较包含未提交尾部的 `log_digest`。Adapter 从完整持久日志前缀
+生成累积摘要，Observation 只暴露当前集群 commit 索引形成的有限检查点。
+这样既能检查 commit 进度不同的节点，又不会因合法的未提交尾部产生误报。
 
 ## 正向端到端实验
 
@@ -33,9 +35,10 @@ follower 追赶误判为违规。
 - term 和 commit 回退；
 - applied 大于 commit；
 - leader 退出后，同一 term 的另一个节点再次成为 leader；
-- 两个节点在相同 applied index 上具有不同的全提交日志摘要。
+- 两个节点在共同 committed index 上具有不同的前缀摘要；
+- 节点声明 committed-prefix 可用，但缺少必需的索引摘要。
 
-四类违规均被预期的稳定 code 捕获。另有反例测试：当一个节点存在未提交日志
+上述违规均被预期的稳定 code 捕获。另有反例测试：当一个节点存在未提交日志
 尾部时，即使完整日志摘要不同也不报告冲突。Engine 集成测试注入一个失败
 Oracle，确认违规步骤的 Action、Trace、模型事件和 `step=1` Finding 均已保存，
 且不会继续调用 TLC。

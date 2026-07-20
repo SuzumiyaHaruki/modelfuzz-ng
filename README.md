@@ -60,7 +60,11 @@ java -cp 'class:lib/*:lib/gson/*' tlc2.TLCServer \
 ```
 
 每次运行必须使用一个尚不存在的输出目录，CLI 不会覆盖旧轨迹。目录中包含
-解析结果、Concrete Action、Trace、模型事件、模型状态、Oracle Finding 以及汇总结果。当前轻量
+解析结果、Concrete Action、Trace、模型事件、模型状态、Oracle Finding、`failure.json`
+以及汇总结果。成功时 `failure.json` 为 `null`；同步 Adapter/SUT 调用发生
+panic 时，其中保存失败操作、逻辑时间、失败 Action、执行前 Observation、panic 值
+和 goroutine 堆栈。失败 Action 不会被写成虚假的完整 Step，已成功的 Trace 前缀仍会持久化。
+当前轻量
 Raft 模型还不支持 crash/restart、snapshot 和 membership change；Profile 会在
 修改真实 SUT 前拒绝可提前判断的不支持动作。
 
@@ -79,6 +83,12 @@ Raft 模型还不支持 crash/restart、snapshot 和 membership change；Profile
 | crash/restart | 支持 | 不支持 | Engine 在修改真实节点前返回 `unsupported_by_model` |
 | snapshot/membership change | Adapter 有部分处理 | 不支持 | 需要扩展独立模型 Profile |
 | PreVote/CheckQuorum | 当前关闭 | 不支持 | 启用 Raft 配置前必须先补模型 |
+
+Raft Observation 额外暴露 `committed_prefix_available` 和
+`committed_prefix_digests`。摘要以确定性 protobuf 编码计算，并只携带当前集群
+commit 索引所需的检查点，避免长日志在每个 Observation 中全量展开。基础
+Raft Oracle 因此可以比较两节点 `min(commitA, commitB)` 处的共同已提交前缀，
+不再受未提交尾部影响，也会检查 crashed 节点保留的稳定日志。
 
 消息分类：
 
@@ -105,6 +115,8 @@ Raft 模型还不支持 crash/restart、snapshot 和 membership change；Profile
 [`docs/experiments/basic-raft-20260720.md`](docs/experiments/basic-raft-20260720.md)。
 四条 Plan 的基础 Raft Oracle 检查及故障注入结果见
 [`docs/experiments/raft-oracle-20260720.md`](docs/experiments/raft-oracle-20260720.md)。
+panic 捕获、committed-prefix 和轨迹兼容性实验见
+[`docs/experiments/panic-prefix-20260720.md`](docs/experiments/panic-prefix-20260720.md)。
 
 严格重放已有运行时，默认从 `trace.json` 同目录读取 `config.json`：
 
@@ -115,7 +127,8 @@ go run ./cmd/modelfuzz-ng replay \
 ```
 
 Replay 会逐步检查逻辑时间、MessageID/Link/Position、Effect、节点快照和
-ObservationDigest，并在第一处差异停止。四条完整示例的实际重放分别匹配
+ObservationDigest，并在第一处差异停止。当前 Trace 版本为 v4；Replay 会在比较时
+移除新增的 committed-prefix 观测字段，因此仍能重放 v2/v3 轨迹。四条完整示例的实际重放分别匹配
 `6/6`、`6/6`、`9/9` 和 `11/11` 个步骤。
 
 运行在线随机策略的批量实验：

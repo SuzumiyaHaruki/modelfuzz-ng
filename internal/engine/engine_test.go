@@ -14,6 +14,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/oracle"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/sut"
 	raft "go.etcd.io/raft/v3"
 )
 
@@ -28,6 +29,14 @@ type rejectingOracle struct{}
 
 type adaptiveSource struct {
 	step int
+}
+
+type tickPanicAdapter struct {
+	sut.Adapter
+}
+
+func (a *tickPanicAdapter) Tick(context.Context, core.LogicalTime) ([]core.Effect, error) {
+	panic("engine tick exploded")
 }
 
 func (s *adaptiveSource) Reset(initial core.Observation) error {
@@ -214,6 +223,48 @@ func TestEnginePersistsViolatingStepAndStopsBeforeModelExecution(t *testing.T) {
 	}
 	if len(result.OracleFindings) != 1 || result.OracleFindings[0].Step != 1 || executor.calls != 0 {
 		t.Fatalf("oracle findings/executor = %+v/%d", result.OracleFindings, executor.calls)
+	}
+}
+
+func TestEngineReturnsStructuredSUTPanicFailureAndPartialTrace(t *testing.T) {
+	adapterConfig := etcdraft.DefaultConfig()
+	adapterConfig.ElectionTick = 100
+	adapterConfig.Logger = &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)}
+	base, err := etcdraft.New(adapterConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimepkg.New(&tickPanicAdapter{Adapter: base}, runtimepkg.Config{
+		ExecutionID: "engine-panic", Seed: 42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := plan.NewResolver(plan.DefaultResolverConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapper, err := raftmodel.NewMapperWithConfig(raftmodel.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := New(runtime, resolver, mapper, nil, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runner.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{{
+		Kind: plan.ActionAdvanceTicks, Ticks: 1,
+	}}})
+	if !errors.Is(err, runtimepkg.ErrSUTPanic) || result.Status != StatusRuntimeFailed {
+		t.Fatalf("result/error = %+v/%v", result, err)
+	}
+	if result.Failure == nil || result.Failure.Kind != core.FailureSUTPanic ||
+		result.Failure.Operation != "tick" || result.Failure.PanicValue != "engine tick exploded" {
+		t.Fatalf("structured failure = %+v", result.Failure)
+	}
+	if len(result.Trace.Steps) != 0 || len(result.Actions.Actions) != 0 || len(result.Resolutions) != 1 {
+		t.Fatalf("partial execution was not preserved: %+v", result)
 	}
 }
 

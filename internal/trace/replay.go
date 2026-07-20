@@ -3,6 +3,7 @@ package trace
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,8 +90,10 @@ func (r *Replayer) Replay(ctx context.Context, expected core.Trace) (Result, err
 		if expectedStep.TimeBefore != r.runtime.Time() {
 			return r.diverged(result, stepIndex, "time_before", expectedStep.TimeBefore, r.runtime.Time(), "逻辑时间不一致")
 		}
-		if equal, err := equalJSON(expectedStep.NodesBefore, observation.Nodes); err != nil || !equal {
-			return r.diverged(result, stepIndex, "nodes_before", expectedStep.NodesBefore, observation.Nodes, comparisonReason(err))
+		expectedBefore := compatibleNodes(expectedStep.NodesBefore, expected.Version)
+		actualBefore := compatibleNodes(observation.Nodes, expected.Version)
+		if equal, err := equalJSON(expectedBefore, actualBefore); err != nil || !equal {
+			return r.diverged(result, stepIndex, "nodes_before", expectedBefore, actualBefore, comparisonReason(err))
 		}
 
 		step, err := r.runtime.Execute(ctx, expectedStep.Action)
@@ -105,9 +108,9 @@ func (r *Replayer) Replay(ctx context.Context, expected core.Trace) (Result, err
 			{field: "time_after", expected: expectedStep.TimeAfter, got: step.Record.TimeAfter},
 			{field: "action", expected: expectedStep.Action, got: step.Record.Action},
 			{field: "effects", expected: expectedStep.Effects, got: step.Record.Effects},
-			{field: "nodes_after", expected: expectedStep.NodesAfter, got: step.Record.NodesAfter},
+			{field: "nodes_after", expected: compatibleNodes(expectedStep.NodesAfter, expected.Version), got: compatibleNodes(step.Record.NodesAfter, expected.Version)},
 		}
-		if expected.Version >= 3 {
+		if expected.Version >= 4 {
 			comparisons = append(comparisons, struct {
 				field         string
 				expected, got any
@@ -127,6 +130,28 @@ func (r *Replayer) Replay(ctx context.Context, expected core.Trace) (Result, err
 	result.Actual, _ = r.runtime.Trace()
 	result.Status = StatusCompleted
 	return result, nil
+}
+
+// compatibleNodes 在重放旧版轨迹时移除后来才加入节点语义的字段。
+// 节点 Digest 也由 Semantic 生成，因此要同步恢复为旧版摘要才能严格比较。
+func compatibleNodes(nodes []core.NodeObservation, version uint32) []core.NodeObservation {
+	result := make([]core.NodeObservation, len(nodes))
+	for index, node := range nodes {
+		result[index] = node.Copy()
+		if version >= 4 || result[index].Semantic == nil {
+			continue
+		}
+		if _, exists := result[index].Semantic["committed_prefix_available"]; !exists {
+			continue
+		}
+		delete(result[index].Semantic, "committed_prefix_available")
+		delete(result[index].Semantic, "committed_prefix_digests")
+		data, err := json.Marshal(result[index].Semantic)
+		if err == nil {
+			result[index].Digest = fmt.Sprintf("%x", sha256.Sum256(data))
+		}
+	}
+	return result
 }
 
 func (r *Replayer) diverged(result Result, step uint64, field string, expected, actual any, reason string) (Result, error) {

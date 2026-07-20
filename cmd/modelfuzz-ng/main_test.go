@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,7 +60,7 @@ func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
 
 	for _, name := range []string{
 		"config.json", "plan.json", "resolutions.json", "actions.json",
-		"trace.json", "model-events.json", "model-states.json", "oracle-findings.json", "result.json",
+		"trace.json", "model-events.json", "model-states.json", "oracle-findings.json", "failure.json", "result.json",
 	} {
 		if _, err := os.Stat(filepath.Join(outputPath, name)); err != nil {
 			t.Errorf("artifact %s: %v", name, err)
@@ -116,11 +117,15 @@ func TestCompleteExamplePlans(t *testing.T) {
 			if result.Status != engine.StatusCompleted {
 				t.Fatalf("result status = %s", result.Status)
 			}
+			if result.Failure != nil || result.Trace.Version != core.CurrentTraceVersion {
+				t.Fatalf("successful run failure/version = %+v/%d", result.Failure, result.Trace.Version)
+			}
 			for _, resolution := range result.Resolutions {
 				if resolution.Status != plan.ResolutionResolved {
 					t.Fatalf("resolution = %+v, want resolved", resolution)
 				}
 			}
+			committedDigest := ""
 			for _, id := range test.committed {
 				node := observedNode(t, result.Final, id)
 				if semanticUint64(t, node, "commit") != test.lastIndex ||
@@ -128,6 +133,22 @@ func TestCompleteExamplePlans(t *testing.T) {
 					semanticUint64(t, node, "last_index") != test.lastIndex {
 					t.Fatalf("node %s final semantic = %+v", id, node.Semantic)
 				}
+				if available, _ := node.Semantic["committed_prefix_available"].(bool); !available {
+					t.Fatalf("node %s committed prefix is unavailable", id)
+				}
+				prefixes, ok := node.Semantic["committed_prefix_digests"].(map[string]any)
+				if !ok {
+					t.Fatalf("node %s committed prefixes = %T(%v)", id,
+						node.Semantic["committed_prefix_digests"], node.Semantic["committed_prefix_digests"])
+				}
+				digest, _ := prefixes[strconv.FormatUint(test.lastIndex, 10)].(string)
+				if digest == "" {
+					t.Fatalf("node %s does not expose commit checkpoint %d: %v", id, test.lastIndex, prefixes)
+				}
+				if committedDigest != "" && digest != committedDigest {
+					t.Fatalf("committed prefix conflict at %d: %q != %q", test.lastIndex, digest, committedDigest)
+				}
+				committedDigest = digest
 			}
 		})
 	}
@@ -158,7 +179,7 @@ func TestExperimentCLIRunsIndependentRandomTraces(t *testing.T) {
 	}
 	for index, run := range report.Runs {
 		directory := filepath.Join(output, fmt.Sprintf("run-%04d-seed-%d", index, run.Seed))
-		for _, name := range []string{"plan.json", "trace.json", "result.json", "oracle-findings.json"} {
+		for _, name := range []string{"plan.json", "trace.json", "result.json", "oracle-findings.json", "failure.json"} {
 			if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
 				t.Fatalf("run %d artifact %s: %v", index, name, err)
 			}
@@ -267,6 +288,50 @@ func TestCreateOutputDirectoryRefusesOverwrite(t *testing.T) {
 	}
 	if err := createOutputDirectory(path); err == nil {
 		t.Fatal("existing output directory was accepted")
+	}
+}
+
+func TestWriteArtifactsPersistsStructuredFailure(t *testing.T) {
+	directory := t.TempDir()
+	action := core.Action{Kind: core.ActionAdvanceTime, TargetTime: 1}
+	result := engine.Result{
+		Status: engine.StatusRuntimeFailed,
+		Failure: &core.FailureRecord{
+			Kind: core.FailureSUTPanic, Operation: "tick", Time: 1, Action: &action,
+			Error: "adapter operation failed: tick panicked", PanicValue: "boom",
+			Stack: "goroutine 1 [running]",
+			ObservationBefore: core.Observation{Nodes: []core.NodeObservation{{
+				ID: 1, Epoch: 1, Status: core.NodeRunning,
+			}}},
+		},
+	}
+	if err := writeArtifacts(directory, defaultCLIConfig(), plan.PlanSequence{}, result); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(directory, "failure.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted core.FailureRecord
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Kind != core.FailureSUTPanic || persisted.Operation != "tick" ||
+		persisted.Action == nil || persisted.Action.TargetTime != 1 || persisted.Stack == "" {
+		t.Fatalf("persisted failure = %+v", persisted)
+	}
+
+	data, err = os.ReadFile(filepath.Join(directory, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedResult engine.Result
+	if err := json.Unmarshal(data, &persistedResult); err != nil {
+		t.Fatal(err)
+	}
+	if persistedResult.Failure == nil || persistedResult.Failure.PanicValue != "boom" {
+		t.Fatalf("result did not embed failure: %+v", persistedResult.Failure)
 	}
 }
 

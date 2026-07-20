@@ -37,6 +37,7 @@ type Result struct {
 	ModelEvents     []model.Event       `json:"model_events"`
 	ModelStates     []model.State       `json:"model_states"`
 	OracleFindings  []oracle.Finding    `json:"oracle_findings"`
+	Failure         *core.FailureRecord `json:"failure,omitempty"`
 	Initial         core.Observation    `json:"initial_observation"`
 	Final           core.Observation    `json:"final_observation"`
 }

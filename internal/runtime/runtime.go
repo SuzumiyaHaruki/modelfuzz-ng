@@ -20,6 +20,7 @@ var (
 	ErrMessageUnavailable = errors.New("message is unavailable")
 	ErrAdapter            = errors.New("adapter operation failed")
 	ErrAdapterContract    = errors.New("adapter contract violation")
+	ErrSUTPanic           = errors.New("SUT adapter panicked")
 	ErrIDExhausted        = errors.New("runtime ID exhausted")
 	ErrBudgetExceeded     = errors.New("runtime budget exceeded")
 )
@@ -75,6 +76,7 @@ type Runtime struct {
 	effectCount uint64
 	initialized bool
 	terminated  bool
+	failure     *core.FailureRecord
 }
 
 func New(adapter sut.Adapter, config Config) (*Runtime, error) {
@@ -93,13 +95,6 @@ func New(adapter sut.Adapter, config Config) (*Runtime, error) {
 
 // Reset 开始一次全新执行。Reset 不产生 Effect，初始状态以 Observation 返回。
 func (r *Runtime) Reset(ctx context.Context) (core.Observation, error) {
-	if err := r.adapter.Reset(ctx, sut.ResetOptions{Seed: r.config.Seed}); err != nil {
-		if r.initialized {
-			r.terminated = true
-		}
-		return core.Observation{}, fmt.Errorf("%w: reset: %v", ErrAdapter, err)
-	}
-
 	r.network.reset()
 	r.time = 0
 	r.trace = core.NewTrace(r.config.ExecutionID, r.config.Seed)
@@ -108,10 +103,22 @@ func (r *Runtime) Reset(ctx context.Context) (core.Observation, error) {
 	r.effectCount = 0
 	r.initialized = true
 	r.terminated = false
+	r.failure = nil
+
+	_, err := callSUT("reset", func() (struct{}, error) {
+		return struct{}{}, r.adapter.Reset(ctx, sut.ResetOptions{Seed: r.config.Seed})
+	})
+	if err != nil {
+		r.terminated = true
+		wrapped := fmt.Errorf("%w: reset: %w", ErrAdapter, err)
+		r.recordFailure("reset", nil, core.Observation{}, wrapped)
+		return core.Observation{}, wrapped
+	}
 
 	observation, err := r.collectObservation(ctx)
 	if err != nil {
-		r.initialized = false
+		r.terminated = true
+		r.recordFailure("observe", nil, core.Observation{}, err)
 		return core.Observation{}, err
 	}
 	r.observation = observation.Copy()
@@ -139,11 +146,22 @@ func (r *Runtime) Trace() (core.Trace, error) {
 	return r.trace.Copy(), nil
 }
 
+// Failure 返回当前执行的失败边界记录；没有失败时返回 nil。
+func (r *Runtime) Failure() *core.FailureRecord {
+	if r == nil || r.failure == nil {
+		return nil
+	}
+	copy := r.failure.Copy()
+	return &copy
+}
+
 // collectObservation 调用 Adapter.Observe 并将 Runtime 的网络状态和上次执行的 Action 注入到 Observation 中。
 func (r *Runtime) collectObservation(ctx context.Context) (core.Observation, error) {
-	observation, err := r.adapter.Observe(ctx, r.time)
+	observation, err := callSUT("observe", func() (core.Observation, error) {
+		return r.adapter.Observe(ctx, r.time)
+	})
 	if err != nil {
-		return core.Observation{}, fmt.Errorf("%w: observe: %v", ErrAdapter, err)
+		return core.Observation{}, fmt.Errorf("%w: observe: %w", ErrAdapter, err)
 	}
 	if observation.Time != r.time {
 		return core.Observation{}, fmt.Errorf(

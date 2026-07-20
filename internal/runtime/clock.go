@@ -22,9 +22,11 @@ func (r *Runtime) advanceTime(ctx context.Context, target core.LogicalTime) ([]c
 			return nil, err
 		}
 		r.time++
-		current, err := r.adapter.Tick(ctx, r.time)
+		current, err := callSUT("tick", func() ([]core.Effect, error) {
+			return r.adapter.Tick(ctx, r.time)
+		})
 		if err != nil {
-			return nil, fmt.Errorf("%w: tick at %d: %v", ErrAdapter, r.time, err)
+			return nil, fmt.Errorf("%w: tick at %d: %w", ErrAdapter, r.time, err)
 		}
 		concrete, err := r.processAdapterEffects(current, r.time)
 		if err != nil {

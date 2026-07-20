@@ -107,11 +107,12 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 
 	observation, err := e.runtime.Reset(ctx)
 	if err != nil {
+		e.capture(&result, core.Observation{})
 		status := StatusRuntimeFailed
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			status = StatusCanceled
 		}
-		return fail(result, status, fmt.Errorf("%w: reset: %v", ErrRuntime, err))
+		return fail(result, status, fmt.Errorf("%w: reset: %w", ErrRuntime, err))
 	}
 	result.Initial = observation.Copy()
 	result.Final = observation.Copy()
@@ -184,7 +185,7 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 					status = StatusCanceled
 				}
 				return fail(result, status, fmt.Errorf(
-					"%w: plan action %d concrete action %d: %v", ErrRuntime, planIndex, actionIndex, err,
+					"%w: plan action %d concrete action %d: %w", ErrRuntime, planIndex, actionIndex, err,
 				))
 			}
 			observation = step.Observation.Copy()
@@ -278,6 +279,7 @@ func (e *Engine) capture(result *Result, observation core.Observation) {
 	if trace, err := e.runtime.Trace(); err == nil {
 		result.Trace = trace
 	}
+	result.Failure = e.runtime.Failure()
 }
 
 func fail(result Result, status Status, err error) (Result, error) {

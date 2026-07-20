@@ -4,6 +4,7 @@ package raft
 import (
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
@@ -45,13 +46,20 @@ func (c *Checker) Check(transition model.Transition) []oracle.Finding {
 
 func (c *Checker) checkObservation(observation core.Observation) []oracle.Finding {
 	findings := make([]oracle.Finding, 0)
-	committedLogs := make(map[uint64]map[string]core.NodeID)
+	committedLogs := make([]committedNode, 0, len(observation.Nodes))
 	for _, node := range observation.Nodes {
-		if node.Status != core.NodeRunning {
-			continue
+		commit, commitOK := unsigned(node.Semantic["commit"])
+		if available, _ := node.Semantic["committed_prefix_available"].(bool); commitOK && available {
+			digests := prefixDigestMap(node.Semantic["committed_prefix_digests"])
+			if commit > 0 {
+				if _, exists := digests[commit]; !exists {
+					findings = append(findings, finding("committed_prefix_incomplete", node.ID, 0,
+						fmt.Sprintf("node %s does not expose its committed prefix digest at index %d", node.ID, commit)))
+				}
+			}
+			committedLogs = append(committedLogs, committedNode{id: node.ID, commit: commit, digests: digests})
 		}
 		term, termOK := unsigned(node.Semantic["term"])
-		commit, commitOK := unsigned(node.Semantic["commit"])
 		applied, appliedOK := unsigned(node.Semantic["applied"])
 		lastIndex, indexOK := unsigned(node.Semantic["last_index"])
 		if commitOK && appliedOK && applied > commit {
@@ -61,6 +69,9 @@ func (c *Checker) checkObservation(observation core.Observation) []oracle.Findin
 		if commitOK && indexOK && commit > lastIndex {
 			findings = append(findings, finding("commit_exceeds_log", node.ID, term,
 				fmt.Sprintf("node %s commit=%d exceeds last_index=%d", node.ID, commit, lastIndex)))
+		}
+		if node.Status != core.NodeRunning {
+			continue
 		}
 
 		role, _ := node.Semantic["role"].(string)
@@ -72,39 +83,63 @@ func (c *Checker) checkObservation(observation core.Observation) []oracle.Findin
 				c.leadersByTerm[term] = node.ID
 			}
 		}
+	}
 
-		// 当前 Observation 只有整段日志摘要，无法直接比较任意 committed prefix。
-		// 仅当 applied=commit=last_index 时，整个摘要才严格代表已提交日志。
-		if appliedOK && commitOK && indexOK && applied > 0 && applied == commit && commit == lastIndex {
-			digest, _ := node.Semantic["log_digest"].(string)
-			if digest != "" {
-				if committedLogs[applied] == nil {
-					committedLogs[applied] = make(map[string]core.NodeID)
+	sort.Slice(committedLogs, func(i, j int) bool { return committedLogs[i].id < committedLogs[j].id })
+	for left := 0; left < len(committedLogs); left++ {
+		for right := left + 1; right < len(committedLogs); right++ {
+			common := committedLogs[left].commit
+			if committedLogs[right].commit < common {
+				common = committedLogs[right].commit
+			}
+			if common == 0 {
+				continue
+			}
+			leftDigest, leftOK := committedLogs[left].digests[common]
+			rightDigest, rightOK := committedLogs[right].digests[common]
+			if !leftOK || !rightOK {
+				missing := committedLogs[left].id
+				if leftOK {
+					missing = committedLogs[right].id
 				}
-				committedLogs[applied][digest] = node.ID
+				findings = append(findings, finding("committed_prefix_incomplete", missing, 0,
+					fmt.Sprintf("node %s does not expose committed prefix digest at comparison index %d", missing, common)))
+				continue
+			}
+			if leftDigest != rightDigest {
+				findings = append(findings, finding("committed_log_conflict", committedLogs[right].id, 0,
+					fmt.Sprintf("nodes %s and %s have different committed log prefixes through index %d",
+						committedLogs[left].id, committedLogs[right].id, common)))
 			}
 		}
 	}
-
-	indexes := make([]uint64, 0, len(committedLogs))
-	for index := range committedLogs {
-		indexes = append(indexes, index)
-	}
-	sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
-	for _, index := range indexes {
-		digests := committedLogs[index]
-		if len(digests) <= 1 {
-			continue
-		}
-		nodes := make([]core.NodeID, 0, len(digests))
-		for _, node := range digests {
-			nodes = append(nodes, node)
-		}
-		sort.Slice(nodes, func(i, j int) bool { return nodes[i] < nodes[j] })
-		findings = append(findings, finding("committed_log_conflict", nodes[0], 0,
-			fmt.Sprintf("nodes with applied index %d have different fully committed log digests", index)))
-	}
 	return findings
+}
+
+type committedNode struct {
+	id      core.NodeID
+	commit  uint64
+	digests map[uint64]string
+}
+
+func prefixDigestMap(value any) map[uint64]string {
+	result := make(map[uint64]string)
+	switch values := value.(type) {
+	case map[string]string:
+		for index, digest := range values {
+			if parsed, err := strconv.ParseUint(index, 10, 64); err == nil && digest != "" {
+				result[parsed] = digest
+			}
+		}
+	case map[string]any:
+		for index, rawDigest := range values {
+			digest, ok := rawDigest.(string)
+			if parsed, err := strconv.ParseUint(index, 10, 64); err == nil && ok && digest != "" {
+				result[parsed] = digest
+			}
+		}
+	}
+	return result
 }
 
 func monotonicFindings(before, after core.NodeObservation) []oracle.Finding {

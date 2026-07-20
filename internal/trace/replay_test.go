@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -81,16 +82,22 @@ func TestReplayFindsTamperedEffectAndDigest(t *testing.T) {
 	}
 }
 
-func TestReplayVersionTwoSkipsLegacyObservationDigest(t *testing.T) {
-	expected := produceElectionTrace(t)
-	expected.Version = 2
-	for index := range expected.Steps {
-		expected.Steps[index].ObservationDigest = "legacy-digest"
-	}
-	replayer, _ := NewReplayer(newRuntime(t, expected.ExecutionID, expected.Seed))
-	result, err := replayer.Replay(context.Background(), expected)
-	if err != nil || result.Status != StatusCompleted {
-		t.Fatalf("v2 replay result/error = %+v/%v", result, err)
+func TestReplayLegacyVersionsSkipLegacyObservationDigest(t *testing.T) {
+	for _, version := range []uint32{2, 3} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			expected := produceElectionTrace(t)
+			expected.Version = version
+			for index := range expected.Steps {
+				expected.Steps[index].ObservationDigest = "legacy-digest"
+				expected.Steps[index].NodesBefore = compatibleNodes(expected.Steps[index].NodesBefore, version)
+				expected.Steps[index].NodesAfter = compatibleNodes(expected.Steps[index].NodesAfter, version)
+			}
+			replayer, _ := NewReplayer(newRuntime(t, expected.ExecutionID, expected.Seed))
+			result, err := replayer.Replay(context.Background(), expected)
+			if err != nil || result.Status != StatusCompleted {
+				t.Fatalf("v%d replay result/error = %+v/%v", version, result, err)
+			}
+		})
 	}
 }
 

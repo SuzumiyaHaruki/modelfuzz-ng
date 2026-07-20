@@ -48,13 +48,27 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 				"log_digest": n.logDigest,
 			}
 		}
-		digest, err := semanticDigest(semantic)
-		if err != nil {
-			return core.Observation{}, fmt.Errorf("digest node %s observation: %w", id, err)
-		}
 		nodes = append(nodes, core.NodeObservation{
-			ID: id, Epoch: n.epoch, Status: status, Digest: digest, Semantic: semantic,
+			ID: id, Epoch: n.epoch, Status: status, Semantic: semantic,
 		})
+	}
+
+	// 两个节点需比较的索引一定是它们当前 commit 的较小值，因此只需
+	// 暴露当前集群中出现的 commit 索引，无需把 1..commit 全部写入轨迹。
+	checkpoints := committedCheckpoints(nodes)
+	for index := range nodes {
+		n := a.nodes[nodes[index].ID]
+		commit, _ := nodes[index].Semantic["commit"].(uint64)
+		prefixes, available := n.committedPrefixDigests(commit, checkpoints)
+		nodes[index].Semantic["committed_prefix_available"] = available
+		if available {
+			nodes[index].Semantic["committed_prefix_digests"] = prefixes
+		}
+		digest, err := semanticDigest(nodes[index].Semantic)
+		if err != nil {
+			return core.Observation{}, fmt.Errorf("digest node %s observation: %w", nodes[index].ID, err)
+		}
+		nodes[index].Digest = digest
 	}
 	return core.Observation{
 		Time:  at,
@@ -65,6 +79,23 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 			"running_nodes": running,
 		},
 	}, nil
+}
+
+func committedCheckpoints(nodes []core.NodeObservation) []uint64 {
+	seen := make(map[uint64]struct{})
+	result := make([]uint64, 0, len(nodes))
+	for _, node := range nodes {
+		commit, _ := node.Semantic["commit"].(uint64)
+		if commit == 0 {
+			continue
+		}
+		if _, exists := seen[commit]; exists {
+			continue
+		}
+		seen[commit] = struct{}{}
+		result = append(result, commit)
+	}
+	return result
 }
 
 func semanticDigest(value any) (string, error) {

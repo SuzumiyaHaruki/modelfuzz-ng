@@ -3,8 +3,10 @@ package etcdraft
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"reflect"
 	"testing"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
@@ -123,6 +125,14 @@ func TestAdapterSingleNodeCommitCrashAndRestart(t *testing.T) {
 	applied := request.Observation.Nodes[0].Semantic["applied"]
 	lastIndex := request.Observation.Nodes[0].Semantic["last_index"]
 	logDigest := request.Observation.Nodes[0].Semantic["log_digest"]
+	prefixes, ok := request.Observation.Nodes[0].Semantic["committed_prefix_digests"].(map[string]string)
+	if !ok || request.Observation.Nodes[0].Semantic["committed_prefix_available"] != true {
+		t.Fatalf("committed prefix is unavailable: %+v", request.Observation.Nodes[0].Semantic)
+	}
+	commit := request.Observation.Nodes[0].Semantic["commit"].(uint64)
+	if commit == 0 || prefixes[fmt.Sprint(commit)] == "" {
+		t.Fatalf("committed prefix does not cover commit=%d: %+v", commit, prefixes)
+	}
 	if lastIndex == uint64(0) || logDigest == "" {
 		t.Fatalf("request did not update log summary: %+v", request.Observation.Nodes[0].Semantic)
 	}
@@ -148,6 +158,9 @@ func TestAdapterSingleNodeCommitCrashAndRestart(t *testing.T) {
 	}
 	if node.Semantic["last_index"] != lastIndex || node.Semantic["log_digest"] != logDigest {
 		t.Fatalf("log summary changed across restart: got %+v", node.Semantic)
+	}
+	if got := node.Semantic["committed_prefix_digests"]; !reflect.DeepEqual(got, prefixes) {
+		t.Fatalf("committed prefix changed across restart: got %v, want %v", got, prefixes)
 	}
 }
 

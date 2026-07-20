@@ -60,6 +60,7 @@ func writeArtifacts(directory string, config cliConfig, sequence plan.PlanSequen
 		{name: "model-events.json", value: result.ModelEvents},
 		{name: "model-states.json", value: result.ModelStates},
 		{name: "oracle-findings.json", value: result.OracleFindings},
+		{name: "failure.json", value: result.Failure},
 		{name: "result.json", value: result},
 	}
 	for _, artifact := range artifacts {

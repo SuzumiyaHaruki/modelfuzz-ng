@@ -162,6 +162,7 @@ modelfuzz-ng/
 │   │   ├── action.go
 │   │   ├── effect.go
 │   │   ├── error.go
+│   │   ├── failure.go                 # 结构化失败边界、panic值和堆栈
 │   │   ├── id.go
 │   │   ├── message.go
 │   │   ├── observation.go
@@ -190,6 +191,7 @@ modelfuzz-ng/
 │   │   ├── action.go                 # Concrete Action执行
 │   │   ├── clock.go                  # LogicalTime和AdvanceTime
 │   │   ├── network.go                # 按Link维护确定性消息队列
+│   │   ├── panic.go                  # Adapter/SUT同步调用的panic边界
 │   │   ├── recorder.go               # Action、Effect和Trace记录
 │   │   └── *_test.go
 │   │
@@ -343,7 +345,8 @@ modelfuzz-ng/
 - 使用最新 Observation 检查节点运行状态；
 - Action前置条件校验；
 - Effect时间校验；
-- Trace追加。
+- Trace追加；
+- 捕获同步 Adapter/SUT panic，保留已完成 Trace 前缀和结构化失败记录。
 
 当前 Runtime 已实现逐 Tick 时间推进、出站消息注册、Deliver/Drop/Duplicate、
 Adapter 能力与前置条件检查、Observation 合并和 Concrete Trace 记录。网络队列
@@ -411,8 +414,9 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 ### 5.9 `internal/oracle`
 
 负责逐条检查 Concrete Transition 是否违反不变量。统一接口和 Finding 数据放在
-`oracle.go`；Raft 的 term/commit/applied 单调性、唯一 leader 以及可安全判定的
-日志一致性检查放在 `oracle/raft`。模型状态覆盖统计属于后续 metrics/corpus，
+`oracle.go`；Raft 的 term/commit/applied 单调性、唯一 leader 以及基于
+committed-prefix 摘要的日志一致性检查放在 `oracle/raft`。日志进度不同时比较
+`min(commitA, commitB)` 处的累积摘要，并覆盖 crashed 节点的持久状态。模型状态覆盖统计属于后续 metrics/corpus，
 不混入安全性 Oracle。
 
 ### 5.10 `internal/trace`

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strconv"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	raft "go.etcd.io/raft/v3"
@@ -25,6 +26,9 @@ type node struct {
 	lastIndex uint64
 	lastTerm  uint64
 	logDigest string
+	// prefixDigests[index] 是从日志 1 到 index（含）的稳定摘要。它只在
+	// MemoryStorage 仍保留完整前缀时可用，供 Oracle 比较共同 committed prefix。
+	prefixDigests map[uint64]string
 }
 
 func newNode(config Config, id core.NodeID, confState *raftpb.ConfState, random raft.Rand) (*node, error) {
@@ -109,8 +113,9 @@ func (n *node) refreshLogState() error {
 	if err := writeProtoDigest(hash, snapshot); err != nil {
 		return err
 	}
+	entries := make([]*raftpb.Entry, 0)
 	if first <= last {
-		entries, err := n.storage.Entries(first, last+1, math.MaxUint64)
+		entries, err = n.storage.Entries(first, last+1, math.MaxUint64)
 		if err != nil {
 			return err
 		}
@@ -120,10 +125,43 @@ func (n *node) refreshLogState() error {
 			}
 		}
 	}
+
+	prefixDigests := make(map[uint64]string)
+	if first == 1 {
+		prefixHash := sha256.New()
+		if _, err := prefixHash.Write([]byte("modelfuzz-ng/raft-log-prefix/v1")); err != nil {
+			return err
+		}
+		prefixDigests[0] = fmt.Sprintf("%x", prefixHash.Sum(nil))
+		for _, entry := range entries {
+			if err := writeProtoDigest(prefixHash, entry); err != nil {
+				return err
+			}
+			prefixDigests[entry.GetIndex()] = fmt.Sprintf("%x", prefixHash.Sum(nil))
+		}
+	}
 	n.lastIndex = last
 	n.lastTerm = lastTerm
 	n.logDigest = fmt.Sprintf("%x", hash.Sum(nil))
+	n.prefixDigests = prefixDigests
 	return nil
+}
+
+// committedPrefixDigests 只返回本次 Oracle 比较所需的 commit 检查点，
+// 避免每个 Observation 重复携带整条已提交日志的 O(log length) 摘要。
+func (n *node) committedPrefixDigests(commit uint64, checkpoints []uint64) (map[string]string, bool) {
+	result := make(map[string]string)
+	for _, index := range checkpoints {
+		if index == 0 || index > commit {
+			continue
+		}
+		digest, exists := n.prefixDigests[index]
+		if !exists {
+			return nil, false
+		}
+		result[strconv.FormatUint(index, 10)] = digest
+	}
+	return result, true
 }
 
 type digestWriter interface {
