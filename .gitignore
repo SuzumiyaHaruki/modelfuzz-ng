@@ -1,0 +1,5 @@
+/runs/
+/bin/
+/coverage/
+/models/raft/states/
+*.out
