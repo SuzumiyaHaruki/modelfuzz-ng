@@ -15,6 +15,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
+	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 )
 
 func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
@@ -174,6 +175,41 @@ func TestRunCLIPersistsPartialResultOnMappingFailure(t *testing.T) {
 	}
 	if result.Status != engine.StatusMappingFailed || len(result.Trace.Steps) != 1 {
 		t.Fatalf("partial result = %+v", result)
+	}
+}
+
+func TestReplayCLIReproducesRunTrace(t *testing.T) {
+	temporary := t.TempDir()
+	planPath := filepath.Join(temporary, "plan.json")
+	runOutput := filepath.Join(temporary, "run")
+	replayOutput := filepath.Join(temporary, "replay")
+	if err := writeJSONFile(planPath, electionPlan()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI(context.Background(), []string{
+		"run", "-plan", planPath, "-output", runOutput,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := runCLI(context.Background(), []string{
+		"replay", "-trace", filepath.Join(runOutput, "trace.json"), "-output", replayOutput,
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "status=completed") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(replayOutput, "replay-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result tracepkg.Result
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != tracepkg.StatusCompleted || result.MatchedSteps != 3 {
+		t.Fatalf("replay result = %+v", result)
 	}
 }
 

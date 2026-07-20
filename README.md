@@ -99,6 +99,18 @@ Raft 模型还不支持 crash/restart、snapshot、membership change 和多 entr
 上述三条完整 Plan 已使用真实 etcd-raft 和 controlled TLC 运行，结果见
 [`docs/experiments/basic-raft-20260720.md`](docs/experiments/basic-raft-20260720.md)。
 
+严格重放已有运行时，默认从 `trace.json` 同目录读取 `config.json`：
+
+```bash
+go run ./cmd/modelfuzz-ng replay \
+  -trace runs/basic-raft-20260720/client-request-commit/trace.json \
+  -output runs/replay-client-request
+```
+
+Replay 会逐步检查逻辑时间、MessageID/Link/Position、Effect、节点快照和
+ObservationDigest，并在第一处差异停止。三条完整示例的实际重放分别匹配
+`6/6`、`6/6` 和 `9/9` 个步骤。
+
 ## 验证
 
 ```bash

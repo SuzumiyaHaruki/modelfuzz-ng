@@ -37,5 +37,18 @@ TLC 状态数不保证恒等于“事件数+1”，因为服务端状态抽象�
 三个实验均返回 `status=completed`，没有发生解析降级、Runtime 错误、映射错误
 或模型执行错误。
 
+## 严格重放
+
+使用持久化后的 `config.json` 和 `trace.json` 重新创建集群并逐字段比较：
+
+| Plan | 匹配步骤 | 结果 |
+|---|---:|---|
+| `election-commit-node1` | 6/6 | completed |
+| `election-commit-node2` | 6/6 | completed |
+| `client-request-commit` | 9/9 | completed |
+
+自动测试另外覆盖了 MessageID、Effect 和 ObservationDigest 篡改。三类篡改均在
+第一处差异返回 `trace replay diverged`，且消息身份不一致时不会执行该 Action。
+
 完整 JSON 产物保存在本地 `runs/basic-raft-20260720/`；`runs/` 默认被
 `.gitignore` 排除，避免把体积较大的实验输出提交到源码仓库。

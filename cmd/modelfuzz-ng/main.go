@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
+	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 	raft "go.etcd.io/raft/v3"
 )
 
@@ -45,6 +47,8 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	switch args[0] {
 	case "run":
 		return runCommand(ctx, args[1:], stdout, stderr)
+	case "replay":
+		return replayCommand(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printRootUsage(stdout)
 		return flag.ErrHelp
@@ -52,6 +56,54 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		printRootUsage(stderr)
 		return fmt.Errorf("未知子命令 %q", args[0])
 	}
+}
+
+func replayCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("modelfuzz-ng replay", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	tracePath := flags.String("trace", "", "待重放的 trace.json（必填）")
+	outputPath := flags.String("output", "", "新的重放产物目录（必填，不覆盖）")
+	configPath := flags.String("config", "", "配置文件；默认使用 Trace 同目录的 config.json")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("无法识别的位置参数: %v", flags.Args())
+	}
+	if *tracePath == "" || *outputPath == "" {
+		flags.Usage()
+		return fmt.Errorf("-trace 和 -output 均为必填项")
+	}
+	if *configPath == "" {
+		*configPath = filepath.Join(filepath.Dir(*tracePath), "config.json")
+	}
+	config, err := loadCLIConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	expected, err := tracepkg.Load(*tracePath)
+	if err != nil {
+		return err
+	}
+	runtime, err := buildRuntime(config, stderr)
+	if err != nil {
+		return err
+	}
+	replayer, err := tracepkg.NewReplayer(runtime)
+	if err != nil {
+		return err
+	}
+	if err := createOutputDirectory(*outputPath); err != nil {
+		return err
+	}
+	result, replayErr := replayer.Replay(ctx, expected)
+	writeErr := writeReplayArtifacts(*outputPath, config, expected, result)
+	if writeErr != nil {
+		return errors.Join(replayErr, writeErr)
+	}
+	fmt.Fprintf(stdout, "重放结束: status=%s matched_steps=%d output=%s\n",
+		result.Status, result.MatchedSteps, *outputPath)
+	return replayErr
 }
 
 func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -127,23 +179,9 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 }
 
 func buildEngine(config cliConfig, logOutput io.Writer) (*engine.Engine, error) {
-	adapterConfig := config.Raft.adapterConfig()
-	raftLogOutput := io.Discard
-	if config.Raft.VerboseLogging {
-		raftLogOutput = logOutput
-	}
-	adapterConfig.Logger = &raft.DefaultLogger{Logger: log.New(raftLogOutput, "raft: ", log.LstdFlags)}
-	adapter, err := etcdraft.New(adapterConfig)
+	runtime, err := buildRuntime(config, logOutput)
 	if err != nil {
-		return nil, fmt.Errorf("创建 etcd-raft Adapter: %w", err)
-	}
-	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{
-		ExecutionID: config.ExecutionID,
-		Seed:        config.Seed,
-		Limits:      config.Runtime,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("创建 Runtime: %w", err)
+		return nil, err
 	}
 	resolver, err := plan.NewResolver(config.Resolver)
 	if err != nil {
@@ -170,6 +208,28 @@ func buildEngine(config cliConfig, logOutput io.Writer) (*engine.Engine, error) 
 	return engine.New(runtime, resolver, mapper, executor, config.Engine)
 }
 
+func buildRuntime(config cliConfig, logOutput io.Writer) (*runtimepkg.Runtime, error) {
+	adapterConfig := config.Raft.adapterConfig()
+	raftLogOutput := io.Discard
+	if config.Raft.VerboseLogging {
+		raftLogOutput = logOutput
+	}
+	adapterConfig.Logger = &raft.DefaultLogger{Logger: log.New(raftLogOutput, "raft: ", log.LstdFlags)}
+	adapter, err := etcdraft.New(adapterConfig)
+	if err != nil {
+		return nil, fmt.Errorf("创建 etcd-raft Adapter: %w", err)
+	}
+	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{
+		ExecutionID: config.ExecutionID,
+		Seed:        config.Seed,
+		Limits:      config.Runtime,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("创建 Runtime: %w", err)
+	}
+	return runtime, nil
+}
+
 func countEffects(result engine.Result) int {
 	total := 0
 	for _, step := range result.Trace.Steps {
@@ -181,6 +241,7 @@ func countEffects(result engine.Result) int {
 func printRootUsage(output io.Writer) {
 	fmt.Fprintln(output, "用法:")
 	fmt.Fprintln(output, "  modelfuzz-ng run -plan PLAN.json -output RUN_DIR [选项]")
+	fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
 }
