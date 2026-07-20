@@ -7,6 +7,7 @@ import (
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/oracle"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
 )
@@ -32,12 +33,13 @@ type Engine struct {
 	mapper   model.Mapper
 	profile  model.Profile
 	executor model.Executor
+	oracles  []oracle.Checker
 	config   Config
 }
 
 // New 创建 Engine。模型 Executor 可以为 nil，此时仍会生成 ModelEvents，
 // 但不会连接 TLC 或其他模型后端。
-func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, executor model.Executor, config Config) (*Engine, error) {
+func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, executor model.Executor, config Config, checkers ...oracle.Checker) (*Engine, error) {
 	if runtime == nil {
 		return nil, fmt.Errorf("%w: runtime is nil", ErrInvalidConfig)
 	}
@@ -47,8 +49,16 @@ func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, ex
 	if mapper == nil {
 		return nil, fmt.Errorf("%w: mapper is nil", ErrInvalidConfig)
 	}
+	for index, checker := range checkers {
+		if checker == nil {
+			return nil, fmt.Errorf("%w: oracle %d is nil", ErrInvalidConfig, index)
+		}
+	}
 	profile, _ := mapper.(model.Profile)
-	return &Engine{runtime: runtime, resolver: resolver, mapper: mapper, profile: profile, executor: executor, config: config}, nil
+	return &Engine{
+		runtime: runtime, resolver: resolver, mapper: mapper, profile: profile,
+		executor: executor, oracles: append([]oracle.Checker(nil), checkers...), config: config,
+	}, nil
 }
 
 // Run 执行一条 PlanSequence。每个 PlanAction 都使用上一条 Concrete Action
@@ -75,6 +85,16 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 	}
 	result.Initial = observation.Copy()
 	result.Final = observation.Copy()
+	for _, checker := range e.oracles {
+		findings := checker.Reset(observation.Copy())
+		e.appendFindings(&result, findings, 0)
+	}
+	if len(result.OracleFindings) > 0 {
+		e.capture(&result, observation)
+		return fail(result, StatusOracleFailed, fmt.Errorf(
+			"%w: initial state: %s", ErrOracle, result.OracleFindings[0].Message,
+		))
+	}
 
 	for planIndex, planned := range sequence.Actions {
 		if err := ctx.Err(); err != nil {
@@ -121,11 +141,12 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 			result.Final = observation.Copy()
 			result.Actions.Actions = append(result.Actions.Actions, action.Copy())
 
-			events, err := e.mapper.Map(model.Transition{
+			transition := model.Transition{
 				Before: step.BeforeObservation,
 				Record: step.Record,
 				After:  step.Observation,
-			})
+			}
+			events, err := e.mapper.Map(transition)
 			if err != nil {
 				e.capture(&result, observation)
 				return fail(result, StatusMappingFailed, fmt.Errorf(
@@ -141,6 +162,16 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 					))
 				}
 				result.ModelEvents = append(result.ModelEvents, event.Copy())
+			}
+			for _, checker := range e.oracles {
+				e.appendFindings(&result, checker.Check(transition.Copy()), len(result.Actions.Actions))
+			}
+			if len(result.OracleFindings) > 0 {
+				e.capture(&result, observation)
+				return fail(result, StatusOracleFailed, fmt.Errorf(
+					"%w: plan action %d concrete action %d: %s",
+					ErrOracle, planIndex, actionIndex, result.OracleFindings[0].Message,
+				))
 			}
 		}
 	}
@@ -160,6 +191,13 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 	}
 	result.Status = StatusCompleted
 	return result, nil
+}
+
+func (e *Engine) appendFindings(result *Result, findings []oracle.Finding, step int) {
+	for _, finding := range findings {
+		finding.Step = step
+		result.OracleFindings = append(result.OracleFindings, finding)
+	}
 }
 
 func (e *Engine) rejectionReason(resolution plan.Resolution) string {

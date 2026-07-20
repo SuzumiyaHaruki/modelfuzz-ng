@@ -9,5 +9,6 @@ var (
 	ErrRuntime       = errors.New("runtime execution failed")
 	ErrMapping       = errors.New("model mapping failed")
 	ErrUnsupported   = errors.New("action unsupported by model")
+	ErrOracle        = errors.New("online oracle violation")
 	ErrModel         = errors.New("model execution failed")
 )

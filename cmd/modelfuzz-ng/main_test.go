@@ -57,7 +57,7 @@ func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
 
 	for _, name := range []string{
 		"config.json", "plan.json", "resolutions.json", "actions.json",
-		"trace.json", "model-events.json", "model-states.json", "result.json",
+		"trace.json", "model-events.json", "model-states.json", "oracle-findings.json", "result.json",
 	} {
 		if _, err := os.Stat(filepath.Join(outputPath, name)); err != nil {
 			t.Errorf("artifact %s: %v", name, err)
@@ -74,7 +74,7 @@ func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
 	if result.Status != engine.StatusCompleted || !result.ModelExecuted || len(result.Trace.Steps) != 3 {
 		t.Fatalf("persisted result = %+v", result)
 	}
-	if len(result.ModelEvents) != 5 || len(result.ModelStates) != 2 {
+	if len(result.ModelEvents) != 5 || len(result.ModelStates) != 2 || len(result.OracleFindings) != 0 {
 		t.Fatalf("persisted model output: events=%d states=%d", len(result.ModelEvents), len(result.ModelStates))
 	}
 }

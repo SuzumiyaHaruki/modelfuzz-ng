@@ -21,6 +21,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
+	raftoracle "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/oracle/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
@@ -171,9 +172,9 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return errors.Join(runErr, writeErr)
 	}
 	fmt.Fprintf(stdout,
-		"运行结束: status=%s actions=%d effects=%d model_events=%d model_states=%d output=%s\n",
+		"运行结束: status=%s actions=%d effects=%d model_events=%d model_states=%d oracle_findings=%d output=%s\n",
 		result.Status, len(result.Actions.Actions), countEffects(result),
-		len(result.ModelEvents), len(result.ModelStates), *outputPath,
+		len(result.ModelEvents), len(result.ModelStates), len(result.OracleFindings), *outputPath,
 	)
 	return runErr
 }
@@ -205,7 +206,7 @@ func buildEngine(config cliConfig, logOutput io.Writer) (*engine.Engine, error) 
 		}
 		executor = client
 	}
-	return engine.New(runtime, resolver, mapper, executor, config.Engine)
+	return engine.New(runtime, resolver, mapper, executor, config.Engine, raftoracle.New())
 }
 
 func buildRuntime(config cliConfig, logOutput io.Writer) (*runtimepkg.Runtime, error) {

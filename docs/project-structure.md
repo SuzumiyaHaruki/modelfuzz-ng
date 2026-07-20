@@ -226,9 +226,9 @@ modelfuzz-ng/
 │   │
 │   ├── oracle/                       # 系统正确性和模型检查
 │   │   ├── oracle.go                 # Oracle统一接口
-│   │   ├── invariant.go              # 通用不变量组合
-│   │   ├── model.go                  # 使用model包结果进行判定
-│   │   └── raft.go                   # Raft专用Oracle，可选后移到Adapter
+│   │   └── raft/                     # Raft在线安全性检查
+│   │       ├── checker.go
+│   │       └── checker_test.go
 │   │
 │   ├── trace/                        # Trace的算法和持久化，不放数据定义
 │   │   ├── io.go                     # JSON读写
@@ -401,7 +401,10 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 
 ### 5.9 `internal/oracle`
 
-负责判断一次执行是否违反不变量、是否进入新模型状态。协议无关组合逻辑放在这里；强 Raft 语义的检查可以放在 `oracle/raft.go`，或在 Adapter 增长后移入 `internal/adapters/etcdraft`。
+负责逐条检查 Concrete Transition 是否违反不变量。统一接口和 Finding 数据放在
+`oracle.go`；Raft 的 term/commit/applied 单调性、唯一 leader 以及可安全判定的
+日志一致性检查放在 `oracle/raft`。模型状态覆盖统计属于后续 metrics/corpus，
+不混入安全性 Oracle。
 
 ### 5.10 `internal/trace`
 

@@ -11,6 +11,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/oracle"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
 	raft "go.etcd.io/raft/v3"
@@ -21,6 +22,14 @@ type recordingExecutor struct {
 	states []model.State
 	err    error
 	calls  int
+}
+
+type rejectingOracle struct{}
+
+func (rejectingOracle) Reset(core.Observation) []oracle.Finding { return nil }
+
+func (rejectingOracle) Check(model.Transition) []oracle.Finding {
+	return []oracle.Finding{{Oracle: "test", Code: "injected", Message: "injected violation"}}
 }
 
 func (e *recordingExecutor) Execute(_ context.Context, events []model.Event) ([]model.State, error) {
@@ -146,7 +155,28 @@ func TestEngineClassifiesModelFailure(t *testing.T) {
 	}
 }
 
+func TestEnginePersistsViolatingStepAndStopsBeforeModelExecution(t *testing.T) {
+	executor := &recordingExecutor{}
+	engine := newTestEngineWithOracles(t, plan.DefaultResolverConfig(), executor, Config{}, rejectingOracle{})
+	result, err := engine.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{{
+		Kind: plan.ActionTimeout, Node: 1,
+	}}})
+	if !errors.Is(err, ErrOracle) || result.Status != StatusOracleFailed {
+		t.Fatalf("result/error = %+v/%v, want oracle failure", result, err)
+	}
+	if len(result.Actions.Actions) != 1 || len(result.Trace.Steps) != 1 || len(result.ModelEvents) != 1 {
+		t.Fatalf("violating transition was not fully persisted: %+v", result)
+	}
+	if len(result.OracleFindings) != 1 || result.OracleFindings[0].Step != 1 || executor.calls != 0 {
+		t.Fatalf("oracle findings/executor = %+v/%d", result.OracleFindings, executor.calls)
+	}
+}
+
 func newTestEngine(t *testing.T, resolverConfig plan.ResolverConfig, executor model.Executor, engineConfig Config) *Engine {
+	return newTestEngineWithOracles(t, resolverConfig, executor, engineConfig)
+}
+
+func newTestEngineWithOracles(t *testing.T, resolverConfig plan.ResolverConfig, executor model.Executor, engineConfig Config, checkers ...oracle.Checker) *Engine {
 	t.Helper()
 	adapterConfig := etcdraft.DefaultConfig()
 	adapterConfig.ElectionTick = 100
@@ -169,7 +199,7 @@ func newTestEngine(t *testing.T, resolverConfig plan.ResolverConfig, executor mo
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := New(runtime, resolver, mapper, executor, engineConfig)
+	engine, err := New(runtime, resolver, mapper, executor, engineConfig, checkers...)
 	if err != nil {
 		t.Fatal(err)
 	}

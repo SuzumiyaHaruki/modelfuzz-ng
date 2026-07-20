@@ -13,6 +13,7 @@ Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后�
 - `internal/engine`：Plan、Runtime、模型映射和模型执行的单次闭环编排。
 - `internal/adapters/etcdraft`：etcd-raft 3.7 的最小集群适配器。
 - `internal/model`：Concrete Transition 到模型事件的映射及 TLC 客户端。
+- `internal/oracle`：对真实 Concrete Transition 执行基础在线安全性检查。
 - `cmd/modelfuzz-ng`：读取配置和 Plan、执行轨迹并保存产物的命令行入口。
 - `models/raft`：首版轻量 Raft TLA+ 模型。
 - `docs`：Timer 设计与目标目录结构。
@@ -57,7 +58,7 @@ java -cp 'class:lib/*:lib/gson/*' tlc2.TLCServer \
 ```
 
 每次运行必须使用一个尚不存在的输出目录，CLI 不会覆盖旧轨迹。目录中包含
-解析结果、Concrete Action、Trace、模型事件、模型状态以及汇总结果。当前轻量
+解析结果、Concrete Action、Trace、模型事件、模型状态、Oracle Finding 以及汇总结果。当前轻量
 Raft 模型还不支持 crash/restart、snapshot 和 membership change；Profile 会在
 修改真实 SUT 前拒绝可提前判断的不支持动作。
 
@@ -100,6 +101,8 @@ Raft 模型还不支持 crash/restart、snapshot 和 membership change；Profile
 
 上述完整 Plan 已使用真实 etcd-raft 和 controlled TLC 运行，结果见
 [`docs/experiments/basic-raft-20260720.md`](docs/experiments/basic-raft-20260720.md)。
+四条 Plan 的基础 Raft Oracle 检查及故障注入结果见
+[`docs/experiments/raft-oracle-20260720.md`](docs/experiments/raft-oracle-20260720.md)。
 
 严格重放已有运行时，默认从 `trace.json` 同目录读取 `config.json`：
 
