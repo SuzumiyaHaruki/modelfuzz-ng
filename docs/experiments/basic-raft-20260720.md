@@ -50,5 +50,16 @@ TLC 状态数不保证恒等于“事件数+1”，因为服务端状态抽象�
 自动测试另外覆盖了 MessageID、Effect 和 ObservationDigest 篡改。三类篡改均在
 第一处差异返回 `trace replay diverged`，且消息身份不一致时不会执行该 Action。
 
+## 模型能力预检
+
+使用 `unsupported-crash.json` 请求 crash 节点 1。Engine 返回
+`unsupported_by_model`，Concrete Action 和 Trace Step 均为 0；最终 Observation
+仍显示节点 1 为 running、epoch 1、follower，证明拒绝发生在真实 SUT 被修改前。
+
+消息 Observation 现在携带 Adapter 的稳定 Metadata，因此 Profile 可以在投递
+前识别 `MsgApp.entry_count`。Trace 格式升级到 v3；v2 轨迹仍可严格重放，但旧版
+ObservationDigest 因不包含消息 Metadata 而不参与比较。实际 v2 客户端提交轨迹
+已成功重放到 v3 Runtime，匹配 9/9 步。
+
 完整 JSON 产物保存在本地 `runs/basic-raft-20260720/`；`runs/` 默认被
 `.gitignore` 排除，避免把体积较大的实验输出提交到源码仓库。

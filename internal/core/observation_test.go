@@ -13,7 +13,7 @@ func TestObservationNormalized(t *testing.T) {
 		},
 		Messages: []MessageObservation{
 			{ID: 2, From: 2, To: 1, SenderEpoch: 1, LinkSequence: 1, Position: 0},
-			{ID: 1, From: 1, To: 2, SenderEpoch: 1, LinkSequence: 1, Position: 0},
+			{ID: 1, From: 1, To: 2, SenderEpoch: 1, LinkSequence: 1, Position: 0, Metadata: map[string]string{"entry_count": "1"}},
 		},
 	}
 	if err := observation.Validate(); err != nil {
@@ -26,6 +26,10 @@ func TestObservationNormalized(t *testing.T) {
 	}
 	if observation.Nodes[0].ID != 2 {
 		t.Fatal("normalization mutated original observation")
+	}
+	normalized.Messages[0].Metadata["entry_count"] = "2"
+	if observation.Messages[1].Metadata["entry_count"] != "1" {
+		t.Fatal("normalization shares message metadata with original")
 	}
 }
 

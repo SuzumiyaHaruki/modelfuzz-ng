@@ -1,6 +1,8 @@
 package core
 
-const CurrentTraceVersion uint32 = 2
+// v3 将消息 Metadata 纳入 ObservationDigest。v2 Trace 仍可重放，但 Replay
+// 不比较旧版摘要，因为旧摘要无法表达新增的消息元数据。
+const CurrentTraceVersion uint32 = 3
 
 // StepRecord 表示具体 Trace 中一次已经解析并执行的状态转换。
 type StepRecord struct {

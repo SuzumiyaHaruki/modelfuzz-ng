@@ -118,18 +118,21 @@ func TestEngineStopsOnInvalidResolution(t *testing.T) {
 	}
 }
 
-func TestEngineReturnsPartialArtifactsOnMappingFailure(t *testing.T) {
+func TestEngineRejectsUnsupportedActionBeforeRuntimeMutation(t *testing.T) {
 	executor := &recordingExecutor{}
 	engine := newTestEngine(t, plan.DefaultResolverConfig(), executor, Config{})
 
 	result, err := engine.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{{
 		Kind: plan.ActionCrash, Node: 1,
 	}}})
-	if !errors.Is(err, ErrMapping) || result.Status != StatusMappingFailed {
-		t.Fatalf("result/error = %+v/%v, want mapping failure", result, err)
+	if !errors.Is(err, ErrUnsupported) || result.Status != StatusUnsupported {
+		t.Fatalf("result/error = %+v/%v, want unsupported failure", result, err)
 	}
-	if len(result.Actions.Actions) != 1 || len(result.Trace.Steps) != 1 || executor.calls != 0 {
-		t.Fatalf("partial artifacts = %+v, calls=%d", result, executor.calls)
+	if len(result.Actions.Actions) != 0 || len(result.Trace.Steps) != 0 || executor.calls != 0 {
+		t.Fatalf("unsupported action mutated runtime = %+v, calls=%d", result, executor.calls)
+	}
+	if result.Final.Nodes[0].Status != core.NodeRunning {
+		t.Fatalf("node was crashed before profile rejection: %+v", result.Final.Nodes[0])
 	}
 }
 

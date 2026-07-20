@@ -17,6 +17,7 @@ const (
 	StatusResolutionFailed Status = "resolution_failed"
 	StatusRuntimeFailed    Status = "runtime_failed"
 	StatusMappingFailed    Status = "mapping_failed"
+	StatusUnsupported      Status = "unsupported_by_model"
 	StatusModelFailed      Status = "model_failed"
 )
 

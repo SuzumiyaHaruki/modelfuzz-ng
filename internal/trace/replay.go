@@ -106,7 +106,12 @@ func (r *Replayer) Replay(ctx context.Context, expected core.Trace) (Result, err
 			{field: "action", expected: expectedStep.Action, got: step.Record.Action},
 			{field: "effects", expected: expectedStep.Effects, got: step.Record.Effects},
 			{field: "nodes_after", expected: expectedStep.NodesAfter, got: step.Record.NodesAfter},
-			{field: "observation_digest", expected: expectedStep.ObservationDigest, got: step.Record.ObservationDigest},
+		}
+		if expected.Version >= 3 {
+			comparisons = append(comparisons, struct {
+				field         string
+				expected, got any
+			}{field: "observation_digest", expected: expectedStep.ObservationDigest, got: step.Record.ObservationDigest})
 		}
 		for _, comparison := range comparisons {
 			if comparison.field == "effects" && len(expectedStep.Effects) == 0 && len(step.Record.Effects) == 0 {

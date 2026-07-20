@@ -30,6 +30,7 @@ type Engine struct {
 	runtime  *runtimepkg.Runtime
 	resolver Resolver
 	mapper   model.Mapper
+	profile  model.Profile
 	executor model.Executor
 	config   Config
 }
@@ -46,7 +47,8 @@ func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, ex
 	if mapper == nil {
 		return nil, fmt.Errorf("%w: mapper is nil", ErrInvalidConfig)
 	}
-	return &Engine{runtime: runtime, resolver: resolver, mapper: mapper, executor: executor, config: config}, nil
+	profile, _ := mapper.(model.Profile)
+	return &Engine{runtime: runtime, resolver: resolver, mapper: mapper, profile: profile, executor: executor, config: config}, nil
 }
 
 // Run 执行一条 PlanSequence。每个 PlanAction 都使用上一条 Concrete Action
@@ -96,6 +98,14 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 		}
 
 		for actionIndex, action := range resolution.Actions {
+			if e.profile != nil {
+				if err := e.profile.ValidateAction(action, observation); err != nil {
+					e.capture(&result, observation)
+					return fail(result, StatusUnsupported, fmt.Errorf(
+						"%w: plan action %d concrete action %d: %v", ErrUnsupported, planIndex, actionIndex, err,
+					))
+				}
+			}
 			step, err := e.runtime.Execute(ctx, action)
 			if err != nil {
 				e.capture(&result, observation)

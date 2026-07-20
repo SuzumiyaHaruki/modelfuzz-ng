@@ -81,6 +81,19 @@ func TestReplayFindsTamperedEffectAndDigest(t *testing.T) {
 	}
 }
 
+func TestReplayVersionTwoSkipsLegacyObservationDigest(t *testing.T) {
+	expected := produceElectionTrace(t)
+	expected.Version = 2
+	for index := range expected.Steps {
+		expected.Steps[index].ObservationDigest = "legacy-digest"
+	}
+	replayer, _ := NewReplayer(newRuntime(t, expected.ExecutionID, expected.Seed))
+	result, err := replayer.Replay(context.Background(), expected)
+	if err != nil || result.Status != StatusCompleted {
+		t.Fatalf("v2 replay result/error = %+v/%v", result, err)
+	}
+}
+
 func TestLoadRejectsTrailingJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trace.json")
 	if err := writeTestFile(path, []byte(`{} {}`)); err != nil {

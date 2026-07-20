@@ -52,16 +52,17 @@ func (n NodeObservation) Copy() NodeObservation {
 }
 
 type MessageObservation struct {
-	ID            MessageID   `json:"id"`
-	From          NodeID      `json:"from"`
-	To            NodeID      `json:"to"`
-	SenderEpoch   NodeEpoch   `json:"sender_epoch"`
-	LinkSequence  uint64      `json:"link_sequence"`
-	ParentID      MessageID   `json:"parent_id,omitempty"`
-	Position      int         `json:"position"`
-	EnqueuedAt    LogicalTime `json:"enqueued_at"`
-	TypeHint      string      `json:"type_hint,omitempty"`
-	PayloadDigest string      `json:"payload_digest,omitempty"`
+	ID            MessageID         `json:"id"`
+	From          NodeID            `json:"from"`
+	To            NodeID            `json:"to"`
+	SenderEpoch   NodeEpoch         `json:"sender_epoch"`
+	LinkSequence  uint64            `json:"link_sequence"`
+	ParentID      MessageID         `json:"parent_id,omitempty"`
+	Position      int               `json:"position"`
+	EnqueuedAt    LogicalTime       `json:"enqueued_at"`
+	TypeHint      string            `json:"type_hint,omitempty"`
+	PayloadDigest string            `json:"payload_digest,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
 }
 
 func (m MessageObservation) Validate() error {
@@ -134,7 +135,11 @@ func (o Observation) Copy() Observation {
 	for i, node := range o.Nodes {
 		copy.Nodes[i] = node.Copy()
 	}
-	copy.Messages = append([]MessageObservation(nil), o.Messages...)
+	copy.Messages = make([]MessageObservation, len(o.Messages))
+	for i, message := range o.Messages {
+		copy.Messages[i] = message
+		copy.Messages[i].Metadata = cloneStringMap(message.Metadata)
+	}
 	if o.LastAction != nil {
 		action := o.LastAction.Copy()
 		copy.LastAction = &action

@@ -73,7 +73,7 @@ Raft 模型还不支持 crash/restart、snapshot、membership change 和多 entr
 | AdvanceTime/自然超时 | 支持 | 支持 | 一单位时间对应每个存活节点一次 Tick |
 | 强制选举超时 | 支持 | 支持 | 自然/强制来源都映射为 `Timeout` |
 | Client Request | 支持 | 支持 | 请求值限十进制 `1..MaxValue` |
-| crash/restart | 支持 | 不支持 | 当前执行后会明确得到 `mapping_failed` |
+| crash/restart | 支持 | 不支持 | Engine 在修改真实节点前返回 `unsupported_by_model` |
 | snapshot/membership change | Adapter 有部分处理 | 不支持 | 需要扩展独立模型 Profile |
 | PreVote/CheckQuorum | 当前关闭 | 不支持 | 启用 Raft 配置前必须先补模型 |
 
