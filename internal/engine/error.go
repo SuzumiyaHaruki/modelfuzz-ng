@@ -10,5 +10,6 @@ var (
 	ErrMapping       = errors.New("model mapping failed")
 	ErrUnsupported   = errors.New("action unsupported by model")
 	ErrOracle        = errors.New("online oracle violation")
+	ErrPolicy        = errors.New("action source failed")
 	ErrModel         = errors.New("model execution failed")
 )

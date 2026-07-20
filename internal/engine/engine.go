@@ -17,6 +17,13 @@ type Resolver interface {
 	Resolve(action plan.PlanAction, observation core.Observation) plan.Resolution
 }
 
+// ActionSource 根据最新 Observation 在线生成下一条高层动作。返回 more=false
+// 表示策略主动结束本次执行。
+type ActionSource interface {
+	Reset(initial core.Observation) error
+	Next(observation core.Observation) (action plan.PlanAction, more bool, err error)
+}
+
 // Config 控制 best-effort Plan 的边界。默认允许 partial、skipped 和
 // empty_queue：这些状态会被记录，但不会终止整条 Plan。
 type Config struct {
@@ -64,15 +71,38 @@ func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, ex
 // Run 执行一条 PlanSequence。每个 PlanAction 都使用上一条 Concrete Action
 // 执行后的最新 Observation 解析，因此消息位置和相对时间不会提前固化。
 func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, error) {
+	if err := sequence.Validate(); err != nil {
+		return fail(newResult(), StatusInvalidPlan, fmt.Errorf("%w: %v", ErrInvalidPlan, err))
+	}
+	return e.run(ctx, len(sequence.Actions), false, nil, func(index int, _ core.Observation) (plan.PlanAction, bool, error) {
+		return sequence.Actions[index].Copy(), true, nil
+	})
+}
+
+// RunSource 使用在线策略执行至策略主动结束或达到 maxPlanActions。达到预算是
+// 正常完成，并通过 Result.BudgetExhausted 标记，不作为错误。
+func (e *Engine) RunSource(ctx context.Context, source ActionSource, maxPlanActions int) (Result, error) {
+	if source == nil {
+		return fail(newResult(), StatusPolicyFailed, fmt.Errorf("%w: action source is nil", ErrPolicy))
+	}
+	if maxPlanActions <= 0 {
+		return fail(newResult(), StatusPolicyFailed, fmt.Errorf("%w: max plan actions must be positive", ErrPolicy))
+	}
+	return e.run(ctx, maxPlanActions, true, source.Reset, func(_ int, observation core.Observation) (plan.PlanAction, bool, error) {
+		return source.Next(observation.Copy())
+	})
+}
+
+type sourceInitializer func(core.Observation) error
+type nextAction func(int, core.Observation) (plan.PlanAction, bool, error)
+
+func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize sourceInitializer, next nextAction) (Result, error) {
 	result := newResult()
 	if e == nil || e.runtime == nil || e.resolver == nil || e.mapper == nil {
 		return fail(result, StatusRuntimeFailed, fmt.Errorf("%w: engine is not initialized", ErrInvalidConfig))
 	}
 	if err := ctx.Err(); err != nil {
 		return fail(result, StatusCanceled, err)
-	}
-	if err := sequence.Validate(); err != nil {
-		return fail(result, StatusInvalidPlan, fmt.Errorf("%w: %v", ErrInvalidPlan, err))
 	}
 
 	observation, err := e.runtime.Reset(ctx)
@@ -95,12 +125,32 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 			"%w: initial state: %s", ErrOracle, result.OracleFindings[0].Message,
 		))
 	}
+	if initialize != nil {
+		if err := initialize(observation.Copy()); err != nil {
+			e.capture(&result, observation)
+			return fail(result, StatusPolicyFailed, fmt.Errorf("%w: reset: %v", ErrPolicy, err))
+		}
+	}
 
-	for planIndex, planned := range sequence.Actions {
+	processed := 0
+	for planIndex := 0; planIndex < maximum; planIndex++ {
 		if err := ctx.Err(); err != nil {
 			e.capture(&result, observation)
 			return fail(result, StatusCanceled, err)
 		}
+		planned, more, err := next(planIndex, observation)
+		if err != nil {
+			e.capture(&result, observation)
+			return fail(result, StatusPolicyFailed, fmt.Errorf("%w: action %d: %v", ErrPolicy, planIndex, err))
+		}
+		if !more {
+			break
+		}
+		if err := planned.Validate(); err != nil {
+			e.capture(&result, observation)
+			return fail(result, StatusInvalidPlan, fmt.Errorf("%w: generated action %d: %v", ErrInvalidPlan, planIndex, err))
+		}
+		processed++
 
 		resolution := e.resolver.Resolve(planned, observation)
 		result.Resolutions = append(result.Resolutions, resolution.Copy())
@@ -174,6 +224,9 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 				))
 			}
 		}
+	}
+	if budgeted && processed == maximum {
+		result.BudgetExhausted = true
 	}
 
 	e.capture(&result, observation)

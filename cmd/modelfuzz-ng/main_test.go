@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
@@ -89,6 +91,7 @@ func TestCompleteExamplePlans(t *testing.T) {
 		{name: "election-commit-node1", committed: []core.NodeID{1, 2}, lastIndex: 1},
 		{name: "election-commit-node2", committed: []core.NodeID{2, 3}, lastIndex: 1},
 		{name: "client-request-commit", committed: []core.NodeID{1, 2}, lastIndex: 2},
+		{name: "follower-catchup-multi-entry", committed: []core.NodeID{1, 2}, lastIndex: 4},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -127,6 +130,39 @@ func TestCompleteExamplePlans(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExperimentCLIRunsIndependentRandomTraces(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "experiment")
+	var stdout bytes.Buffer
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-output", output, "-runs", "4", "-steps", "8",
+		"-parallelism", "2", "-seed", "700",
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "runs=4") || !strings.Contains(stdout.String(), "failed=0") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(output, "experiment-report.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report experiment.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Succeeded != 4 || report.TotalActions != 32 || report.Runs[3].Seed != 703 {
+		t.Fatalf("report = %+v", report)
+	}
+	for index, run := range report.Runs {
+		directory := filepath.Join(output, fmt.Sprintf("run-%04d-seed-%d", index, run.Seed))
+		for _, name := range []string{"plan.json", "trace.json", "result.json", "oracle-findings.json"} {
+			if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+				t.Fatalf("run %d artifact %s: %v", index, name, err)
+			}
+		}
 	}
 }
 

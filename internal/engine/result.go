@@ -20,23 +20,25 @@ const (
 	StatusMappingFailed    Status = "mapping_failed"
 	StatusUnsupported      Status = "unsupported_by_model"
 	StatusOracleFailed     Status = "oracle_failed"
+	StatusPolicyFailed     Status = "policy_failed"
 	StatusModelFailed      Status = "model_failed"
 )
 
 // Result 保存一次执行可以持久化的全部核心产物。即使 Run 返回错误，Result
 // 也会尽量包含错误发生前已经完成的 Resolution、Action、Trace 和模型事件。
 type Result struct {
-	Status         Status              `json:"status"`
-	Error          string              `json:"error,omitempty"`
-	ModelExecuted  bool                `json:"model_executed"`
-	Resolutions    []plan.Resolution   `json:"resolutions"`
-	Actions        core.ActionSequence `json:"actions"`
-	Trace          core.Trace          `json:"trace"`
-	ModelEvents    []model.Event       `json:"model_events"`
-	ModelStates    []model.State       `json:"model_states"`
-	OracleFindings []oracle.Finding    `json:"oracle_findings"`
-	Initial        core.Observation    `json:"initial_observation"`
-	Final          core.Observation    `json:"final_observation"`
+	Status          Status              `json:"status"`
+	Error           string              `json:"error,omitempty"`
+	ModelExecuted   bool                `json:"model_executed"`
+	BudgetExhausted bool                `json:"budget_exhausted,omitempty"`
+	Resolutions     []plan.Resolution   `json:"resolutions"`
+	Actions         core.ActionSequence `json:"actions"`
+	Trace           core.Trace          `json:"trace"`
+	ModelEvents     []model.Event       `json:"model_events"`
+	ModelStates     []model.State       `json:"model_states"`
+	OracleFindings  []oracle.Finding    `json:"oracle_findings"`
+	Initial         core.Observation    `json:"initial_observation"`
+	Final           core.Observation    `json:"final_observation"`
 }
 
 func newResult() Result {

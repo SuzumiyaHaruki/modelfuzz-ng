@@ -18,11 +18,13 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/adapters/etcdraft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
 	raftoracle "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/oracle/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
+	randompolicy "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/policy"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 	raft "go.etcd.io/raft/v3"
@@ -50,6 +52,8 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return runCommand(ctx, args[1:], stdout, stderr)
 	case "replay":
 		return replayCommand(ctx, args[1:], stdout, stderr)
+	case "experiment":
+		return experimentCommand(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printRootUsage(stdout)
 		return flag.ErrHelp
@@ -57,6 +61,103 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		printRootUsage(stderr)
 		return fmt.Errorf("未知子命令 %q", args[0])
 	}
+}
+
+func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("modelfuzz-ng experiment", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	outputPath := flags.String("output", "", "新的批量实验目录（必填，不覆盖）")
+	configPath := flags.String("config", "", "可选的 JSON 配置文件")
+	tlcAddress := flags.String("tlc", "", "覆盖配置中的 controlled TLC 地址")
+	runs := flags.Int("runs", 10, "独立运行次数")
+	steps := flags.Int("steps", 50, "每次运行的最大在线 PlanAction 数")
+	parallelism := flags.Int("parallelism", 1, "并发运行数；controlled TLC 当前只能为1")
+	seedText := flags.String("seed", "", "覆盖第一条运行的随机种子；后续逐次加1")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("无法识别的位置参数: %v", flags.Args())
+	}
+	if *outputPath == "" {
+		flags.Usage()
+		return fmt.Errorf("-output 为必填项")
+	}
+	config, err := loadCLIConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	if *tlcAddress != "" {
+		config.TLC.Address = *tlcAddress
+	}
+	if *seedText != "" {
+		seed, err := strconv.ParseInt(*seedText, 10, 64)
+		if err != nil {
+			return fmt.Errorf("解析 -seed %q: %w", *seedText, err)
+		}
+		config.Seed = seed
+	}
+	if *steps <= 0 {
+		return fmt.Errorf("-steps 必须为正数")
+	}
+	if config.TLC.Address != "" && *parallelism != 1 {
+		return fmt.Errorf("旧 controlled TLC 不保证请求隔离，连接 TLC 时 -parallelism 必须为1")
+	}
+	if err := validateAlignedNodes(config.Raft.NodeIDs, config.Model.NodeIDs); err != nil {
+		return fmt.Errorf("Raft/模型配置不一致: %w", err)
+	}
+	runner, err := experiment.New(experiment.Config{Runs: *runs, BaseSeed: config.Seed, Parallelism: *parallelism})
+	if err != nil {
+		return err
+	}
+	policyConfig := randompolicy.DefaultRandomConfig()
+	policyConfig.MaxValue = config.Model.MaxValue
+	policyConfig.MaxLogIndex = config.Model.MaxLogIndex
+	policyConfig.LargestTerm = config.Model.LargestTerm
+	if err := createOutputDirectory(*outputPath); err != nil {
+		return err
+	}
+	report, runErr := runner.Run(ctx, func(ctx context.Context, index int, seed int64) (engine.Result, error) {
+		runConfig := config
+		runConfig.Seed = seed
+		runConfig.ExecutionID = core.ExecutionID(fmt.Sprintf("%s-random-%04d", config.ExecutionID, index))
+		policy, err := randompolicy.NewRandom(seed, policyConfig)
+		if err != nil {
+			return engine.Result{}, err
+		}
+		runEngine, err := buildEngine(runConfig, stderr)
+		if err != nil {
+			return engine.Result{}, err
+		}
+		result, engineErr := runEngine.RunSource(ctx, policy, *steps)
+		runDirectory := filepath.Join(*outputPath, fmt.Sprintf("run-%04d-seed-%d", index, seed))
+		if err := createOutputDirectory(runDirectory); err != nil {
+			return result, errors.Join(engineErr, err)
+		}
+		if err := writeArtifacts(runDirectory, runConfig, policy.Sequence(), result); err != nil {
+			return result, errors.Join(engineErr, err)
+		}
+		return result, engineErr
+	})
+	rootArtifacts := []struct {
+		name  string
+		value any
+	}{
+		{name: "config.json", value: config},
+		{name: "policy-config.json", value: policyConfig},
+		{name: "experiment-report.json", value: report},
+	}
+	for _, artifact := range rootArtifacts {
+		if err := writeJSONFile(filepath.Join(*outputPath, artifact.name), artifact.value); err != nil {
+			return errors.Join(runErr, err)
+		}
+	}
+	fmt.Fprintf(stdout,
+		"批量实验结束: runs=%d succeeded=%d failed=%d actions=%d model_events=%d unique_model_states=%d output=%s\n",
+		len(report.Runs), report.Succeeded, report.Failed, report.TotalActions,
+		report.TotalModelEvents, report.UniqueModelStates, *outputPath,
+	)
+	return runErr
 }
 
 func replayCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -243,6 +344,7 @@ func printRootUsage(output io.Writer) {
 	fmt.Fprintln(output, "用法:")
 	fmt.Fprintln(output, "  modelfuzz-ng run -plan PLAN.json -output RUN_DIR [选项]")
 	fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
+	fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
 }

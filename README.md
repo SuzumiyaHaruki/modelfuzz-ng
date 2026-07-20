@@ -11,6 +11,8 @@ Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后�
 - `internal/runtime`：单次可重放执行、逻辑时钟、消息队列和资源预算。
 - `internal/plan`：高层 Plan 及其基于当前状态的在线解析。
 - `internal/engine`：Plan、Runtime、模型映射和模型执行的单次闭环编排。
+- `internal/policy`：基于最新 Observation 在线生成动作的确定性随机基线。
+- `internal/experiment`：多 seed 独立运行、可控并发和跨运行覆盖汇总。
 - `internal/adapters/etcdraft`：etcd-raft 3.7 的最小集群适配器。
 - `internal/model`：Concrete Transition 到模型事件的映射及 TLC 客户端。
 - `internal/oracle`：对真实 Concrete Transition 执行基础在线安全性检查。
@@ -115,6 +117,20 @@ go run ./cmd/modelfuzz-ng replay \
 Replay 会逐步检查逻辑时间、MessageID/Link/Position、Effect、节点快照和
 ObservationDigest，并在第一处差异停止。四条完整示例的实际重放分别匹配
 `6/6`、`6/6`、`9/9` 和 `11/11` 个步骤。
+
+运行在线随机策略的批量实验：
+
+```bash
+go run ./cmd/modelfuzz-ng experiment \
+  -config examples/config.json \
+  -output runs/random-local \
+  -runs 20 -steps 30 -parallelism 4 -seed 1000
+```
+
+策略每一步读取最新 Observation，可选择同一 Link 的任意当前位置；不会缓存
+容易失效的 MessageID。连接旧 controlled TLC 时必须使用 `-parallelism 1`。
+本轮随机基线和 TLC 覆盖实验见
+[`docs/experiments/random-baseline-20260720.md`](docs/experiments/random-baseline-20260720.md)。
 
 ## 验证
 

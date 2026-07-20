@@ -214,9 +214,13 @@ modelfuzz-ng/
 │   │   ├── error.go                  # 分层错误分类
 │   │   └── *_test.go
 │   │
-│   ├── policy/                       # 计划生成和调度策略
-│   │   ├── policy.go                 # 统一接口
-│   │   ├── random.go                 # 近期：基础随机策略
+│   ├── experiment/                   # 多次独立运行和覆盖汇总
+│   │   ├── runner.go
+│   │   └── runner_test.go
+│   │
+│   ├── policy/                       # 在线计划生成和调度策略
+│   │   ├── random.go                 # 已有：确定性基础随机策略
+│   │   ├── random_test.go
 │   │   ├── fair.go                   # 后续：有限公平/消息年龄策略
 │   │   └── llm/                      # 后续：LLM Plan生成
 │   │       ├── planner.go
@@ -395,9 +399,14 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 
 ### 5.8 `internal/policy`
 
-负责生成 Plan，而不是直接修改 Runtime。
+负责读取最新 Observation 并生成下一条 PlanAction，而不是直接修改 Runtime。
+基础 Random 策略按 seed 确定性选择动作类别，再在当前可执行的节点或消息中选择
+具体对象；因此能够选择非 FIFO 位置，也不会用过期 MessageID。
 
 建议先实现简单随机策略，验证完整执行链路；LLM 策略在 Plan schema 和 Runtime 行为稳定后加入。这样可以区分基础框架问题和 LLM 生成问题。
+
+`internal/experiment` 为每个 seed 创建独立 Engine/Runtime，支持无 TLC 时并行运行，
+并汇总状态、Action/Effect/模型事件数量和跨运行唯一模型状态。
 
 ### 5.9 `internal/oracle`
 

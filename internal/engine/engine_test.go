@@ -26,6 +26,37 @@ type recordingExecutor struct {
 
 type rejectingOracle struct{}
 
+type adaptiveSource struct {
+	step int
+}
+
+func (s *adaptiveSource) Reset(initial core.Observation) error {
+	s.step = 0
+	if len(initial.Messages) != 0 {
+		return errors.New("initial network is not empty")
+	}
+	return nil
+}
+
+func (s *adaptiveSource) Next(observation core.Observation) (plan.PlanAction, bool, error) {
+	switch s.step {
+	case 0:
+		s.step++
+		return plan.PlanAction{Kind: plan.ActionTimeout, Node: 1}, true, nil
+	case 1:
+		s.step++
+		if len(observation.Messages) == 0 {
+			return plan.PlanAction{}, false, errors.New("timeout produced no vote messages")
+		}
+		message := observation.Messages[0]
+		return plan.PlanAction{Kind: plan.ActionDeliver, Messages: &plan.MessageRangeSelector{
+			Link: core.LinkID{From: message.From, To: message.To}, Start: message.Position, Count: 1,
+		}}, true, nil
+	default:
+		return plan.PlanAction{}, false, nil
+	}
+}
+
 func (rejectingOracle) Reset(core.Observation) []oracle.Finding { return nil }
 
 func (rejectingOracle) Check(model.Transition) []oracle.Finding {
@@ -82,6 +113,20 @@ func TestEngineRunsPlanThroughRaftMapperAndModel(t *testing.T) {
 	}
 	if role := nodeRole(result.Final, 1); role != "leader" {
 		t.Fatalf("final node 1 role = %q, want leader", role)
+	}
+}
+
+func TestEngineRunSourceUsesLatestObservationAndStopsVoluntarily(t *testing.T) {
+	engine := newTestEngine(t, plan.DefaultResolverConfig(), nil, Config{})
+	result, err := engine.RunSource(context.Background(), &adaptiveSource{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusCompleted || result.BudgetExhausted || len(result.Resolutions) != 2 || len(result.Trace.Steps) != 2 {
+		t.Fatalf("source result = %+v", result)
+	}
+	if result.Actions.Actions[1].Kind != core.ActionDeliver {
+		t.Fatalf("second action = %+v", result.Actions.Actions[1])
 	}
 }
 
