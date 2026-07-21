@@ -92,7 +92,7 @@ func (m *Mapper) ValidateAction(action core.Action, observation core.Observation
 		}
 		switch message.TypeHint {
 		case "MsgVote", "MsgAppResp", "MsgHeartbeat",
-			"MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp":
+			"MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp", "MsgSnap":
 			return nil
 		case "MsgProp":
 			count, err := strconv.ParseUint(message.Metadata["entry_count"], 10, 64)
@@ -144,6 +144,8 @@ func (m *Mapper) validateMessageMetadataBounds(action core.Action, message core.
 	termFields := []string{"term"}
 	if message.TypeHint == "MsgVote" || message.TypeHint == "MsgApp" {
 		termFields = append(termFields, "log_term")
+	} else if message.TypeHint == "MsgSnap" {
+		termFields = append(termFields, "snapshot_term")
 	}
 	for _, field := range termFields {
 		value, err := strconv.ParseUint(message.Metadata[field], 10, 64)
@@ -166,6 +168,8 @@ func (m *Mapper) validateMessageMetadataBounds(action core.Action, message core.
 		indexFields = append(indexFields, "index")
 	case "MsgHeartbeat":
 		indexFields = append(indexFields, "commit")
+	case "MsgSnap":
+		indexFields = append(indexFields, "snapshot_index")
 	}
 	for _, field := range indexFields {
 		value, err := strconv.ParseUint(message.Metadata[field], 10, 64)

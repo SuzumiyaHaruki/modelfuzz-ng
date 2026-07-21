@@ -2,8 +2,8 @@ package experiment
 
 import "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
 
-// Statistics 是 experiment-metrics.json 的稳定顶层结构。Report 保留每轮
-// 明细，这里只保存适合画图和跨实验汇总的部分。
+// Statistics 是 experiment-metrics.json 的稳定顶层结构，只保存适合画图和
+// 跨实验汇总的部分。
 type Statistics struct {
 	CompletedRuns                int                       `json:"completed_runs"`
 	Succeeded                    int                       `json:"succeeded"`
@@ -16,6 +16,9 @@ type Statistics struct {
 	CorpusEntries                int                       `json:"corpus_entries"`
 	RetainedRuns                 int                       `json:"retained_runs"`
 	InitialExecutions            int                       `json:"initial_executions"`
+	GeneratedMutations           int                       `json:"generated_mutations"`
+	AdmittedMutations            int                       `json:"admitted_mutations"`
+	DiscardedMutations           int                       `json:"discarded_mutations"`
 	ExecutedMutations            int                       `json:"executed_mutations"`
 	PeriodicSeedExecutions       int                       `json:"periodic_seed_executions"`
 	PlansObserved                int                       `json:"plans_observed"`
@@ -44,8 +47,17 @@ type Statistics struct {
 	RunsPerSecond                float64                   `json:"runs_per_second"`
 	MaxCorpusDepth               int                       `json:"max_corpus_depth"`
 	MaxQueuedMessages            int                       `json:"max_queued_messages"`
+	PeakReadyCandidates          int                       `json:"peak_ready_candidates"`
 	CoverageTimeline             []CoveragePoint           `json:"coverage_timeline"`
 	ElapsedMillis                int64                     `json:"elapsed_millis"`
+	SnapshotsCreated             int                       `json:"snapshots_created"`
+	SnapshotsSent                int                       `json:"snapshots_sent"`
+	SnapshotsDelivered           int                       `json:"snapshots_delivered"`
+	SnapshotsApplied             int                       `json:"snapshots_applied"`
+	SnapshotsRejectedOrStale     int                       `json:"snapshots_rejected_or_stale"`
+	LogsCompacted                int                       `json:"logs_compacted"`
+	CompactedEntries             uint64                    `json:"compacted_entries"`
+	SnapshotBytes                uint64                    `json:"snapshot_bytes"`
 }
 
 func (r Report) Statistics() Statistics {
@@ -54,7 +66,9 @@ func (r Report) Statistics() Statistics {
 		StatusCounts: r.StatusCounts, TotalActions: r.TotalActions, TotalEffects: r.TotalEffects,
 		TotalModelEvents: r.TotalModelEvents, UniqueModelStates: r.UniqueModelStates,
 		CorpusEntries: r.CorpusEntries, RetainedRuns: r.RetainedRuns,
-		InitialExecutions: r.InitialExecutions, ExecutedMutations: r.ExecutedMutations,
+		InitialExecutions: r.InitialExecutions, GeneratedMutations: r.GeneratedMutations,
+		AdmittedMutations: r.AdmittedMutations, DiscardedMutations: r.DiscardedMutations,
+		ExecutedMutations:      r.ExecutedMutations,
 		PeriodicSeedExecutions: r.PeriodicSeedExecutions,
 		PlansObserved:          r.PlansObserved, TracesObserved: r.TracesObserved,
 		ModelStatePathsObserved: r.ModelStatePathsObserved,
@@ -70,8 +84,13 @@ func (r Report) Statistics() Statistics {
 		FailureCounts: r.FailureCounts, TerminationCounts: r.TerminationCounts, Duration: r.Duration,
 		ActionsPerSecond: r.ActionsPerSecond, RunsPerSecond: r.RunsPerSecond,
 		MaxCorpusDepth: r.MaxCorpusDepth, MaxQueuedMessages: r.MaxQueuedMessages,
-		CoverageTimeline: append([]CoveragePoint(nil), r.CoverageTimeline...),
-		ElapsedMillis:    r.ElapsedMillis,
+		PeakReadyCandidates: r.PeakReadyCandidates,
+		CoverageTimeline:    append([]CoveragePoint(nil), r.CoverageTimeline...),
+		ElapsedMillis:       r.ElapsedMillis,
+		SnapshotsCreated:    r.SnapshotsCreated, SnapshotsSent: r.SnapshotsSent,
+		SnapshotsDelivered: r.SnapshotsDelivered, SnapshotsApplied: r.SnapshotsApplied,
+		SnapshotsRejectedOrStale: r.SnapshotsRejectedOrStale, LogsCompacted: r.LogsCompacted,
+		CompactedEntries: r.CompactedEntries, SnapshotBytes: r.SnapshotBytes,
 	}
 }
 

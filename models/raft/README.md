@@ -20,6 +20,12 @@ Timeout
 - 默认配置是 3 节点，term、日志长度和请求值均有界；规模变化时应从同一份
   实验配置生成 `raft.cfg`、Adapter Config 和 Mapper Config。当前 Mapper 对应
   字段为 `NodeIDs`、`MaxValue`、`MaxLogIndex`、`LargestTerm`。
+- `raft-5.cfg` 是5/5烟雾配置，`raft-10.cfg` 是原 ModelFuzz 主实验使用的10/10
+  配置；`raft-5nodes-10.cfg` 使用五节点和10/10边界，供选举 quorum mutant
+  对照实验使用。这些配置的 `ControlledNext` 专供严格 HTTP 服务按事件创建 Action，
+  不在 Tool 启动时枚举全部参数组合。兼容文件 `raft.cfg` 仍使用5/5边界的
+  完整 `Spec`，可用于普通 TLC 枚举。使用 controlled TLC 时必须让 Go JSON/CLI 边界
+  与所选 cfg 一致，严格服务会在 `/health` 暴露实际值供 CLI 自动核对。
 - 客户端请求暂时必须是 `1..MaxValue` 的十进制整数。`0` 保留给 etcd-raft
   成为 leader 时产生的 no-op entry。Follower 已知当前 Leader 时会产生受控
   `MsgProp`；只有该消息投递到当前 Leader 时，Mapper 才生成 `ClientRequest`。
@@ -40,6 +46,12 @@ Timeout
 - 模型使用 `currentActive`、`RemoveFromActive` 和 `AddToActive` 表达
   crash/restart；崩溃保留稳定状态，恢复会重置节点的 Raft 易失状态。
 - snapshot、membership change 和 PreVote 尚未建模，Mapper 会明确拒绝对应语义。
+- 更准确地说，当前基础模型不包含 snapshot 变量或 InstallSnapshot 状态转换；
+  Adapter 产生的 snapshot 创建/发送/投递/应用/压缩 Effect 和 `MsgSnap` 被稳定归类为
+  model stutter。这保持基础模型可用，但不等于形式化验证了 snapshot install。
+- 原 artifact 的 `raft_enhanced.tla` 只提供 `snapshotIndex`/
+  `UpdateSnapshotIndex(i, si)` 抽象，也不是完整 InstallSnapshot 协议。NG 当前没有将它
+  冒充为增强 snapshot 模型；如果后续引入，将使用独立 Profile/配置。
 - `TypeOK` 对 term、日志 entry、日志长度、commit、投票集合以及 leader 复制索引
   做完整有界检查；`CommittedPrefixAgreement` 和 `LogMatching` 分别检查已提交
   前缀一致性与 Raft 日志匹配性质。

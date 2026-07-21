@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
@@ -65,14 +66,14 @@ func TestRunnerDerivesSeedsPreservesOrderAndAggregatesCoverage(t *testing.T) {
 	}
 }
 
-func TestUnfinishedReportSlotsHaveCompactJSON(t *testing.T) {
-	report := newReport(Config{Runs: 20_000}, true)
+func TestFeedbackReportDoesNotAllocateRunSlots(t *testing.T) {
+	report := newFeedbackReport(Config{Runs: 20_000})
 	data, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(data) > 500_000 {
-		t.Fatalf("empty 20k-run report is unexpectedly large: %d bytes", len(data))
+	if len(report.Runs) != 0 || len(data) > 10_000 {
+		t.Fatalf("empty 20k-run feedback report contains run history: runs=%d bytes=%d", len(report.Runs), len(data))
 	}
 }
 
@@ -98,7 +99,13 @@ func TestFeedbackRunnerRetainsCoverageAndExecutesMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, snapshot, err := runner.RunFeedback(context.Background(), FeedbackOptions{Mutator: feedbackMutator{}},
+	runs := make([]Run, 0, 5)
+	report, snapshot, err := runner.RunFeedback(context.Background(), FeedbackOptions{
+		Mutator: feedbackMutator{}, Hooks: Hooks{OnRunComplete: func(completion Completion) error {
+			runs = append(runs, completion.Run)
+			return nil
+		}},
+	},
 		func(_ context.Context, index int, _ int64, candidate Candidate) (FeedbackExecution, error) {
 			sequence := plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}}
 			if candidate.Plan != nil {
@@ -122,8 +129,8 @@ func TestFeedbackRunnerRetainsCoverageAndExecutesMutations(t *testing.T) {
 		report.ExecutedMutations == 0 || report.GeneratedMutations == 0 {
 		t.Fatalf("feedback report = %+v", report)
 	}
-	if len(snapshot.Entries) != 2 || !report.Runs[0].Retained || report.Runs[1].ParentID == "" {
-		t.Fatalf("snapshot/runs = %+v/%+v", snapshot, report.Runs)
+	if snapshot.EntryCount != 2 || !runs[0].Retained || runs[1].ParentID == "" || len(report.Runs) != 0 {
+		t.Fatalf("snapshot/runs = %+v/%+v", snapshot, runs)
 	}
 }
 
@@ -135,7 +142,13 @@ func TestFeedbackRunnerCountsUniquePlansTracesAndModelStatePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, _, err := runner.RunFeedback(context.Background(), FeedbackOptions{Mutator: failingMutator{}},
+	runs := make([]Run, 0, 4)
+	report, _, err := runner.RunFeedback(context.Background(), FeedbackOptions{
+		Mutator: failingMutator{}, Hooks: Hooks{OnRunComplete: func(completion Completion) error {
+			runs = append(runs, completion.Run)
+			return nil
+		}},
+	},
 		func(_ context.Context, index int, _ int64, _ Candidate) (FeedbackExecution, error) {
 			node := core.NodeID(1)
 			states := []model.State{{Key: 1}, {Key: 2}}
@@ -165,7 +178,7 @@ func TestFeedbackRunnerCountsUniquePlansTracesAndModelStatePaths(t *testing.T) {
 		t.Fatalf("path statistics = observed %d unique %d duplicate %.2f", report.ModelStatePathsObserved, report.UniqueModelStatePaths, report.DuplicateModelStatePathRatio)
 	}
 	newPlans, newTraces, newPaths := 0, 0, 0
-	for _, run := range report.Runs {
+	for _, run := range runs {
 		if run.NewPlan {
 			newPlans++
 		}
@@ -316,11 +329,16 @@ func TestFeedbackRunnerResubmitsPendingMutationAfterResume(t *testing.T) {
 	runner, _ := New(config)
 	ctx, cancel := context.WithCancel(context.Background())
 	var checkpoint Checkpoint
+	var corpusEntries []corpus.Entry
 	options := FeedbackOptions{
 		Mutator: cancelBlockingMutator{},
 		Hooks: Hooks{
 			OnRunComplete: func(Completion) error { cancel(); return nil },
 			OnCheckpoint:  func(value Checkpoint) error { checkpoint = value; return nil },
+			OnCorpusEntry: func(entry corpus.Entry) error {
+				corpusEntries = append(corpusEntries, entry)
+				return nil
+			},
 		},
 	}
 	execute := func(_ context.Context, index int, _ int64, candidate Candidate) (FeedbackExecution, error) {
@@ -346,6 +364,7 @@ func TestFeedbackRunnerResubmitsPendingMutationAfterResume(t *testing.T) {
 	}
 
 	options.Resume = &checkpoint
+	options.ResumeCorpusEntries = corpusEntries
 	options.Mutator = feedbackMutator{}
 	options.Hooks.OnRunComplete = nil
 	report, _, err := runner.RunFeedback(context.Background(), options, execute)
@@ -396,6 +415,50 @@ func TestFeedbackRunnerDoesNotCheckpointEveryMutationCompletion(t *testing.T) {
 	}
 	if mutationEvents != 1 || checkpoints != 2 {
 		t.Fatalf("mutation events/checkpoints = %d/%d, want 1/2", mutationEvents, checkpoints)
+	}
+}
+
+func TestFeedbackRunnerBoundsReadyQueueAndPrefersNewCandidates(t *testing.T) {
+	runner, err := New(Config{
+		Runs: 12, BaseSeed: 800, Parallelism: 1, InitialPopulation: 1,
+		MutationsPerNewState: 5, MaxMutationsPerCorpus: 5, MaxReadyCandidates: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxCheckpointReady := 0
+	report, _, err := runner.RunFeedback(context.Background(), FeedbackOptions{
+		Mutator: feedbackMutator{},
+		Hooks: Hooks{OnCheckpoint: func(checkpoint Checkpoint) error {
+			if len(checkpoint.Ready) > maxCheckpointReady {
+				maxCheckpointReady = len(checkpoint.Ready)
+			}
+			if len(checkpoint.Ready) > 2 {
+				t.Fatalf("checkpoint ready queue exceeded bound: %d", len(checkpoint.Ready))
+			}
+			return nil
+		}},
+	}, func(_ context.Context, index int, _ int64, candidate Candidate) (FeedbackExecution, error) {
+		sequence := plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}}
+		if candidate.Plan != nil {
+			sequence = candidate.Plan.Copy()
+		}
+		return FeedbackExecution{Plan: sequence, Result: engine.Result{
+			Status: engine.StatusCompleted, ModelStates: []model.State{{Key: int64(index + 1)}},
+			Trace: core.Trace{Version: core.CurrentTraceVersion,
+				ExecutionID: core.ExecutionID(fmt.Sprintf("bounded-ready-%d", index)), Steps: []core.StepRecord{}},
+		}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.PeakReadyCandidates != 2 || maxCheckpointReady > 2 || report.DiscardedMutations == 0 ||
+		report.AdmittedMutations == 0 || report.GeneratedMutations < report.AdmittedMutations {
+		t.Fatalf("bounded queue report = %+v, checkpoint peak = %d", report, maxCheckpointReady)
+	}
+	statistics := report.Statistics()
+	if statistics.PeakReadyCandidates != 2 || statistics.DiscardedMutations != report.DiscardedMutations {
+		t.Fatalf("bounded queue statistics = %+v", statistics)
 	}
 }
 

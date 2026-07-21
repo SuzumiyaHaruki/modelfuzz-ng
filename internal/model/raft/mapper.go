@@ -13,6 +13,7 @@ import (
 
 const deliveredMessageEvent = "raft.message_delivered"
 const proposalDroppedEvent = "raft.proposal_dropped"
+const voteQuorumFaultEvent = "raft.vote_quorum_fault_activated"
 
 var ErrUnsupportedSemantics = errors.New("transition is not represented by the raft model")
 
@@ -174,11 +175,17 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 					return nil, err
 				}
 				events = append(events, mapped...)
-			case proposalDroppedEvent:
+			case proposalDroppedEvent, voteQuorumFaultEvent:
 				// Candidate、无已知 leader 的 follower 或关闭转发时，etcd-raft
-				// 明确丢弃 proposal；轻量模型状态不发生变化。
+				// 明确丢弃 proposal；fault activation 只是 SUT 插桩记录。
+				// 两者都不直接改变轻量模型状态；异常的 BecomeLeader 会由
+				// 后续正确 quorum 前置条件拒绝。
 				continue
-			case "raft.snapshot_applied", "raft.config_changed":
+			case "raft.snapshot_created", "raft.snapshot_sent", "raft.snapshot_delivered",
+				"raft.snapshot_applied", "raft.snapshot_rejected_or_stale", "raft.log_compacted":
+				// 基础 raft.tla 没有 snapshot 变量；这些应用/存储层事件稳定地映射为 stutter。
+				continue
+			case "raft.config_changed":
 				return nil, fmt.Errorf("%w: model event %s", ErrUnsupportedSemantics, event.Name)
 			case "raft.entry_committed":
 				if roleOf(transition.After, event.Node) == "leader" {
@@ -239,7 +246,7 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effec
 	}
 
 	switch messageType {
-	case "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp":
+	case "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp", "MsgSnap":
 		// 当前配置关闭 CheckQuorum，且轻量模型不包含只读请求状态；这些消息
 		// 对模型变量是明确的 stutter，而不是泛化的“未知消息忽略”。
 		return nil, nil

@@ -38,6 +38,7 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 				"heartbeat_timeout":           raftStatus.HeartbeatTimeout,
 				"heartbeat_ticks_remaining":   ticksRemaining(raftStatus.HeartbeatTimeout, raftStatus.HeartbeatElapsed),
 			}
+			addSnapshotObservation(a.config.Snapshot, n, semantic)
 		} else {
 			hardState, _, err := n.storage.InitialState()
 			if err != nil {
@@ -54,6 +55,7 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 				"last_term":  n.lastTerm,
 				"log_digest": n.logDigest,
 			}
+			addSnapshotObservation(a.config.Snapshot, n, semantic)
 		}
 		nodes = append(nodes, core.NodeObservation{
 			ID: id, Epoch: n.epoch, Status: status, Semantic: semantic,
@@ -86,6 +88,19 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 			"running_nodes": running,
 		},
 	}, nil
+}
+
+func addSnapshotObservation(policy SnapshotPolicy, n *node, semantic map[string]any) {
+	if policy.Threshold == 0 {
+		return
+	}
+	semantic["first_index"] = n.firstIndex
+	semantic["snapshot_index"] = n.lastSnapshotIndex
+	semantic["snapshot_term"] = n.lastSnapshotTerm
+	semantic["snapshots_created"] = n.snapshotsCreated
+	semantic["snapshots_applied"] = n.snapshotsApplied
+	semantic["logs_compacted"] = n.logsCompacted
+	semantic["compacted_entries"] = n.compactedEntries
 }
 
 func ticksRemaining(timeout, elapsed int) int {

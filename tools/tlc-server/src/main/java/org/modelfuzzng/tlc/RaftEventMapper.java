@@ -5,23 +5,98 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.LongAdder;
+import tla2sany.semantic.FormalParamNode;
+import tla2sany.semantic.ModuleNode;
+import tla2sany.semantic.OpDefNode;
 import tlc2.tool.Action;
+import tlc2.tool.ITool;
+import tlc2.util.Context;
 import tlc2.value.impl.BoolValue;
 import tlc2.value.impl.IntValue;
-import tlc2.value.impl.Value;
-import util.UniqueString;
 
-/** 把 NG 当前模型事件协议映射为已经枚举参数的 TLA+ Action。 */
+/** 把 NG 当前模型事件协议按需绑定为 TLA+ Action。 */
 final class RaftEventMapper {
-    private final Map<String, List<Action>> actionsByName = new HashMap<>();
+    private final ITool tool;
+    private final Map<String, ActionDefinition> definitionsByName = new HashMap<>();
+    private final Map<ActionKey, Action> actionCache;
+    private final ModelBounds bounds;
+    private final int actionCacheLimit;
+    private final LongAdder lookupCount = new LongAdder();
+    private final LongAdder lookupNanos = new LongAdder();
+    private final LongAdder cacheHits = new LongAdder();
+    private final LongAdder cacheMisses = new LongAdder();
+    private final LongAdder actionsCreated = new LongAdder();
+    private final LongAdder cacheEvictions = new LongAdder();
 
-    RaftEventMapper(Action[] actions) {
-        for (Action action : actions) {
-            actionsByName.computeIfAbsent(action.getName().toString(), ignored -> new ArrayList<>()).add(action);
+    RaftEventMapper(ITool tool, ModuleNode module, ModelBounds bounds, int actionCacheLimit) {
+        if (actionCacheLimit < 1) {
+            throw new IllegalArgumentException("action cache limit must be positive");
         }
+        this.tool = tool;
+        this.bounds = bounds;
+        this.actionCacheLimit = actionCacheLimit;
+        for (String name : List.of(
+            "RemoveFromActive", "AddToActive", "Timeout", "BecomeLeader", "ClientRequest",
+            "HandleRequestVoteRequest", "HandleRequestVoteResponse", "HandleNilAppendEntriesRequest",
+            "HandleAppendEntriesRequest", "HandleAppendEntriesResponse", "AdvanceCommitIndex"
+        )) {
+            OpDefNode definition = module.getOpDef(name);
+            if (definition != null) {
+                definitionsByName.put(name, new ActionDefinition(definition));
+            }
+        }
+        this.actionCache = new LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<ActionKey, Action> eldest) {
+                boolean remove = size() > RaftEventMapper.this.actionCacheLimit;
+                if (remove) {
+                    cacheEvictions.increment();
+                }
+                return remove;
+            }
+        };
+    }
+
+    int actionDefinitionCount() {
+        return definitionsByName.size();
+    }
+
+    synchronized int cachedActionCount() {
+        return actionCache.size();
+    }
+
+    int actionCacheLimit() {
+        return actionCacheLimit;
+    }
+
+    long lookupCount() {
+        return lookupCount.sum();
+    }
+
+    long lookupNanos() {
+        return lookupNanos.sum();
+    }
+
+    long cacheHitCount() {
+        return cacheHits.sum();
+    }
+
+    long cacheMissCount() {
+        return cacheMisses.sum();
+    }
+
+    long actionsCreatedCount() {
+        return actionsCreated.sum();
+    }
+
+    long cacheEvictionCount() {
+        return cacheEvictions.sum();
     }
 
     List<MappedEvent> map(String input) throws ProtocolException {
@@ -133,46 +208,106 @@ final class RaftEventMapper {
         return expected;
     }
 
-    private Action findAction(String actionName, Map<String, Object> expected, int index, String eventName)
+    private synchronized Action findAction(String actionName, Map<String, Object> expected, int index, String eventName)
         throws ProtocolException {
-        List<Action> candidates = actionsByName.getOrDefault(actionName, List.of());
-        Action match = null;
-        for (Action candidate : candidates) {
-            if (!parametersMatch(candidate, expected)) {
-                continue;
+        long started = System.nanoTime();
+        lookupCount.increment();
+        try {
+            ActionDefinition definition = definitionsByName.get(actionName);
+            if (definition == null) {
+                throw failure("unmapped_action", index, eventName, 422,
+                    "no bounded TLA+ action matches " + actionName + expected);
             }
-            if (match != null) {
-                throw failure("ambiguous_action_mapping", index, eventName, 500,
-                    "multiple TLA+ actions match " + actionName + expected);
+            ParameterTuple key = definition.keyFor(expected, bounds);
+            if (key == null) {
+                throw failure("unmapped_action", index, eventName, 422,
+                    "no bounded TLA+ action matches " + actionName + expected);
             }
-            match = candidate;
+            ActionKey cacheKey = new ActionKey(actionName, key);
+            Action cached = actionCache.get(cacheKey);
+            if (cached != null) {
+                cacheHits.increment();
+                return cached;
+            }
+            cacheMisses.increment();
+            Action created = definition.create(tool, expected);
+            actionsCreated.increment();
+            actionCache.put(cacheKey, created);
+            return created;
+        } finally {
+            lookupNanos.add(System.nanoTime() - started);
         }
-        if (match == null) {
-            throw failure("unmapped_action", index, eventName, 422,
-                "no bounded TLA+ action matches " + actionName + expected);
-        }
-        return match;
     }
 
-    private boolean parametersMatch(Action action, Map<String, Object> expected) {
-        Map<UniqueString, Value> actual = action.getParameters();
-        if (actual.size() != expected.size()) {
-            return false;
+    /** 从操作符形参建立 schema，事件到达前不创建任何具体 Action。 */
+    private static final class ActionDefinition {
+        private final OpDefNode definition;
+        private final FormalParamNode[] parameters;
+
+        ActionDefinition(OpDefNode definition) {
+            this.definition = definition;
+            this.parameters = definition.getParams();
         }
-        for (Map.Entry<String, Object> item : expected.entrySet()) {
-            Value value = actual.get(UniqueString.uniqueStringOf(item.getKey()));
-            if (item.getValue() instanceof Boolean booleanValue) {
-                if (!(value instanceof BoolValue actualBoolean) || actualBoolean.val != booleanValue) {
-                    return false;
+
+        ParameterTuple keyFor(Map<String, Object> expected, ModelBounds bounds) {
+            if (expected.size() != parameters.length) {
+                return null;
+            }
+            long[] values = new long[parameters.length];
+            for (int index = 0; index < parameters.length; index++) {
+                String name = parameters[index].getName().toString();
+                if (!expected.containsKey(name)) {
+                    return null;
                 }
-            } else {
-                long integer = (Long) item.getValue();
-                if (!(value instanceof IntValue actualInteger) || actualInteger.val != integer) {
-                    return false;
+                Object value = expected.get(name);
+                if (value instanceof Boolean booleanValue) {
+                    values[index] = booleanValue ? 1 : 0;
+                } else if (value instanceof Long integerValue
+                    && integerValue >= Integer.MIN_VALUE && integerValue <= Integer.MAX_VALUE
+                    && bounds.contains(name, integerValue)) {
+                    values[index] = integerValue;
+                } else {
+                    return null;
                 }
             }
+            return new ParameterTuple(values);
         }
-        return true;
+
+        Action create(ITool tool, Map<String, Object> expected) {
+            Context context = Context.Empty;
+            for (FormalParamNode parameter : parameters) {
+                Object value = expected.get(parameter.getName().toString());
+                if (value instanceof Boolean booleanValue) {
+                    context = context.cons(parameter, booleanValue ? BoolValue.ValTrue : BoolValue.ValFalse);
+                } else {
+                    context = context.cons(parameter, IntValue.gen(Math.toIntExact((Long) value)));
+                }
+            }
+            return new Action(tool, definition.getBody(), context, definition);
+        }
+    }
+
+    private record ActionKey(String actionName, ParameterTuple parameters) {}
+
+    /** long[] 需要内容相等语义，不能直接使用数组自身的 identity equals。 */
+    private static final class ParameterTuple {
+        private final long[] values;
+        private final int hashCode;
+
+        ParameterTuple(long[] values) {
+            this.values = values;
+            this.hashCode = Arrays.hashCode(values);
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof ParameterTuple tuple && Arrays.equals(values, tuple.values);
+        }
+
+        @Override
+        public int hashCode() {
+            return hashCode;
+        }
     }
 
     private static Map<String, Object> values(Object... items) {

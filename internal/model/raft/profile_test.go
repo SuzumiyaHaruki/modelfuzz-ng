@@ -53,7 +53,6 @@ func TestProfileRejectsUnsupportedAndOutOfBoundsMessages(t *testing.T) {
 		kind, count, index string
 		category           error
 	}{
-		{kind: "MsgSnap", count: "0", index: "0", category: model.ErrUnsupportedByProfile},
 		{kind: "MsgApp", count: "6", index: "0", category: model.ErrModelBoundReached},
 		{kind: "MsgApp", count: "invalid", index: "0", category: model.ErrUnsupportedByProfile},
 		{kind: "MsgApp", count: "2", index: "4", category: model.ErrModelBoundReached},
@@ -64,6 +63,17 @@ func TestProfileRejectsUnsupportedAndOutOfBoundsMessages(t *testing.T) {
 		if !errors.Is(err, test.category) {
 			t.Fatalf("%s/%s error = %v, want category %v", test.kind, test.count, err, test.category)
 		}
+	}
+}
+
+func TestProfileAcceptsBoundedSnapshotMessage(t *testing.T) {
+	mapper := NewMapper()
+	observation := profileObservation("MsgSnap", "0", "0")
+	observation.Messages[0].Metadata["snapshot_index"] = "2"
+	observation.Messages[0].Metadata["snapshot_term"] = "1"
+	observation.Messages[0].Metadata["snapshot_bytes"] = "128"
+	if err := mapper.ValidateAction(messageAction(core.ActionDeliver), observation); err != nil {
+		t.Fatalf("bounded MsgSnap rejected: %v", err)
 	}
 }
 

@@ -26,18 +26,21 @@ type RandomWeights struct {
 
 // RandomConfig 把随机基线限制在当前有界 Raft Profile 内。
 type RandomConfig struct {
-	MaxValue    int           `json:"max_value"`
-	MaxLogIndex uint64        `json:"max_log_index"`
-	LargestTerm uint64        `json:"largest_term"`
-	MaxCrashed  int           `json:"max_crashed"`
-	Weights     RandomWeights `json:"weights"`
+	NodeIDs         []core.NodeID `json:"node_ids"`
+	MaxValue        int           `json:"max_value"`
+	MaxLogIndex     uint64        `json:"max_log_index"`
+	LargestTerm     uint64        `json:"largest_term"`
+	MaxCrashed      int           `json:"max_crashed"`
+	TimeoutCooldown int           `json:"timeout_cooldown"`
+	Weights         RandomWeights `json:"weights"`
 }
 
 func DefaultRandomConfig() RandomConfig {
 	return RandomConfig{
-		MaxValue: 5, MaxLogIndex: 5, LargestTerm: 5, MaxCrashed: 1,
+		NodeIDs: []core.NodeID{1, 2, 3}, MaxValue: 5, MaxLogIndex: 5,
+		LargestTerm: 5, MaxCrashed: 1, TimeoutCooldown: 4,
 		Weights: RandomWeights{
-			Deliver: 50, Drop: 5, Duplicate: 5, Timeout: 20, Request: 15,
+			Deliver: 60, Drop: 5, Duplicate: 5, Timeout: 5, Request: 15,
 			AdvanceTicks: 5, Crash: 5, Restart: 10,
 		},
 	}
@@ -58,6 +61,7 @@ func NewRandom(seed int64, config RandomConfig) (*Random, error) {
 		return nil, err
 	}
 	profileConfig := raftmodel.DefaultConfig()
+	profileConfig.NodeIDs = append([]core.NodeID(nil), config.NodeIDs...)
 	profileConfig.MaxValue = config.MaxValue
 	profileConfig.MaxLogIndex = config.MaxLogIndex
 	profileConfig.LargestTerm = config.LargestTerm
@@ -146,10 +150,14 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 	restarts := make([]plan.PlanAction, 0, len(nodes))
 	runningCount := 0
 	crashedCount := 0
+	hasLeader := false
 	for _, node := range nodes {
 		switch node.Status {
 		case core.NodeRunning:
 			runningCount++
+			if node.Semantic["role"] == "leader" {
+				hasLeader = true
+			}
 		case core.NodeCrashed:
 			crashedCount++
 		}
@@ -186,16 +194,36 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 		advance = append(advance, plan.PlanAction{Kind: plan.ActionAdvanceTicks, Ticks: 1})
 	}
 
+	timeoutWeight := p.config.Weights.Timeout
+	if p.timeoutCoolingDown() {
+		timeoutWeight = 0
+	} else if hasLeader && timeoutWeight > 0 {
+		// 已有 leader 时保留少量重新选举探索，但显著弱化强制 timeout。
+		timeoutWeight = max(1, timeoutWeight/4)
+	}
 	return []actionGroup{
 		{weight: p.config.Weights.Deliver, actions: deliver},
 		{weight: p.config.Weights.Drop, actions: drop},
 		{weight: p.config.Weights.Duplicate, actions: duplicate},
-		{weight: p.config.Weights.Timeout, actions: timeouts},
+		{weight: timeoutWeight, actions: timeouts},
 		{weight: p.config.Weights.Request, actions: requests},
 		{weight: p.config.Weights.AdvanceTicks, actions: advance},
 		{weight: p.config.Weights.Crash, actions: crashes},
 		{weight: p.config.Weights.Restart, actions: restarts},
 	}
+}
+
+func (p *Random) timeoutCoolingDown() bool {
+	if p.config.TimeoutCooldown <= 0 {
+		return false
+	}
+	start := max(0, len(p.generated)-p.config.TimeoutCooldown)
+	for _, action := range p.generated[start:] {
+		if action.Kind == plan.ActionTimeout {
+			return true
+		}
+	}
+	return false
 }
 
 func observedNodeRunning(observation core.Observation, id core.NodeID) bool {
@@ -247,8 +275,18 @@ func messagePlanAction(kind plan.ActionKind, message core.MessageObservation) pl
 }
 
 func validateRandomConfig(config RandomConfig) error {
-	if config.MaxValue <= 0 || config.MaxLogIndex == 0 || config.LargestTerm == 0 || config.MaxCrashed <= 0 {
+	if len(config.NodeIDs) == 0 || config.MaxValue <= 0 || config.MaxLogIndex == 0 || config.LargestTerm == 0 || config.MaxCrashed <= 0 || config.TimeoutCooldown < 0 {
 		return fmt.Errorf("random policy bounds must be positive")
+	}
+	seen := make(map[core.NodeID]struct{}, len(config.NodeIDs))
+	for _, id := range config.NodeIDs {
+		if !id.Valid() {
+			return fmt.Errorf("random policy node IDs must be non-zero")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("random policy contains duplicate node %s", id)
+		}
+		seen[id] = struct{}{}
 	}
 	weights := []int{config.Weights.Deliver, config.Weights.Drop, config.Weights.Duplicate,
 		config.Weights.Timeout, config.Weights.Request, config.Weights.AdvanceTicks,

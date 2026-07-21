@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"math"
 	"strconv"
 
@@ -19,16 +20,28 @@ type node struct {
 	epoch   core.NodeEpoch
 	running bool
 
-	raw       *raft.RawNode
-	storage   *raft.MemoryStorage
-	applied   uint64
-	confState *raftpb.ConfState
-	lastIndex uint64
-	lastTerm  uint64
-	logDigest string
-	// prefixDigests[index] 是从日志 1 到 index（含）的稳定摘要。它只在
-	// MemoryStorage 仍保留完整前缀时可用，供 Oracle 比较共同 committed prefix。
-	prefixDigests map[uint64]string
+	raw               *raft.RawNode
+	storage           *raft.MemoryStorage
+	applied           uint64
+	confState         *raftpb.ConfState
+	firstIndex        uint64
+	lastIndex         uint64
+	lastTerm          uint64
+	logDigest         string
+	lastSnapshotIndex uint64
+	lastSnapshotTerm  uint64
+	// prefixDigests 是应用层的逻辑 committed prefix，独立于已压缩的 Raft log。
+	prefixDigests    map[uint64]string
+	prefixHash       hash.Hash
+	snapshotEnabled  bool
+	snapshotsCreated uint64
+	snapshotsApplied uint64
+	logsCompacted    uint64
+	compactedEntries uint64
+	// voteResponses 只服务于显式开启的 n/3+1 选举 quorum fault。它记录
+	// 当前 candidate term 已经实际收到的不同 voter 响应。
+	voteTerm      uint64
+	voteResponses map[core.NodeID]bool
 }
 
 func newNode(config Config, id core.NodeID, confState *raftpb.ConfState, random raft.Rand) (*node, error) {
@@ -48,13 +61,18 @@ func newNode(config Config, id core.NodeID, confState *raftpb.ConfState, random 
 	if err != nil {
 		return nil, fmt.Errorf("create node %s: %w", id, err)
 	}
+	prefixHash := sha256.New()
+	_, _ = prefixHash.Write([]byte("modelfuzz-ng/raft-log-prefix/v1"))
 	n := &node{
-		id:        id,
-		epoch:     1,
-		running:   true,
-		raw:       raw,
-		storage:   storage,
-		confState: proto.Clone(confState).(*raftpb.ConfState),
+		id:              id,
+		epoch:           1,
+		running:         true,
+		raw:             raw,
+		storage:         storage,
+		confState:       proto.Clone(confState).(*raftpb.ConfState),
+		prefixDigests:   map[uint64]string{0: fmt.Sprintf("%x", prefixHash.Sum(nil))},
+		prefixHash:      prefixHash,
+		snapshotEnabled: config.Snapshot.Threshold > 0,
 	}
 	if err := n.refreshLogState(); err != nil {
 		return nil, fmt.Errorf("observe initial log for node %s: %w", id, err)
@@ -70,12 +88,16 @@ func (n *node) restart(config Config, random raft.Rand) error {
 	n.epoch++
 	n.running = true
 	n.raw = raw
+	n.voteTerm = 0
+	n.voteResponses = nil
 	return n.refreshLogState()
 }
 
 func (n *node) crash() {
 	n.running = false
 	n.raw = nil
+	n.voteTerm = 0
+	n.voteResponses = nil
 }
 
 func (n *node) setConfState(state *raftpb.ConfState) {
@@ -113,6 +135,8 @@ func (n *node) refreshLogState() error {
 	if err := writeProtoDigest(hash, snapshot); err != nil {
 		return err
 	}
+	n.lastSnapshotIndex = snapshot.GetMetadata().GetIndex()
+	n.lastSnapshotTerm = snapshot.GetMetadata().GetTerm()
 	entries := make([]*raftpb.Entry, 0)
 	if first <= last {
 		entries, err = n.storage.Entries(first, last+1, math.MaxUint64)
@@ -126,24 +150,10 @@ func (n *node) refreshLogState() error {
 		}
 	}
 
-	prefixDigests := make(map[uint64]string)
-	if first == 1 {
-		prefixHash := sha256.New()
-		if _, err := prefixHash.Write([]byte("modelfuzz-ng/raft-log-prefix/v1")); err != nil {
-			return err
-		}
-		prefixDigests[0] = fmt.Sprintf("%x", prefixHash.Sum(nil))
-		for _, entry := range entries {
-			if err := writeProtoDigest(prefixHash, entry); err != nil {
-				return err
-			}
-			prefixDigests[entry.GetIndex()] = fmt.Sprintf("%x", prefixHash.Sum(nil))
-		}
-	}
+	n.firstIndex = first
 	n.lastIndex = last
 	n.lastTerm = lastTerm
 	n.logDigest = fmt.Sprintf("%x", hash.Sum(nil))
-	n.prefixDigests = prefixDigests
 	return nil
 }
 

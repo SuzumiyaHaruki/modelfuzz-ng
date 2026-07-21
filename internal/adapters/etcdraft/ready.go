@@ -15,13 +15,19 @@ const maxReadyRounds = 1024
 // drainReady 立即完成一次操作产生的全部 Ready 工作。这样 Step、Tick、
 // Campaign 和 Propose 的输出都会归属于触发它们的同一条 Action。
 func (a *Adapter) drainReady(n *node, at core.LogicalTime, emit bool) ([]core.Effect, error) {
+	return a.drainReadyForwarded(n, at, emit, nil)
+}
+
+func (a *Adapter) drainReadyForwarded(
+	n *node, at core.LogicalTime, emit bool, forwarded *core.Message,
+) ([]core.Effect, error) {
 	effects := make([]core.Effect, 0)
 	for round := 0; n.raw.HasReady(); round++ {
 		if round >= maxReadyRounds {
 			return nil, fmt.Errorf("ready processing exceeded %d rounds", maxReadyRounds)
 		}
 		rd := n.raw.Ready()
-		current, err := a.handleReady(n, at, rd, emit)
+		current, err := a.handleReady(n, at, rd, emit, forwarded)
 		if err != nil {
 			return nil, err
 		}
@@ -31,22 +37,17 @@ func (a *Adapter) drainReady(n *node, at core.LogicalTime, emit bool) ([]core.Ef
 	return effects, nil
 }
 
-func (a *Adapter) handleReady(n *node, at core.LogicalTime, rd raft.Ready, emit bool) ([]core.Effect, error) {
+func (a *Adapter) handleReady(
+	n *node, at core.LogicalTime, rd raft.Ready, emit bool, forwarded *core.Message,
+) ([]core.Effect, error) {
 	effects := make([]core.Effect, 0, len(rd.CommittedEntries)+len(rd.Messages))
 	logChanged := false
 	if !raft.IsEmptySnap(rd.Snapshot) {
-		if err := n.storage.ApplySnapshot(rd.Snapshot); err != nil {
-			return nil, fmt.Errorf("node %s apply snapshot: %w", n.id, err)
+		current, err := a.applyReadySnapshot(n, at, rd.Snapshot, emit)
+		if err != nil {
+			return nil, err
 		}
-		n.applied = rd.Snapshot.GetMetadata().GetIndex()
-		n.setConfState(rd.Snapshot.GetMetadata().GetConfState())
-		logChanged = true
-		if emit {
-			effects = append(effects, modelEffect(at, "raft.snapshot_applied", n.id, map[string]any{
-				"index": n.applied,
-				"term":  rd.Snapshot.GetMetadata().GetTerm(),
-			}))
-		}
+		effects = append(effects, current...)
 	}
 	if !raft.IsEmptyHardState(rd.HardState) {
 		if err := n.storage.SetHardState(proto.Clone(rd.HardState).(*raftpb.HardState)); err != nil {
@@ -72,8 +73,13 @@ func (a *Adapter) handleReady(n *node, at core.LogicalTime, rd raft.Ready, emit 
 		}
 		effects = append(effects, current...)
 	}
+	snapshotEffects, err := a.maybeSnapshot(n, at, emit)
+	if err != nil {
+		return nil, err
+	}
+	effects = append(effects, snapshotEffects...)
 	for _, message := range rd.Messages {
-		outbound, err := a.outboundMessage(message)
+		outbound, err := a.outboundMessage(message, forwarded)
 		if err != nil {
 			return nil, fmt.Errorf("node %s convert outbound message: %w", n.id, err)
 		}
@@ -81,6 +87,9 @@ func (a *Adapter) handleReady(n *node, at core.LogicalTime, rd raft.Ready, emit 
 			return nil, fmt.Errorf("node %s produced message %s during reset", n.id, outbound.TypeHint)
 		}
 		effects = append(effects, core.Effect{At: at, Kind: core.EffectSendMessage, Message: &outbound})
+		if message.GetType() == raftpb.MsgSnap {
+			effects = append(effects, snapshotEvent(at, "raft.snapshot_sent", n.id, message.GetSnapshot(), nil))
+		}
 	}
 	return effects, nil
 }
@@ -89,7 +98,9 @@ func (a *Adapter) applyCommittedEntry(n *node, at core.LogicalTime, entry *raftp
 	if entry == nil {
 		return nil, fmt.Errorf("node %s received nil committed entry", n.id)
 	}
-	n.applied = entry.GetIndex()
+	if err := n.recordCommitted(entry); err != nil {
+		return nil, fmt.Errorf("node %s record committed entry at %d: %w", n.id, entry.GetIndex(), err)
+	}
 	name := "raft.entry_committed"
 	params := map[string]any{
 		"index":       entry.GetIndex(),
@@ -119,9 +130,16 @@ func (a *Adapter) applyCommittedEntry(n *node, at core.LogicalTime, entry *raftp
 	// MemoryStorage 的 InitialState 从 snapshot 读取 ConfState。每次应用成员
 	// 变更后创建轻量内存 snapshot，保证节点崩溃重建时仍能恢复成员配置。
 	if entry.GetType() == raftpb.EntryConfChange || entry.GetType() == raftpb.EntryConfChangeV2 {
-		if _, err := n.storage.CreateSnapshot(n.applied, n.confState, nil); err != nil {
+		data, err := n.snapshotData(n.applied)
+		if err != nil {
+			return nil, fmt.Errorf("node %s build conf snapshot at %d: %w", n.id, n.applied, err)
+		}
+		snapshot, err := n.storage.CreateSnapshot(n.applied, n.confState, data)
+		if err != nil {
 			return nil, fmt.Errorf("node %s persist conf state at %d: %w", n.id, n.applied, err)
 		}
+		n.lastSnapshotIndex = snapshot.GetMetadata().GetIndex()
+		n.lastSnapshotTerm = snapshot.GetMetadata().GetTerm()
 		if err := n.refreshLogState(); err != nil {
 			return nil, fmt.Errorf("node %s refresh snapshot state at %d: %w", n.id, n.applied, err)
 		}

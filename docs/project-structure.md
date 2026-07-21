@@ -43,7 +43,13 @@ modelfuzz-ng/
 │       └── output.go
 ├── docs/
 │   ├── experiments/
-│   │   └── basic-raft-20260720.md
+│   │   ├── README.md
+│   │   ├── basic-raft-20260720.md
+│   │   ├── checkpoint-v5-tlc-metrics-20260721.md
+│   │   ├── checkpoint-v6-feedback-20260721.md
+│   │   ├── lazy-tlc-actions-20260721.md
+│   │   ├── quorum-one-third-mutant-20260721.md
+│   │   └── snapshot-compaction-20260721.md
 │   ├── project-structure.md
 │   └── timer-design.md
 ├── internal/
@@ -53,8 +59,11 @@ modelfuzz-ng/
 │   │       ├── adapter_test.go
 │   │       ├── cluster.go
 │   │       ├── config.go
+│   │       ├── fault.go
 │   │       ├── message.go
 │   │       ├── node.go
+│   │       ├── snapshot.go
+│   │       ├── snapshot_test.go
 │   │       ├── observation.go
 │   │       ├── random.go
 │   │       ├── ready.go
@@ -118,6 +127,7 @@ modelfuzz-ng/
 │   │   ├── digest.go
 │   │   ├── lifecycle.go
 │   │   ├── runner.go
+│   │   ├── aggregation.go
 │   │   ├── statistics.go
 │   │   └── *_test.go
 │   ├── metrics/
@@ -144,15 +154,22 @@ modelfuzz-ng/
 │       └── adapter.go
 ├── examples/
 │   ├── config.json
+│   ├── config-quorum-mutant.json
+│   ├── config-soak-10.json
+│   ├── config-snapshot.json
 │   └── plans/
 │       ├── client-request-commit.json
 │       ├── election-commit-node1.json
 │       ├── election-commit-node2.json
-│       └── election.json
+│       ├── election.json
+│       └── quorum-one-third-mutant.json
 ├── models/
 │   └── raft/
 │       ├── README.md
 │       ├── raft.cfg
+│       ├── raft-5.cfg
+│       ├── raft-10.cfg
+│       ├── raft-5nodes-10.cfg
 │       └── raft.tla
 ├── tools/
 │   └── tlc-server/                  # NG自有严格controlled TLC服务
@@ -258,6 +275,7 @@ modelfuzz-ng/
 │   │   ├── runner.go                 # 已有：反馈队列、并发执行、周期种子和异步变异
 │   │   ├── digest.go                 # 已有：Plan、Trace和模型状态路径唯一性摘要
 │   │   ├── lifecycle.go              # 已有：事件、checkpoint和恢复校验
+│   │   ├── aggregation.go            # 已有：无完整Run历史的增量汇总及恢复快照
 │   │   ├── statistics.go             # 已有：稳定实验汇总结构
 │   │   └── *_test.go
 │   │
@@ -292,7 +310,7 @@ modelfuzz-ng/
 │   │   ├── minimize.go               # 后续：失败轨迹缩减
 │   │   └── *_test.go
 │   │
-│   ├── corpus/                       # 已有：有价值Plan/Concrete ActionSequence集合
+│   ├── corpus/                       # 已有：有价值Plan、增量覆盖键及紧凑checkpoint水位
 │   │   ├── corpus.go
 │   │   └── corpus_test.go
 │   │
@@ -312,7 +330,10 @@ modelfuzz-ng/
 │   └── raft/
 │       ├── README.md
 │       ├── raft.tla
-│       └── raft.cfg
+│       ├── raft.cfg                  # 兼容的5/5配置
+│       ├── raft-5.cfg                # 明确的烟雾边界
+│       ├── raft-10.cfg               # 原ModelFuzz主实验边界
+│       └── raft-5nodes-10.cfg        # 五节点10/10 quorum mutant实验
 │
 ├── tools/                            # 非Go的构建与运行工具
 │   └── tlc-server/                   # 已有：严格controlled TLC服务
@@ -393,6 +414,10 @@ modelfuzz-ng/
 - 记录自然/强制 timeout；
 - PreVote、CheckQuorum 和 AsyncStorageWrites 暂时关闭；
 - 每节点随机性必须可重复。
+- 可选的应用层 `SnapshotPolicy`，按 applied entry 数确定性调用
+  `CreateSnapshot`/`Compact`；策略默认关闭；
+- Snapshot Data 保存确定性 committed-prefix 摘要，日志压缩后 Oracle 仍可比较逻辑前缀；
+- `MsgSnap` 不设置专用 Action，仍从 Ready.Messages 进入 Runtime 统一网络队列。
 
 ### 5.4 `internal/runtime`
 
@@ -447,6 +472,9 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 外部事件唯一映射到一个 enabled TLA+ Action，并在每个后继状态检查 model constraint
 和 cfg 中的 invariant。协议或模型错误返回稳定的结构化原因码，由 `model/tlc`
 保留为 `ExecutionError`，不再像旧服务一样把 disabled action 静默处理成 stutter。
+服务启动时只保留操作符定义，收到事件后才按形参构造具体 `Action`，并使用
+有界 LRU 缓存。`raft-5.cfg`/`raft-10.cfg` 通过 `ControlledNext` 阻止 TLC Tool
+在启动期展开完整 `Next`；`raft.cfg` 保留完整 Spec 供普通 TLC 使用。
 
 模型映射以实际 Effect 为准。例如 `ActionDeliver` 只有在 Adapter 成功接收消息并
 记录 `raft.message_delivered` 后才会变成 `DeliverMessage`。Drop 和 Duplicate
@@ -467,11 +495,12 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 LLM Planner 与随机 Policy 共享 Plan schema。它只生成并校验 Plan，不直接访问
 Runtime；初始化采用思考模式，变异采用非思考模式。
 
-`internal/experiment` 为每次候选创建独立 Engine/Runtime，维护 FIFO 候选队列，
-把覆盖到全局新模型状态的 Plan/Concrete ActionSequence 放入 `internal/corpus`，再通过
+`internal/experiment` 为每次候选创建独立 Engine/Runtime，维护有上限的 FIFO 候选队列，
+把覆盖到全局新模型状态的 Plan 和增量覆盖键放入 `internal/corpus`，再通过
 `internal/mutation` 异步产生后代。无 TLC 时仍可并行运行随机种子，但没有可用于
-保留和反馈的模型状态。生命周期事件同时驱动统计和持久化；checkpoint 保存 ready、
-in-flight、pending mutation、Corpus 和部分报告，恢复时不会从第一条 seed 重跑。
+保留和反馈的模型状态。生命周期事件同时驱动统计和持久化；完整 Run/Corpus Entry
+分别追加到 `runs.jsonl`/`corpus.jsonl`，checkpoint 只保存两者水位、ready、in-flight、
+紧凑 pending mutation 引用和聚合统计，恢复时不会从第一条 seed 重跑。
 
 ### 5.9 `internal/oracle`
 
@@ -601,7 +630,8 @@ core
 3. 在已有TLA+执行链路上增加模型引导策略；
 4. 多worker并行执行；
 5. Trace minimization；
-6. PreVote、CheckQuorum、snapshot等Raft扩展。
+6. Snapshot/日志压缩已完成 Adapter、Runtime、Oracle 和基础模型 stutter 支持；
+   PreVote、CheckQuorum、动态 membership 以及完整 InstallSnapshot TLA+ 模型仍属后续扩展。
 
 ## 9. 维护规则
 

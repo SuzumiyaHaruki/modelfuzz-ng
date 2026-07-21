@@ -11,16 +11,24 @@ import (
 // RunMetrics 是一条执行轨迹的明细统计。这里仅使用 core、plan、model 和
 // oracle 已经暴露的通用字段，不解释 Raft 消息的具体语义。
 type RunMetrics struct {
-	ActionCounts      map[string]int `json:"action_counts"`
-	EffectCounts      map[string]int `json:"effect_counts"`
-	MessageTypeCounts map[string]int `json:"outbound_message_type_counts"`
-	ResolutionCounts  map[string]int `json:"resolution_counts"`
-	DecisionCounts    map[string]int `json:"decision_counts"`
-	ModelEventCounts  map[string]int `json:"model_event_counts"`
-	OracleCounts      map[string]int `json:"oracle_counts"`
-	TimerFireCounts   map[string]int `json:"timer_fire_counts"`
-	FailureCounts     map[string]int `json:"failure_counts"`
-	Termination       string         `json:"termination,omitempty"`
+	ActionCounts             map[string]int `json:"action_counts"`
+	EffectCounts             map[string]int `json:"effect_counts"`
+	MessageTypeCounts        map[string]int `json:"outbound_message_type_counts"`
+	ResolutionCounts         map[string]int `json:"resolution_counts"`
+	DecisionCounts           map[string]int `json:"decision_counts"`
+	ModelEventCounts         map[string]int `json:"model_event_counts"`
+	OracleCounts             map[string]int `json:"oracle_counts"`
+	TimerFireCounts          map[string]int `json:"timer_fire_counts"`
+	FailureCounts            map[string]int `json:"failure_counts"`
+	Termination              string         `json:"termination,omitempty"`
+	SnapshotsCreated         int            `json:"snapshots_created"`
+	SnapshotsSent            int            `json:"snapshots_sent"`
+	SnapshotsDelivered       int            `json:"snapshots_delivered"`
+	SnapshotsApplied         int            `json:"snapshots_applied"`
+	SnapshotsRejectedOrStale int            `json:"snapshots_rejected_or_stale"`
+	LogsCompacted            int            `json:"logs_compacted"`
+	CompactedEntries         uint64         `json:"compacted_entries"`
+	SnapshotBytes            uint64         `json:"snapshot_bytes"`
 
 	InitialQueuedMessages       int    `json:"initial_queued_messages"`
 	FinalQueuedMessages         int    `json:"final_queued_messages"`
@@ -61,6 +69,25 @@ func Collect(result engine.Result) RunMetrics {
 		}
 		for _, effect := range step.Effects {
 			metrics.EffectCounts[string(effect.Kind)]++
+			if effect.Kind == core.EffectModelEvent && effect.ModelEvent != nil {
+				metrics.ModelEventCounts[effect.ModelEvent.Name]++
+				switch effect.ModelEvent.Name {
+				case "raft.snapshot_created":
+					metrics.SnapshotsCreated++
+					metrics.SnapshotBytes += unsignedMetric(effect.ModelEvent.Params["snapshot_bytes"])
+				case "raft.snapshot_sent":
+					metrics.SnapshotsSent++
+				case "raft.snapshot_delivered":
+					metrics.SnapshotsDelivered++
+				case "raft.snapshot_applied":
+					metrics.SnapshotsApplied++
+				case "raft.snapshot_rejected_or_stale":
+					metrics.SnapshotsRejectedOrStale++
+				case "raft.log_compacted":
+					metrics.LogsCompacted++
+					metrics.CompactedEntries += unsignedMetric(effect.ModelEvent.Params["compacted_entries"])
+				}
+			}
 			if effect.Kind == core.EffectSendMessage {
 				queued++
 				if effect.Message != nil {
@@ -108,6 +135,28 @@ func Collect(result engine.Result) RunMetrics {
 		}
 	}
 	return metrics
+}
+
+func unsignedMetric(value any) uint64 {
+	switch value := value.(type) {
+	case uint64:
+		return value
+	case uint32:
+		return uint64(value)
+	case int:
+		if value >= 0 {
+			return uint64(value)
+		}
+	case int64:
+		if value >= 0 {
+			return uint64(value)
+		}
+	case float64:
+		if value >= 0 {
+			return uint64(value)
+		}
+	}
+	return 0
 }
 
 // DurationSummary 汇总已完成执行的耗时，单位为微秒。

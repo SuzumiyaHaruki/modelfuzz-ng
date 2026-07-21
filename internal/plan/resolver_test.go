@@ -87,6 +87,33 @@ func TestResolveEmptyQueue(t *testing.T) {
 	}
 }
 
+func TestResolveClampsMessageStartAndRecordsConcreteSelection(t *testing.T) {
+	config := DefaultResolverConfig()
+	resolver, err := NewResolver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := core.LinkID{From: 1, To: 2}
+	result := resolver.Resolve(PlanAction{Kind: ActionDrop, Messages: &MessageRangeSelector{
+		Link: link, Start: 99, Count: 1,
+	}}, testObservation())
+	if result.Status != ResolutionResolved || result.ReasonCode != ReasonSelectorStartClamped ||
+		len(result.Actions) != 1 || result.Actions[0].Message != 12 || result.Actions[0].Selector == nil ||
+		result.Actions[0].Selector.Position != 2 {
+		t.Fatalf("clamped resolution = %+v", result)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	empty := resolver.Resolve(PlanAction{Kind: ActionDrop, Messages: &MessageRangeSelector{
+		Link: core.LinkID{From: 2, To: 3}, Start: 99, Count: 1,
+	}}, testObservation())
+	if empty.Status != ResolutionEmptyQueue || empty.ReasonCode != ReasonMessageNotAvailable {
+		t.Fatalf("empty-link resolution = %+v", empty)
+	}
+}
+
 func TestResolveAdvanceTicks(t *testing.T) {
 	resolver := newTestResolver(t)
 	result := resolver.Resolve(PlanAction{Kind: ActionAdvanceTicks, Ticks: 2}, testObservation())

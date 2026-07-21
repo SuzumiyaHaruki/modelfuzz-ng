@@ -78,3 +78,42 @@ func TestExecuteReturnsStructuredStrictServerError(t *testing.T) {
 		t.Fatalf("structured error = %#v / %v", executionError, err)
 	}
 }
+
+func TestMetricsUsesDedicatedEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/metrics" || request.Method != http.MethodGet {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(`{"requests":3,"succeeded":2,"failed":1,"model_events":7,"action_lookups":7,"errors_by_code":{"disabled_action":1},"timing":{"mapping_nanos":10,"action_lookup_nanos":2,"successor_nanos":20,"validation_nanos":3,"serialization_nanos":4}}`))
+	}))
+	defer server.Close()
+	client, err := NewClientWithHTTPClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := client.Metrics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.Requests != 3 || metrics.ErrorsByCode["disabled_action"] != 1 || metrics.Timing.SuccessorNanos != 20 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+}
+
+func TestBoundsUsesHealthEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/health" || request.Method != http.MethodGet {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(`{"max_log_index":10,"largest_term":10}`))
+	}))
+	defer server.Close()
+	client, err := NewClientWithHTTPClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds, err := client.Bounds(context.Background())
+	if err != nil || bounds.MaxLogIndex != 10 || bounds.LargestTerm != 10 {
+		t.Fatalf("bounds = %+v, err = %v", bounds, err)
+	}
+}

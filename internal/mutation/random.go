@@ -283,12 +283,12 @@ func (m *Random) validateLifecycle(sequence plan.PlanSequence) error {
 }
 
 func (m *Random) randomAction(random *rand.Rand) plan.PlanAction {
-	switch random.Intn(4) {
+	switch random.Intn(10) {
 	case 0:
 		return plan.PlanAction{Kind: plan.ActionTimeout, Node: m.randomNode(random)}
-	case 1:
+	case 1, 2:
 		return plan.PlanAction{Kind: plan.ActionAdvanceTicks, Ticks: 1 + uint64(random.Int63n(int64(m.config.MaxTicks)))}
-	case 2:
+	case 3, 4, 5:
 		return plan.PlanAction{Kind: plan.ActionRequest, Node: m.randomNode(random), Request: strconv.Itoa(1 + random.Intn(m.config.MaxValue))}
 	default:
 		return plan.PlanAction{Kind: plan.ActionDeliver, Messages: &plan.MessageRangeSelector{Link: m.randomLink(random), Count: 1}}

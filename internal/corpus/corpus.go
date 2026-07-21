@@ -6,7 +6,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 )
@@ -19,31 +18,34 @@ type Input struct {
 	RunIndex int
 	Seed     int64
 	Plan     plan.PlanSequence
-	Actions  core.ActionSequence
 	States   []model.State
 }
 
 // Entry 只在一次执行至少发现一个全局新模型状态时创建。
-// StateKeys 是本次执行访问的状态，NewStateKeys 是真正触发保留的增量。
+// 具体 Action、完整 Trace 和本次访问的全部状态都已经保存在 runs/artifact 中；
+// Corpus 只保留后续变异真正需要的 Plan 和增量状态键。
 type Entry struct {
-	ID       string            `json:"id"`
-	ParentID string            `json:"parent_id,omitempty"`
-	Source   string            `json:"source"`
-	Depth    int               `json:"depth"`
-	RunIndex int               `json:"run_index"`
-	Seed     int64             `json:"seed"`
-	Plan     plan.PlanSequence `json:"plan"`
-	// Actions 足以描述实际执行的具体序列；Effect、Observation 和 Payload 等
-	// 大对象由逐运行产物按策略保存，不再复制进每个 Corpus/checkpoint 条目。
-	Actions      core.ActionSequence `json:"actions"`
-	StateKeys    []int64             `json:"state_keys"`
-	NewStateKeys []int64             `json:"new_state_keys"`
+	ID           string            `json:"id"`
+	ParentID     string            `json:"parent_id,omitempty"`
+	Source       string            `json:"source"`
+	Depth        int               `json:"depth"`
+	RunIndex     int               `json:"run_index"`
+	Seed         int64             `json:"seed"`
+	Plan         plan.PlanSequence `json:"plan"`
+	NewStateKeys []int64           `json:"new_state_keys"`
 }
 
 // Snapshot 是可直接持久化的 Corpus 快照。
 type Snapshot struct {
 	CoverageKeys []int64 `json:"coverage_keys"`
 	Entries      []Entry `json:"entries"`
+}
+
+// Checkpoint 是写入 experiment checkpoint 的紧凑 Corpus 水位。完整条目采用
+// corpus.jsonl 追加保存，避免每次 checkpoint 重写全部 Plan。
+type Checkpoint struct {
+	CoverageKeys []int64 `json:"coverage_keys"`
+	EntryCount   int     `json:"entry_count"`
 }
 
 // Corpus 使用模型执行器返回的稳定 State.Key 维护全局覆盖。
@@ -79,9 +81,6 @@ func Restore(snapshot Snapshot) (*Corpus, error) {
 		if err := entry.Plan.Validate(); err != nil {
 			return nil, fmt.Errorf("corpus entry %s plan: %w", entry.ID, err)
 		}
-		if err := entry.Actions.Validate(); err != nil {
-			return nil, fmt.Errorf("corpus entry %s actions: %w", entry.ID, err)
-		}
 		for _, key := range entry.NewStateKeys {
 			if _, covered := coverage[key]; !covered {
 				return nil, fmt.Errorf("corpus entry %s new state %d is absent from coverage", entry.ID, key)
@@ -92,6 +91,9 @@ func Restore(snapshot Snapshot) (*Corpus, error) {
 			seenNew[key] = struct{}{}
 		}
 		result.entries = append(result.entries, copyEntry(entry))
+	}
+	if len(seenNew) != len(coverage) {
+		return nil, fmt.Errorf("corpus entries introduce %d states but coverage contains %d", len(seenNew), len(coverage))
 	}
 	result.coverage = coverage
 	return result, nil
@@ -108,9 +110,6 @@ func (c *Corpus) Consider(input Input) (Entry, bool, error) {
 	}
 	if len(input.Plan.Actions) == 0 {
 		return Entry{}, false, fmt.Errorf("corpus plan must not be empty")
-	}
-	if err := input.Actions.Validate(); err != nil {
-		return Entry{}, false, fmt.Errorf("invalid corpus actions: %w", err)
 	}
 	if input.Depth < 0 || input.RunIndex < 0 {
 		return Entry{}, false, fmt.Errorf("corpus depth and run index must be non-negative")
@@ -134,11 +133,28 @@ func (c *Corpus) Consider(input Input) (Entry, bool, error) {
 	entry := Entry{
 		ID: fmt.Sprintf("corpus-%06d", len(c.entries)), ParentID: input.ParentID,
 		Source: input.Source, Depth: input.Depth, RunIndex: input.RunIndex, Seed: input.Seed,
-		Plan: input.Plan.Copy(), Actions: input.Actions.Copy(),
-		StateKeys: append([]int64(nil), stateKeys...), NewStateKeys: append([]int64(nil), newKeys...),
+		Plan: input.Plan.Copy(), NewStateKeys: append([]int64(nil), newKeys...),
 	}
 	c.entries = append(c.entries, entry)
 	return copyEntry(entry), true, nil
+}
+
+// RollbackLast 只用于持久化新增条目失败的边界：撤回尚未对外提交的最后一次
+// Consider，确保旧 checkpoint 与 corpus.jsonl 仍可恢复。
+func (c *Corpus) RollbackLast(entry Entry) error {
+	if c == nil {
+		return fmt.Errorf("corpus is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if len(c.entries) == 0 || c.entries[len(c.entries)-1].ID != entry.ID {
+		return fmt.Errorf("corpus rollback entry %s is not the latest entry", entry.ID)
+	}
+	for _, key := range entry.NewStateKeys {
+		delete(c.coverage, key)
+	}
+	c.entries = c.entries[:len(c.entries)-1]
+	return nil
 }
 
 func (c *Corpus) Len() int {
@@ -157,6 +173,20 @@ func (c *Corpus) CoverageLen() int {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return len(c.coverage)
+}
+
+func (c *Corpus) Entry(id string) (Entry, bool) {
+	if c == nil {
+		return Entry{}, false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for _, entry := range c.entries {
+		if entry.ID == id {
+			return copyEntry(entry), true
+		}
+	}
+	return Entry{}, false
 }
 
 func (c *Corpus) Snapshot() Snapshot {
@@ -179,6 +209,32 @@ func (c *Corpus) Snapshot() Snapshot {
 	return snapshot
 }
 
+func (c *Corpus) Checkpoint() Checkpoint {
+	if c == nil {
+		return Checkpoint{CoverageKeys: make([]int64, 0)}
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	checkpoint := Checkpoint{CoverageKeys: make([]int64, 0, len(c.coverage)), EntryCount: len(c.entries)}
+	for key := range c.coverage {
+		checkpoint.CoverageKeys = append(checkpoint.CoverageKeys, key)
+	}
+	sort.Slice(checkpoint.CoverageKeys, func(i, j int) bool { return checkpoint.CoverageKeys[i] < checkpoint.CoverageKeys[j] })
+	return checkpoint
+}
+
+// RestoreCheckpoint 将紧凑 checkpoint 与 corpus.jsonl 中前 EntryCount 条记录
+// 组合成可验证的内存 Corpus。
+func RestoreCheckpoint(checkpoint Checkpoint, entries []Entry) (*Corpus, error) {
+	if checkpoint.EntryCount < 0 || checkpoint.EntryCount != len(entries) {
+		return nil, fmt.Errorf("corpus checkpoint requires %d entries, got %d", checkpoint.EntryCount, len(entries))
+	}
+	return Restore(Snapshot{
+		CoverageKeys: append([]int64(nil), checkpoint.CoverageKeys...),
+		Entries:      append([]Entry(nil), entries...),
+	})
+}
+
 func uniqueStateKeys(states []model.State) []int64 {
 	set := make(map[int64]struct{}, len(states))
 	for _, state := range states {
@@ -194,8 +250,6 @@ func uniqueStateKeys(states []model.State) []int64 {
 
 func copyEntry(entry Entry) Entry {
 	entry.Plan = entry.Plan.Copy()
-	entry.Actions = entry.Actions.Copy()
-	entry.StateKeys = append([]int64(nil), entry.StateKeys...)
 	entry.NewStateKeys = append([]int64(nil), entry.NewStateKeys...)
 	return entry
 }

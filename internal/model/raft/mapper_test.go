@@ -3,7 +3,6 @@ package raft_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log"
 	"strconv"
@@ -100,6 +99,39 @@ func TestMapperMapsElectionPath(t *testing.T) {
 	if heartbeatEvents[0].Params["type"] != "MsgApp" {
 		t.Fatalf("heartbeat model type = %v, want MsgApp", heartbeatEvents[0].Params["type"])
 	}
+}
+
+func TestMapperExposesPrematureMutantLeadershipToCorrectQuorumModel(t *testing.T) {
+	config := etcdraft.DefaultConfig()
+	config.NodeIDs = []core.NodeID{1, 2, 3, 4, 5}
+	config.ElectionTick = 100
+	config.Faults.VoteQuorumDivisor = 3
+	config.Logger = &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)}
+	adapter, err := etcdraft.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{ExecutionID: "model-quorum-mutant", Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Reset(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	modelConfig := raftmodel.DefaultConfig()
+	modelConfig.NodeIDs = append([]core.NodeID(nil), config.NodeIDs...)
+	mapper, err := raftmodel.NewMapperWithConfig(modelConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	timeout := execute(t, runtime, core.Action{Kind: core.ActionTimeout, Node: 1})
+	vote := execute(t, runtime, deliverAction(findMessage(t, timeout.Observation, "MsgVote", 1, 2)))
+	premature := execute(t, runtime, deliverAction(findMessage(t, vote.Observation, "MsgVoteResp", 2, 1)))
+	events := mapResult(t, mapper, premature)
+	// The activation marker itself stutters. The correct model sees the one
+	// real vote response followed immediately by the invalid leadership.
+	assertEventNames(t, events, "DeliverMessage", "BecomeLeader", "ClientRequest")
 }
 
 func TestMapperMapsCrashAndRestartToControlledTLCEvents(t *testing.T) {
@@ -270,8 +302,26 @@ func TestMapperRejectsSemanticsOutsideLightweightModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mapper.Map(transition); !errors.Is(err, raftmodel.ErrUnsupportedSemantics) {
-		t.Fatalf("snapshot mapping error = %v, want ErrUnsupportedSemantics", err)
+	if events, err := mapper.Map(transition); err != nil || len(events) != 0 {
+		t.Fatalf("snapshot mapping = %+v, %v; want stable stutter", events, err)
+	}
+}
+
+func TestMapperTreatsSnapshotLifecycleEffectsAsStutter(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	record := deliveredRecord("MsgHeartbeatResp", nil, false)
+	for _, name := range []string{"raft.snapshot_created", "raft.snapshot_sent", "raft.snapshot_delivered",
+		"raft.snapshot_applied", "raft.snapshot_rejected_or_stale", "raft.log_compacted"} {
+		record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+			ModelEvent: &core.ModelEvent{Name: name, Node: 1, Params: map[string]any{"index": uint64(2)}}})
+	}
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("snapshot lifecycle mapping = %+v, %v; want stutter", events, err)
 	}
 }
 

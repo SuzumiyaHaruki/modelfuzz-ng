@@ -5,6 +5,8 @@
     "node_ids": [1, 2, 3],
     "election_tick": 10,
     "heartbeat_tick": 1,
+    "snapshot": {"threshold": 0, "retain_entries": 0},
+    "faults": {"vote_quorum_divisor": 2},
     "verbose_logging": false
   },
   "model": {
@@ -21,13 +23,14 @@
   },
   "resolver": {
     "max_advance_ticks": 100,
-    "max_batch": 1024
+    "max_batch": 1024,
+    "clamp_message_start": true
   },
   "engine": {
     "fail_on_partial": false,
     "fail_on_skipped": false,
     "fail_on_empty_queue": false,
-    "max_plan_actions": 256,
+    "max_plan_actions": 1000,
     "max_consecutive_noops": 32
   },
   "tlc": {

@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -13,6 +14,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import tlc2.output.EC;
 import tlc2.tool.Action;
 import tlc2.tool.ITool;
@@ -25,18 +28,23 @@ import util.SimpleFilenameToStream;
 
 /** 对 NG 模型事件执行严格、无跨请求状态的 controlled TLC 服务。 */
 public final class StrictTLCServer {
-    private static final String SERVER_VERSION = "1";
+    private static final String SERVER_VERSION = "2";
     private static final int VALIDATED_STATE_CACHE_SIZE = 100_000;
+    private static final int DEFAULT_ACTION_CACHE_SIZE = 16_384;
     private static final Gson GSON = new Gson();
 
     private final ITool tool;
     private final RaftEventMapper mapper;
     private final String model;
+    private final String config;
+    private final Long maxLogIndex;
+    private final Long largestTerm;
     private final TLCState initial;
     private final Action[] invariants;
     private final Map<Long, Boolean> validatedStates;
+    private final ServerMetrics metrics = new ServerMetrics();
 
-    private StrictTLCServer(String model, String config) throws Exception {
+    private StrictTLCServer(String model, String config, int actionCacheSize) throws Exception {
         Path modelPath = Path.of(model).toAbsolutePath().normalize();
         Path configPath = Path.of(config).toAbsolutePath().normalize();
         String modelName = withoutExtension(modelPath.getFileName().toString(), ".tla");
@@ -44,11 +52,18 @@ public final class StrictTLCServer {
         String[] searchPaths = {
             modelPath.getParent().toString(), configPath.getParent().toString()
         };
-        this.tool = new FastTool(
+        FastTool fastTool = new FastTool(
             modelName, configName, new SimpleFilenameToStream(searchPaths), Tool.Mode.Simulation, Map.of()
         );
-        this.mapper = new RaftEventMapper(tool.getActions());
+        this.tool = fastTool;
         this.model = modelPath.toString();
+        this.config = configPath.toString();
+        String configText = Files.readString(configPath, StandardCharsets.UTF_8);
+        this.mapper = new RaftEventMapper(
+            fastTool, fastTool.getModule(modelName), ModelBounds.parse(configText), actionCacheSize
+        );
+        this.maxLogIndex = constant(configText, "MaxLogIndex");
+        this.largestTerm = constant(configText, "LargestTerm");
         FP64.Init(0);
         this.invariants = tool.getInvariants();
         this.validatedStates = new LinkedHashMap<>(16, 0.75f, true) {
@@ -65,13 +80,20 @@ public final class StrictTLCServer {
         String model = requiredOption(options, "model");
         String config = requiredOption(options, "config");
         int port = Integer.parseInt(options.getOrDefault("port", "2023"));
+        int actionCacheSize = Integer.parseInt(
+            options.getOrDefault("action-cache-size", Integer.toString(DEFAULT_ACTION_CACHE_SIZE))
+        );
         if (port < 1 || port > 65535) {
             throw new IllegalArgumentException("--port must be in 1..65535");
         }
+        if (actionCacheSize < 1) {
+            throw new IllegalArgumentException("--action-cache-size must be positive");
+        }
 
-        StrictTLCServer controlled = new StrictTLCServer(model, config);
+        StrictTLCServer controlled = new StrictTLCServer(model, config, actionCacheSize);
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 32);
         server.createContext("/health", controlled::health);
+        server.createContext("/metrics", controlled::metrics);
         server.createContext("/execute", controlled::execute);
         server.setExecutor(Executors.newCachedThreadPool());
         server.start();
@@ -83,10 +105,34 @@ public final class StrictTLCServer {
             send(exchange, 405, Map.of("error", Map.of("code", "method_not_allowed")));
             return;
         }
-        send(exchange, 200, Map.of(
-            "status", "ok", "server", "modelfuzz-ng-tlc", "version", SERVER_VERSION,
-            "strict", true, "model", model, "validated_state_cache_limit", VALIDATED_STATE_CACHE_SIZE
-        ));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("server", "modelfuzz-ng-tlc");
+        response.put("version", SERVER_VERSION);
+        response.put("strict", true);
+        response.put("model", model);
+        response.put("config", config);
+        if (maxLogIndex != null) {
+            response.put("max_log_index", maxLogIndex);
+        }
+        if (largestTerm != null) {
+            response.put("largest_term", largestTerm);
+        }
+        response.put("validated_state_cache_limit", VALIDATED_STATE_CACHE_SIZE);
+        response.put("action_mode", "lazy");
+        response.put("action_definitions", mapper.actionDefinitionCount());
+        response.put("cached_actions", mapper.cachedActionCount());
+        response.put("action_cache_limit", mapper.actionCacheLimit());
+        response.put("metrics", metrics.snapshot(mapper));
+        send(exchange, 200, response);
+    }
+
+    private void metrics(HttpExchange exchange) throws IOException {
+        if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
+            send(exchange, 405, Map.of("error", Map.of("code", "method_not_allowed")));
+            return;
+        }
+        send(exchange, 200, metrics.snapshot(mapper));
     }
 
     private void execute(HttpExchange exchange) throws IOException {
@@ -94,10 +140,14 @@ public final class StrictTLCServer {
             send(exchange, 405, Map.of("error", Map.of("code", "method_not_allowed")));
             return;
         }
+        metrics.request();
         try {
             String input = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            send(exchange, 200, simulate(input));
+            Map<String, Object> result = simulate(input);
+            metrics.success();
+            send(exchange, 200, result);
         } catch (ProtocolException error) {
+            metrics.error(error.code());
             Map<String, Object> detail = new LinkedHashMap<>();
             detail.put("code", error.code());
             detail.put("event_index", error.eventIndex());
@@ -105,6 +155,7 @@ public final class StrictTLCServer {
             detail.put("message", error.getMessage());
             send(exchange, error.httpStatus(), Map.of("error", detail));
         } catch (Exception error) {
+            metrics.error("internal_error");
             send(exchange, 500, Map.of("error", Map.of(
                 "code", "internal_error", "message", String.valueOf(error.getMessage())
             )));
@@ -112,7 +163,14 @@ public final class StrictTLCServer {
     }
 
     private synchronized Map<String, Object> simulate(String input) throws Exception {
-        List<MappedEvent> events = mapper.map(input);
+        long mappingStarted = System.nanoTime();
+        List<MappedEvent> events;
+        try {
+            events = mapper.map(input);
+        } finally {
+            metrics.mapping(System.nanoTime() - mappingStarted);
+        }
+        metrics.events((int) events.stream().filter(event -> !event.reset()).count());
         TLCState current = initial.deepCopy();
         List<TLCState> visited = new ArrayList<>();
         visited.add(current);
@@ -128,7 +186,13 @@ public final class StrictTLCServer {
                 resetSeen = true;
                 continue;
             }
-            StateVec successors = tool.getNextStates(event.action(), current);
+            long successorStarted = System.nanoTime();
+            StateVec successors;
+            try {
+                successors = tool.getNextStates(event.action(), current);
+            } finally {
+                metrics.successor(System.nanoTime() - successorStarted);
+            }
             if (successors.empty()) {
                 throw new ProtocolException("disabled_action", index, event.externalName(), 422,
                     "mapped TLA+ action is disabled in the current model state");
@@ -144,7 +208,12 @@ public final class StrictTLCServer {
             }
             next.execCallable();
             next.deepNormalize();
-            validateState(next, index, event.externalName());
+            long validationStarted = System.nanoTime();
+            try {
+                validateState(next, index, event.externalName());
+            } finally {
+                metrics.validation(System.nanoTime() - validationStarted);
+            }
             current = next;
             visited.add(current);
         }
@@ -155,9 +224,14 @@ public final class StrictTLCServer {
 
         List<String> states = new ArrayList<>(visited.size());
         List<Long> keys = new ArrayList<>(visited.size());
-        for (TLCState state : visited) {
-            states.add(state.toString());
-            keys.add(state.fingerPrint());
+        long serializationStarted = System.nanoTime();
+        try {
+            for (TLCState state : visited) {
+                states.add(state.toString());
+                keys.add(state.fingerPrint());
+            }
+        } finally {
+            metrics.serialization(System.nanoTime() - serializationStarted);
         }
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("States", states);
@@ -238,5 +312,11 @@ public final class StrictTLCServer {
 
     private static String withoutExtension(String value, String extension) {
         return value.endsWith(extension) ? value.substring(0, value.length() - extension.length()) : value;
+    }
+
+    private static Long constant(String configText, String name) {
+        Matcher matcher = Pattern.compile("(?m)^\\s*" + Pattern.quote(name) + "\\s*=\\s*(\\d+)\\s*$")
+            .matcher(configText);
+        return matcher.find() ? Long.parseLong(matcher.group(1)) : null;
     }
 }

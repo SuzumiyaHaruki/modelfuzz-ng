@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,13 +20,42 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/persistence"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
+	randompolicy "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/policy"
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 )
+
+func readRunSummaries(t *testing.T, path string) []experiment.Run {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	result := make([]experiment.Run, 0)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var run experiment.Run
+		if err := json.Unmarshal(scanner.Bytes(), &run); err != nil {
+			t.Fatal(err)
+		}
+		result = append(result, run)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Index < result[j].Index })
+	return result
+}
 
 func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
 	var received []model.Event
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/health" && request.Method == http.MethodGet {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"largest_term": 5, "max_log_index": 5})
+			return
+		}
 		if request.URL.Path != "/execute" || request.Method != http.MethodPost {
 			t.Errorf("TLC request = %s %s", request.Method, request.URL.Path)
 		}
@@ -175,7 +206,8 @@ func TestExperimentCLIRunsRandomFeedbackSeedsWithoutTLC(t *testing.T) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Succeeded != 4 || report.TotalActions != 32 || report.Runs[3].Seed != 703 {
+	runs := readRunSummaries(t, filepath.Join(output, "runs.jsonl"))
+	if report.Succeeded != 4 || report.TotalActions != 32 || len(report.Runs) != 0 || runs[3].Seed != 703 {
 		t.Fatalf("report = %+v", report)
 	}
 	if !report.Feedback || report.CorpusEntries != 0 || report.InitialExecutions != 3 || report.PeriodicSeedExecutions != 1 {
@@ -190,13 +222,35 @@ func TestExperimentCLIRunsRandomFeedbackSeedsWithoutTLC(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(output, "corpus.json")); err != nil {
 		t.Fatalf("corpus artifact: %v", err)
 	}
-	for index, run := range report.Runs {
+	for index, run := range runs {
 		directory := filepath.Join(output, fmt.Sprintf("run-%04d-seed-%d", index, run.Seed))
 		for _, name := range []string{"plan.json", "trace.json", "result.json", "oracle-findings.json", "failure.json", "candidate.json"} {
 			if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
 				t.Fatalf("run %d artifact %s: %v", index, name, err)
 			}
 		}
+	}
+}
+
+func TestExperimentCLIUsesConfiguredPlanActionBudgetWhenFlagIsOmitted(t *testing.T) {
+	temporary := t.TempDir()
+	configPath := filepath.Join(temporary, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"engine":{"max_plan_actions":3}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(temporary, "experiment")
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-config", configPath, "-output", output, "-runs", "1",
+		"-initial-population", "1", "-artifact-policy", "summary", "-seed", "704",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var report experiment.Report
+	if err := persistence.ReadJSON(filepath.Join(output, "experiment-report.json"), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.TotalActions != 3 {
+		t.Fatalf("total actions = %d, want configured PlanAction budget 3", report.TotalActions)
 	}
 }
 
@@ -208,7 +262,7 @@ func TestExperimentCLIPersistsMetricsAndResumesCompletedCheckpoint(t *testing.T)
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"checkpoint.json", "progress.jsonl", "experiment-report.json", "experiment-metrics.json"} {
+	for _, name := range []string{"checkpoint.json", "progress.jsonl", "runs.jsonl", "corpus.jsonl", "experiment-report.json", "experiment-metrics.json"} {
 		if _, err := os.Stat(filepath.Join(output, name)); err != nil {
 			t.Fatalf("missing %s: %v", name, err)
 		}
@@ -224,7 +278,8 @@ func TestExperimentCLIPersistsMetricsAndResumesCompletedCheckpoint(t *testing.T)
 	if err := json.Unmarshal(data, &checkpoint); err != nil {
 		t.Fatal(err)
 	}
-	if checkpoint.Completed != 3 || checkpoint.Report.CompletedRuns != 3 {
+	if checkpoint.Completed != 3 || checkpoint.RunSummaryCount != 3 || checkpoint.Aggregation.Report.CompletedRuns != 3 ||
+		len(checkpoint.Aggregation.Report.Runs) != 0 {
 		t.Fatalf("checkpoint = %+v", checkpoint)
 	}
 	var metrics experiment.Statistics
@@ -448,6 +503,17 @@ func TestLoadCLIConfigInheritsModelNodeIDs(t *testing.T) {
 	}
 }
 
+func TestDefaultCLIConfigUsesFullConcreteActionBudget(t *testing.T) {
+	config := defaultCLIConfig()
+	if config.Engine.MaxPlanActions != defaultMaxPlanActions || defaultMaxPlanActions != 1000 {
+		t.Fatalf("default max PlanActions = %d, want 1000", config.Engine.MaxPlanActions)
+	}
+	if config.Runtime.MaxActions < uint64(config.Engine.MaxPlanActions) {
+		t.Fatalf("runtime max actions %d is below PlanAction budget %d",
+			config.Runtime.MaxActions, config.Engine.MaxPlanActions)
+	}
+}
+
 func TestRunCLIPersistsCrashResult(t *testing.T) {
 	temporary := t.TempDir()
 	planPath := filepath.Join(temporary, "crash.json")
@@ -474,6 +540,100 @@ func TestRunCLIPersistsCrashResult(t *testing.T) {
 		result.Final.Nodes[0].Status != core.NodeCrashed || len(result.ModelEvents) != 1 ||
 		result.ModelEvents[0].Name != "Remove" {
 		t.Fatalf("crash result = %+v", result)
+	}
+}
+
+func TestRunAndExperimentCLIOverrideModelBounds(t *testing.T) {
+	temporary := t.TempDir()
+	planPath := filepath.Join(temporary, "plan.json")
+	if err := writeJSONFile(planPath, plan.PlanSequence{Actions: []plan.PlanAction{{
+		Kind: plan.ActionTimeout, Node: 1,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	runOutput := filepath.Join(temporary, "run")
+	if err := runCLI(context.Background(), []string{
+		"run", "-plan", planPath, "-output", runOutput,
+		"-largest-term", "10", "-max-log-index", "9",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var runConfig cliConfig
+	if err := persistence.ReadJSON(filepath.Join(runOutput, "config.json"), &runConfig); err != nil {
+		t.Fatal(err)
+	}
+	if runConfig.Model.LargestTerm != 10 || runConfig.Model.MaxLogIndex != 9 {
+		t.Fatalf("run bounds = %+v", runConfig.Model)
+	}
+
+	experimentOutput := filepath.Join(temporary, "experiment")
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-output", experimentOutput, "-runs", "1",
+		"-largest-term", "10", "-max-log-index", "9",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var policyConfig randompolicy.RandomConfig
+	if err := persistence.ReadJSON(filepath.Join(experimentOutput, "policy-config.json"), &policyConfig); err != nil {
+		t.Fatal(err)
+	}
+	if policyConfig.LargestTerm != 10 || policyConfig.MaxLogIndex != 9 {
+		t.Fatalf("experiment policy bounds = %+v", policyConfig)
+	}
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-resume", experimentOutput, "-largest-term", "10",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "不能覆盖") {
+		t.Fatalf("resume boundary override error = %v", err)
+	}
+}
+
+func TestRunAndExperimentCLIConfigureSnapshotPolicyAndResumeRejectsOverride(t *testing.T) {
+	temporary := t.TempDir()
+	planPath := filepath.Join(temporary, "plan.json")
+	if err := writeJSONFile(planPath, plan.PlanSequence{Actions: []plan.PlanAction{{
+		Kind: plan.ActionTimeout, Node: 1,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	runOutput := filepath.Join(temporary, "run")
+	if err := runCLI(context.Background(), []string{
+		"run", "-plan", planPath, "-output", runOutput,
+		"-snapshot-threshold", "3", "-snapshot-retain-entries", "1",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var runConfig cliConfig
+	if err := persistence.ReadJSON(filepath.Join(runOutput, "config.json"), &runConfig); err != nil {
+		t.Fatal(err)
+	}
+	if runConfig.Raft.Snapshot.Threshold != 3 || runConfig.Raft.Snapshot.RetainEntries != 1 {
+		t.Fatalf("run snapshot policy = %+v", runConfig.Raft.Snapshot)
+	}
+
+	experimentOutput := filepath.Join(temporary, "experiment")
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-output", experimentOutput, "-runs", "1",
+		"-snapshot-threshold", "3", "-snapshot-retain-entries", "1",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-resume", experimentOutput, "-snapshot-threshold", "3",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "SnapshotPolicy") {
+		t.Fatalf("resume snapshot override error = %v", err)
+	}
+}
+
+func TestValidateTLCModelBoundsRejectsMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"largest_term": 10, "max_log_index": 10})
+	}))
+	defer server.Close()
+	config := defaultCLIConfig()
+	config.TLC.Address = server.URL
+	err := validateTLCModelBounds(context.Background(), config, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "TLC/Go 模型边界不一致") {
+		t.Fatalf("boundary mismatch error = %v", err)
 	}
 }
 

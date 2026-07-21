@@ -52,6 +52,7 @@ func TestRandomPolicyCanSelectNonFIFOMessage(t *testing.T) {
 
 func TestRandomPolicyNeverForcesLeaderTimeout(t *testing.T) {
 	config := DefaultRandomConfig()
+	config.TimeoutCooldown = 0
 	config.Weights = RandomWeights{Timeout: 1}
 	policy, _ := NewRandom(11, config)
 	observation := randomObservation()
@@ -63,6 +64,41 @@ func TestRandomPolicyNeverForcesLeaderTimeout(t *testing.T) {
 		if err != nil || !more || action.Kind != plan.ActionTimeout || action.Node != 2 {
 			t.Fatalf("timeout draw = %+v, more=%v, err=%v", action, more, err)
 		}
+	}
+}
+
+func TestRandomPolicyAppliesTimeoutCooldown(t *testing.T) {
+	config := DefaultRandomConfig()
+	config.TimeoutCooldown = 4
+	config.Weights = RandomWeights{Timeout: 1, AdvanceTicks: 1}
+	policy, err := NewRandom(13, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := randomObservation()
+	if err := policy.Reset(observation); err != nil {
+		t.Fatal(err)
+	}
+	foundTimeout := false
+	for index := 0; index < 100; index++ {
+		action, more, nextErr := policy.Next(observation)
+		if nextErr != nil || !more {
+			t.Fatalf("draw %d = %+v/%v/%v", index, action, more, nextErr)
+		}
+		if action.Kind == plan.ActionTimeout {
+			if foundTimeout {
+				recent := policy.generated[len(policy.generated)-5 : len(policy.generated)-1]
+				for _, previous := range recent {
+					if previous.Kind == plan.ActionTimeout {
+						t.Fatalf("timeout repeated inside cooldown: %+v", policy.generated)
+					}
+				}
+			}
+			foundTimeout = true
+		}
+	}
+	if !foundTimeout {
+		t.Fatal("deterministic draws never selected a timeout")
 	}
 }
 

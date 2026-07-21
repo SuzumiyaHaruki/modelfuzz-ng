@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 )
@@ -14,9 +13,8 @@ func TestCorpusRetainsOnlyGlobalCoverageIncrease(t *testing.T) {
 	collection := New()
 	base := Input{
 		Source: "random_init", RunIndex: 0,
-		Plan:    plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
-		Actions: core.ActionSequence{Actions: []core.Action{{Kind: core.ActionTimeout, Node: 1}}},
-		States:  []model.State{{Key: 9}, {Key: 3}, {Key: 9}},
+		Plan:   plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
+		States: []model.State{{Key: 9}, {Key: 3}, {Key: 9}},
 	}
 	entry, retained, err := collection.Consider(base)
 	if err != nil {
@@ -47,19 +45,15 @@ func TestCorpusCopiesRetainedInput(t *testing.T) {
 	input := Input{
 		RunIndex: 0,
 		Plan:     plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
-		Actions:  core.ActionSequence{Actions: []core.Action{{Kind: core.ActionTimeout, Node: 1}}}, States: []model.State{{Key: 1}},
+		States:   []model.State{{Key: 1}},
 	}
 	if _, retained, err := collection.Consider(input); err != nil || !retained {
 		t.Fatalf("retained=%v err=%v", retained, err)
 	}
 	input.Plan.Actions[0].Node = 2
-	input.Actions.Actions[0].Node = 2
 	snapshot := collection.Snapshot()
 	if snapshot.Entries[0].Plan.Actions[0].Node != 1 {
 		t.Fatalf("corpus aliased caller plan: %+v", snapshot.Entries[0].Plan)
-	}
-	if snapshot.Entries[0].Actions.Actions[0].Node != 1 {
-		t.Fatalf("corpus aliased caller actions: %+v", snapshot.Entries[0].Actions)
 	}
 }
 
@@ -67,9 +61,8 @@ func TestRestoreRoundTrip(t *testing.T) {
 	collection := New()
 	input := Input{
 		Source: "random_init", RunIndex: 0,
-		Plan:    plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
-		Actions: core.ActionSequence{Actions: []core.Action{{Kind: core.ActionTimeout, Node: 1}}},
-		States:  []model.State{{Key: 3}, {Key: 1}, {Key: 3}},
+		Plan:   plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
+		States: []model.State{{Key: 3}, {Key: 1}, {Key: 3}},
 	}
 	if _, retained, err := collection.Consider(input); err != nil || !retained {
 		t.Fatalf("retained=%v err=%v", retained, err)
@@ -84,22 +77,44 @@ func TestRestoreRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSnapshotUsesCompactActionsInsteadOfTrace(t *testing.T) {
+func TestCheckpointKeepsEntriesOutOfRepeatedSnapshot(t *testing.T) {
 	collection := New()
 	input := Input{
 		RunIndex: 0,
 		Plan:     plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
-		Actions:  core.ActionSequence{Actions: []core.Action{{Kind: core.ActionTimeout, Node: 1}}},
 		States:   []model.State{{Key: 1}},
 	}
 	if _, retained, err := collection.Consider(input); err != nil || !retained {
 		t.Fatalf("retained=%v err=%v", retained, err)
 	}
-	data, err := json.Marshal(collection.Snapshot())
+	data, err := json.Marshal(collection.Checkpoint())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, []byte(`"trace"`)) || !bytes.Contains(data, []byte(`"actions"`)) {
-		t.Fatalf("snapshot is not compact: %s", data)
+	if bytes.Contains(data, []byte(`"entries"`)) || bytes.Contains(data, []byte(`"actions"`)) ||
+		!bytes.Contains(data, []byte(`"entry_count":1`)) {
+		t.Fatalf("checkpoint is not compact: %s", data)
+	}
+	restored, err := RestoreCheckpoint(collection.Checkpoint(), collection.Snapshot().Entries)
+	if err != nil || restored.Len() != 1 || restored.CoverageLen() != 1 {
+		t.Fatalf("restore checkpoint = %v/%v", restored, err)
+	}
+}
+
+func TestRollbackLastRemovesUncommittedCoverage(t *testing.T) {
+	collection := New()
+	entry, retained, err := collection.Consider(Input{
+		RunIndex: 0,
+		Plan:     plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
+		States:   []model.State{{Key: 7}},
+	})
+	if err != nil || !retained {
+		t.Fatalf("consider = %+v/%v/%v", entry, retained, err)
+	}
+	if err := collection.RollbackLast(entry); err != nil {
+		t.Fatal(err)
+	}
+	if collection.Len() != 0 || collection.CoverageLen() != 0 {
+		t.Fatalf("corpus after rollback = %+v", collection.Snapshot())
 	}
 }

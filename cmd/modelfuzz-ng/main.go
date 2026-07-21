@@ -17,6 +17,7 @@ import (
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/adapters/etcdraft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
@@ -76,14 +77,20 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	configPath := flags.String("config", "", "可选的 JSON 配置文件")
 	tlcAddress := flags.String("tlc", "", "覆盖配置中的 controlled TLC 地址")
 	runs := flags.Int("runs", 10, "反馈闭环中的总执行次数")
-	maxPlanActions := flags.Int("max-plan-actions", 50, "每条变长轨迹最多处理的 PlanAction 数")
+	maxPlanActions := flags.Int("max-plan-actions", 0, "每条变长轨迹最多处理的 PlanAction 数；默认使用 config（内置1000）")
+	largestTerm := flags.Uint64("largest-term", 0, "覆盖模型 LargestTerm 边界")
+	maxLogIndex := flags.Uint64("max-log-index", 0, "覆盖模型 MaxLogIndex 边界")
+	snapshotThreshold := flags.Uint64("snapshot-threshold", 0, "每新增多少条已应用日志创建 snapshot；0表示关闭")
+	snapshotRetainEntries := flags.Uint64("snapshot-retain-entries", 0, "snapshot 压缩后额外保留的日志条目数")
+	voteQuorumDivisor := flags.Int("vote-quorum-divisor", 0, "选举 quorum 除数：2为正常，3复现 ModelFuzz mutant")
 	parallelism := flags.Int("parallelism", 1, "并发运行数；controlled TLC 当前只能为1")
 	seedText := flags.String("seed", "", "覆盖第一条运行的随机种子；后续逐次加1")
 	llmInit := flags.Bool("llm-init", false, "使用 LLM 生成初始 Plan；默认使用在线随机策略")
 	llmMutate := flags.Bool("llm-mutate", false, "使用 LLM 变异 Corpus Plan；默认使用本地随机变异")
 	initialPopulation := flags.Int("initial-population", 4, "开始反馈变异前准备的种子 Plan 数")
-	mutationsPerState := flags.Int("mutations-per-state", 2, "每个全局新模型状态生成的变异数")
-	maxMutationsPerCorpus := flags.Int("max-mutations-per-corpus", 8, "单个 Corpus 条目的最大变异数")
+	mutationsPerState := flags.Int("mutations-per-state", 1, "每个全局新模型状态生成的变异数")
+	maxMutationsPerCorpus := flags.Int("max-mutations-per-corpus", 2, "单个 Corpus 条目的最大变异数")
+	maxReadyCandidates := flags.Int("max-ready-candidates", 4096, "Ready 候选队列上限；满时淘汰最旧候选")
 	randomSeedInterval := flags.Int("random-seed-interval", 0, "每完成多少次执行优先注入在线随机种子；0 表示关闭")
 	randomSeedsPerInterval := flags.Int("random-seeds-per-interval", 1, "每次周期注入的在线随机种子数")
 	llmProvider := flags.String("llm-provider", string(llm.DefaultProvider), "LLM provider: deepseek、glm、qwen 或 kimi")
@@ -158,6 +165,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 			"initial-population":        {*initialPopulation, resumeCheckpoint.Config.InitialPopulation},
 			"mutations-per-state":       {*mutationsPerState, resumeCheckpoint.Config.MutationsPerNewState},
 			"max-mutations-per-corpus":  {*maxMutationsPerCorpus, resumeCheckpoint.Config.MaxMutationsPerCorpus},
+			"max-ready-candidates":      {*maxReadyCandidates, resumeCheckpoint.Config.MaxReadyCandidates},
 			"random-seed-interval":      {*randomSeedInterval, resumeCheckpoint.Config.RandomSeedInterval},
 			"random-seeds-per-interval": {*randomSeedsPerInterval, resumeCheckpoint.Config.RandomSeedsPerInterval},
 		}
@@ -171,6 +179,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		*initialPopulation = resumeCheckpoint.Config.InitialPopulation
 		*mutationsPerState = resumeCheckpoint.Config.MutationsPerNewState
 		*maxMutationsPerCorpus = resumeCheckpoint.Config.MaxMutationsPerCorpus
+		*maxReadyCandidates = resumeCheckpoint.Config.MaxReadyCandidates
 		*randomSeedInterval = resumeCheckpoint.Config.RandomSeedInterval
 		*randomSeedsPerInterval = resumeCheckpoint.Config.RandomSeedsPerInterval
 	}
@@ -188,8 +197,10 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	if *tlcAddress != "" {
 		config.TLC.Address = *tlcAddress
 	}
-	if resumeCheckpoint != nil && (*seedText != "" || setFlags["tlc"]) {
-		return fmt.Errorf("恢复时不能覆盖 seed 或 TLC 地址")
+	if resumeCheckpoint != nil && (*seedText != "" || setFlags["tlc"] || setFlags["largest-term"] ||
+		setFlags["max-log-index"] || setFlags["snapshot-threshold"] || setFlags["snapshot-retain-entries"] ||
+		setFlags["vote-quorum-divisor"]) {
+		return fmt.Errorf("恢复时不能覆盖 seed、TLC 地址、模型边界、SnapshotPolicy 或 FaultPolicy")
 	}
 	if *seedText != "" {
 		seed, err := strconv.ParseInt(*seedText, 10, 64)
@@ -198,8 +209,26 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 		config.Seed = seed
 	}
-	if *maxPlanActions <= 0 {
-		return fmt.Errorf("-max-plan-actions 必须为正数")
+	if setFlags["largest-term"] {
+		if *largestTerm == 0 {
+			return fmt.Errorf("-largest-term 必须为正数")
+		}
+		config.Model.LargestTerm = *largestTerm
+	}
+	if setFlags["max-log-index"] {
+		if *maxLogIndex == 0 {
+			return fmt.Errorf("-max-log-index 必须为正数")
+		}
+		config.Model.MaxLogIndex = *maxLogIndex
+	}
+	if setFlags["snapshot-threshold"] {
+		config.Raft.Snapshot.Threshold = *snapshotThreshold
+	}
+	if setFlags["snapshot-retain-entries"] {
+		config.Raft.Snapshot.RetainEntries = *snapshotRetainEntries
+	}
+	if setFlags["vote-quorum-divisor"] {
+		config.Raft.Faults.VoteQuorumDivisor = *voteQuorumDivisor
 	}
 	if resumeCheckpoint != nil {
 		if setFlags["max-plan-actions"] && *maxPlanActions != config.Engine.MaxPlanActions {
@@ -209,11 +238,19 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		if config.Seed != resumeCheckpoint.Config.BaseSeed {
 			return fmt.Errorf("原 config.json 的 seed 与 checkpoint 不一致")
 		}
-	} else {
+	} else if setFlags["max-plan-actions"] {
 		config.Engine.MaxPlanActions = *maxPlanActions
+	} else {
+		*maxPlanActions = config.Engine.MaxPlanActions
+	}
+	if *maxPlanActions <= 0 {
+		return fmt.Errorf("-max-plan-actions 必须为正数")
 	}
 	if config.TLC.Address != "" && *parallelism != 1 {
 		return fmt.Errorf("旧 controlled TLC 不保证请求隔离，连接 TLC 时 -parallelism 必须为1")
+	}
+	if err := validateTLCModelBounds(ctx, config, stderr); err != nil {
+		return err
 	}
 	if err := validateAlignedNodes(config.Raft.NodeIDs, config.Model.NodeIDs); err != nil {
 		return fmt.Errorf("raft/模型配置不一致: %w", err)
@@ -222,7 +259,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		Runs: *runs, BaseSeed: config.Seed, Parallelism: *parallelism,
 		InitialPopulation: *initialPopulation, MutationsPerNewState: *mutationsPerState,
 		MaxMutationsPerCorpus: *maxMutationsPerCorpus, RandomSeedInterval: *randomSeedInterval,
-		RandomSeedsPerInterval: *randomSeedsPerInterval,
+		RandomSeedsPerInterval: *randomSeedsPerInterval, MaxReadyCandidates: *maxReadyCandidates,
 	}
 	runner, err := experiment.New(experimentConfig)
 	if err != nil {
@@ -230,6 +267,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 	experimentConfig = runner.Config()
 	policyConfig := randompolicy.DefaultRandomConfig()
+	policyConfig.NodeIDs = append([]core.NodeID(nil), config.Raft.NodeIDs...)
 	policyConfig.MaxValue = config.Model.MaxValue
 	policyConfig.MaxLogIndex = config.Model.MaxLogIndex
 	policyConfig.LargestTerm = config.Model.LargestTerm
@@ -330,6 +368,11 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		return err
 	}
 	feedbackOptions.ConfigurationFingerprint = fingerprint
+	if resumeCheckpoint != nil {
+		if err := resumeCheckpoint.Validate(experimentConfig, fingerprint); err != nil {
+			return fmt.Errorf("恢复点校验失败: %w", err)
+		}
+	}
 	if resumeCheckpoint == nil {
 		for _, artifact := range []struct {
 			name  string
@@ -344,7 +387,13 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 			}
 		}
 	}
-	store, err := openExperimentStore(*outputPath, artifactPolicy)
+	committedRunSummaries := 0
+	committedCorpusEntries := 0
+	if resumeCheckpoint != nil {
+		committedRunSummaries = resumeCheckpoint.RunSummaryCount
+		committedCorpusEntries = resumeCheckpoint.Corpus.EntryCount
+	}
+	store, err := openExperimentStore(*outputPath, artifactPolicy, committedRunSummaries, committedCorpusEntries)
 	if err != nil {
 		return err
 	}
@@ -356,10 +405,36 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		resumeCheckpoint.EventSequence = store.lastEventSequence
 	}
 	feedbackOptions.Hooks = store.hooks()
+	feedbackOptions.ResumeCorpusEntries = append([]corpus.Entry(nil), store.corpusEntries...)
+	var tlcMetricsClient *tlc.Client
+	tlcMetrics := tlcMetricsArtifact{Segments: make([]tlcMetricsSegment, 0, 1)}
+	if resumeCheckpoint != nil {
+		if metricsErr := persistence.ReadJSON(filepath.Join(*outputPath, "tlc-server-metrics.json"), &tlcMetrics); metricsErr != nil && !errors.Is(metricsErr, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(stderr, "警告: 读取已有 TLC 性能统计失败: %v\n", metricsErr)
+			tlcMetrics = tlcMetricsArtifact{Segments: make([]tlcMetricsSegment, 0, 1)}
+		}
+	}
+	tlcMetricsAvailable := false
+	if config.TLC.Address != "" {
+		client, clientErr := tlc.NewClient(config.TLC.Address)
+		if clientErr == nil {
+			metricsContext, cancelMetrics := context.WithTimeout(context.Background(), 5*time.Second)
+			startMetrics, metricsErr := client.Metrics(metricsContext)
+			cancelMetrics()
+			if metricsErr == nil {
+				tlcMetricsClient, tlcMetricsAvailable = client, true
+				tlcMetrics.Segments = append(tlcMetrics.Segments, tlcMetricsSegment{
+					StartedAt: time.Now().UTC(), Start: startMetrics,
+				})
+			} else {
+				_, _ = fmt.Fprintf(stderr, "警告: TLC 服务未提供性能统计: %v\n", metricsErr)
+			}
+		}
+	}
 	if config.TLC.Address == "" {
 		_, _ = fmt.Fprintln(stderr, "警告: 未连接 TLC，本次运行不会返回模型状态，Corpus 将保持为空，闭环会持续补充初始种子")
 	}
-	report, corpusSnapshot, runErr := runner.RunFeedback(ctx, feedbackOptions,
+	report, corpusCheckpoint, runErr := runner.RunFeedback(ctx, feedbackOptions,
 		func(ctx context.Context, index int, seed int64, candidate experiment.Candidate) (experiment.FeedbackExecution, error) {
 			runConfig := config
 			runConfig.Seed = seed
@@ -390,9 +465,25 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		name  string
 		value any
 	}{
-		{name: "corpus.json", value: corpusSnapshot},
+		{name: "corpus.json", value: corpusCheckpoint},
 		{name: "experiment-report.json", value: report},
 		{name: "experiment-metrics.json", value: report.Statistics()},
+	}
+	if tlcMetricsAvailable {
+		metricsContext, cancelMetrics := context.WithTimeout(context.Background(), 5*time.Second)
+		endMetrics, metricsErr := tlcMetricsClient.Metrics(metricsContext)
+		cancelMetrics()
+		if metricsErr != nil {
+			_, _ = fmt.Fprintf(stderr, "警告: 读取实验结束 TLC 性能统计失败: %v\n", metricsErr)
+		} else {
+			last := len(tlcMetrics.Segments) - 1
+			tlcMetrics.Segments[last].EndedAt = time.Now().UTC()
+			tlcMetrics.Segments[last].End = endMetrics
+			rootArtifacts = append(rootArtifacts, struct {
+				name  string
+				value any
+			}{name: "tlc-server-metrics.json", value: tlcMetrics})
+		}
 	}
 	if store.llmStats != nil {
 		rootArtifacts = append(rootArtifacts, struct {
@@ -472,6 +563,11 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	executionID := flags.String("execution-id", "", "覆盖 execution_id")
 	seedText := flags.String("seed", "", "覆盖确定性随机种子")
 	strictPlan := flags.Bool("strict-plan", false, "partial、skipped 或 empty_queue 时终止")
+	largestTerm := flags.Uint64("largest-term", 0, "覆盖模型 LargestTerm 边界")
+	maxLogIndex := flags.Uint64("max-log-index", 0, "覆盖模型 MaxLogIndex 边界")
+	snapshotThreshold := flags.Uint64("snapshot-threshold", 0, "每新增多少条已应用日志创建 snapshot；0表示关闭")
+	snapshotRetainEntries := flags.Uint64("snapshot-retain-entries", 0, "snapshot 压缩后额外保留的日志条目数")
+	voteQuorumDivisor := flags.Int("vote-quorum-divisor", 0, "选举 quorum 除数：2为正常，3复现 ModelFuzz mutant")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -500,6 +596,25 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if *tlcAddress != "" {
 		config.TLC.Address = *tlcAddress
 	}
+	if *largestTerm != 0 {
+		config.Model.LargestTerm = *largestTerm
+	} else if flagWasSet(flags, "largest-term") {
+		return fmt.Errorf("-largest-term 必须为正数")
+	}
+	if *maxLogIndex != 0 {
+		config.Model.MaxLogIndex = *maxLogIndex
+	} else if flagWasSet(flags, "max-log-index") {
+		return fmt.Errorf("-max-log-index 必须为正数")
+	}
+	if flagWasSet(flags, "snapshot-threshold") {
+		config.Raft.Snapshot.Threshold = *snapshotThreshold
+	}
+	if flagWasSet(flags, "snapshot-retain-entries") {
+		config.Raft.Snapshot.RetainEntries = *snapshotRetainEntries
+	}
+	if flagWasSet(flags, "vote-quorum-divisor") {
+		config.Raft.Faults.VoteQuorumDivisor = *voteQuorumDivisor
+	}
 	if *strictPlan {
 		config.Engine.FailOnPartial = true
 		config.Engine.FailOnSkipped = true
@@ -507,6 +622,9 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	if err := validateAlignedNodes(config.Raft.NodeIDs, config.Model.NodeIDs); err != nil {
 		return fmt.Errorf("raft/模型配置不一致: %w", err)
+	}
+	if err := validateTLCModelBounds(ctx, config, stderr); err != nil {
+		return err
 	}
 
 	sequence, err := readPlan(*planPath)
@@ -564,6 +682,30 @@ func buildEngine(config cliConfig, logOutput io.Writer) (*engine.Engine, error) 
 	return engine.New(runtime, resolver, mapper, executor, config.Engine, raftoracle.New())
 }
 
+func validateTLCModelBounds(ctx context.Context, config cliConfig, warnings io.Writer) error {
+	if config.TLC.Address == "" {
+		return nil
+	}
+	client, err := tlc.NewClient(config.TLC.Address)
+	if err != nil {
+		return err
+	}
+	boundContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	bounds, err := client.Bounds(boundContext)
+	if err != nil {
+		_, _ = fmt.Fprintf(warnings, "警告: TLC 服务未暴露模型边界，无法自动核对 LargestTerm/MaxLogIndex: %v\n", err)
+		return nil
+	}
+	if bounds.LargestTerm != config.Model.LargestTerm || bounds.MaxLogIndex != config.Model.MaxLogIndex {
+		return fmt.Errorf(
+			"TLC/Go 模型边界不一致: TLC LargestTerm=%d MaxLogIndex=%d，Go LargestTerm=%d MaxLogIndex=%d",
+			bounds.LargestTerm, bounds.MaxLogIndex, config.Model.LargestTerm, config.Model.MaxLogIndex,
+		)
+	}
+	return nil
+}
+
 func buildRuntime(config cliConfig, logOutput io.Writer) (*runtimepkg.Runtime, error) {
 	adapterConfig := config.Raft.adapterConfig()
 	raftLogOutput := io.Discard
@@ -601,4 +743,14 @@ func printRootUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output)
 	_, _ = fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
+}
+
+func flagWasSet(flags *flag.FlagSet, name string) bool {
+	set := false
+	flags.Visit(func(value *flag.Flag) {
+		if value.Name == name {
+			set = true
+		}
+	})
+	return set
 }

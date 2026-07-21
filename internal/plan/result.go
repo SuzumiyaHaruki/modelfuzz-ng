@@ -25,21 +25,22 @@ const (
 )
 
 const (
-	ReasonResolverUnavailable ResolutionReasonCode = "resolver_unavailable"
-	ReasonInvalidPlan         ResolutionReasonCode = "invalid_plan"
-	ReasonInvalidObservation  ResolutionReasonCode = "invalid_observation"
-	ReasonUnknownActionKind   ResolutionReasonCode = "unknown_action_kind"
-	ReasonBatchLimit          ResolutionReasonCode = "batch_limit"
-	ReasonNodeNotObserved     ResolutionReasonCode = "node_not_observed"
-	ReasonTargetNotRunning    ResolutionReasonCode = "target_not_running"
-	ReasonInvalidQueue        ResolutionReasonCode = "invalid_queue"
-	ReasonMessageNotAvailable ResolutionReasonCode = "message_not_available"
-	ReasonPartialAvailability ResolutionReasonCode = "partial_availability"
-	ReasonAdvanceLimit        ResolutionReasonCode = "advance_limit"
-	ReasonTimeOverflow        ResolutionReasonCode = "time_overflow"
-	ReasonNodeAlreadyCrashed  ResolutionReasonCode = "node_already_crashed"
-	ReasonNodeAlreadyRunning  ResolutionReasonCode = "node_already_running"
-	ReasonMultipleDecisions   ResolutionReasonCode = "multiple_profile_decisions"
+	ReasonResolverUnavailable  ResolutionReasonCode = "resolver_unavailable"
+	ReasonInvalidPlan          ResolutionReasonCode = "invalid_plan"
+	ReasonInvalidObservation   ResolutionReasonCode = "invalid_observation"
+	ReasonUnknownActionKind    ResolutionReasonCode = "unknown_action_kind"
+	ReasonBatchLimit           ResolutionReasonCode = "batch_limit"
+	ReasonNodeNotObserved      ResolutionReasonCode = "node_not_observed"
+	ReasonTargetNotRunning     ResolutionReasonCode = "target_not_running"
+	ReasonInvalidQueue         ResolutionReasonCode = "invalid_queue"
+	ReasonMessageNotAvailable  ResolutionReasonCode = "message_not_available"
+	ReasonSelectorStartClamped ResolutionReasonCode = "selector_start_clamped"
+	ReasonPartialAvailability  ResolutionReasonCode = "partial_availability"
+	ReasonAdvanceLimit         ResolutionReasonCode = "advance_limit"
+	ReasonTimeOverflow         ResolutionReasonCode = "time_overflow"
+	ReasonNodeAlreadyCrashed   ResolutionReasonCode = "node_already_crashed"
+	ReasonNodeAlreadyRunning   ResolutionReasonCode = "node_already_running"
+	ReasonMultipleDecisions    ResolutionReasonCode = "multiple_profile_decisions"
 )
 
 func (s ResolutionStatus) Valid() bool {

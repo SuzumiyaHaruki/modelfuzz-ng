@@ -9,10 +9,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/mutation"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/persistence"
 )
@@ -30,6 +33,17 @@ type experimentSettings struct {
 	RandomMutation   mutation.RandomConfig `json:"random_mutation"`
 	ArtifactPolicy   artifactPolicy        `json:"artifact_policy"`
 	CheckpointEvery  int                   `json:"checkpoint_every"`
+}
+
+type tlcMetricsArtifact struct {
+	Segments []tlcMetricsSegment `json:"segments"`
+}
+
+type tlcMetricsSegment struct {
+	StartedAt time.Time         `json:"started_at"`
+	EndedAt   time.Time         `json:"ended_at"`
+	Start     tlc.ServerMetrics `json:"start"`
+	End       tlc.ServerMetrics `json:"end"`
 }
 
 func configurationFingerprint(values ...any) (string, error) {
@@ -82,21 +96,54 @@ type experimentStore struct {
 	policy            artifactPolicy
 	config            cliConfig
 	journal           *persistence.Journal
+	runs              *persistence.Journal
+	corpus            *persistence.Journal
+	corpusEntries     []corpus.Entry
 	lastEventSequence uint64
 	llmStats          func() llm.Stats
 }
 
-func openExperimentStore(directory string, policy artifactPolicy) (*experimentStore, error) {
-	journal, err := persistence.OpenJournal(filepath.Join(directory, "progress.jsonl"))
+func openExperimentStore(directory string, policy artifactPolicy, committedRunSummaries, committedCorpusEntries int) (*experimentStore, error) {
+	runsPath := filepath.Join(directory, "runs.jsonl")
+	if err := persistence.KeepJSONLines(runsPath, committedRunSummaries); err != nil {
+		return nil, fmt.Errorf("校准 run summary journal: %w", err)
+	}
+	runs, err := persistence.OpenJournal(runsPath)
 	if err != nil {
 		return nil, err
 	}
-	store := &experimentStore{directory: directory, policy: policy, journal: journal}
+	corpusPath := filepath.Join(directory, "corpus.jsonl")
+	if err := persistence.KeepJSONLines(corpusPath, committedCorpusEntries); err != nil {
+		_ = runs.Close()
+		return nil, fmt.Errorf("校准 corpus journal: %w", err)
+	}
+	corpusEntries, err := persistence.ReadJSONLines[corpus.Entry](corpusPath, committedCorpusEntries)
+	if err != nil {
+		_ = runs.Close()
+		return nil, fmt.Errorf("读取 corpus journal: %w", err)
+	}
+	corpusJournal, err := persistence.OpenJournal(corpusPath)
+	if err != nil {
+		_ = runs.Close()
+		return nil, err
+	}
+	journal, err := persistence.OpenJournal(filepath.Join(directory, "progress.jsonl"))
+	if err != nil {
+		_ = runs.Close()
+		_ = corpusJournal.Close()
+		return nil, err
+	}
+	store := &experimentStore{
+		directory: directory, policy: policy, journal: journal, runs: runs,
+		corpus: corpusJournal, corpusEntries: corpusEntries,
+	}
 	var event experiment.Event
 	if err := persistence.ReadLastJSONLine(filepath.Join(directory, "progress.jsonl"), &event); err == nil {
 		store.lastEventSequence = event.Sequence
 	} else if !errors.Is(err, io.EOF) {
 		_ = journal.Close()
+		_ = runs.Close()
+		_ = corpusJournal.Close()
 		return nil, fmt.Errorf("读取实验 journal 最后一条记录: %w", err)
 	}
 	return store, nil
@@ -125,11 +172,17 @@ func (s *experimentStore) hooks() experiment.Hooks {
 			}
 			return persistence.WriteJSONAtomic(filepath.Join(s.directory, "checkpoint.json"), checkpoint)
 		},
+		OnCorpusEntry: func(entry corpus.Entry) error {
+			return s.corpus.Append(entry)
+		},
 		OnRunComplete: s.writeCompletion,
 	}
 }
 
 func (s *experimentStore) writeCompletion(completion experiment.Completion) error {
+	if err := s.runs.Append(completion.Run); err != nil {
+		return fmt.Errorf("追加 run summary: %w", err)
+	}
 	if !s.policy.saves(completion.Run) {
 		return nil
 	}
@@ -156,5 +209,5 @@ func (s *experimentStore) Close() error {
 	if s == nil {
 		return nil
 	}
-	return s.journal.Close()
+	return errors.Join(s.journal.Close(), s.runs.Close(), s.corpus.Close())
 }

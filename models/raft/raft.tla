@@ -249,6 +249,10 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+\* StrictTLCServer 不从 Next 枚举所有参数组合；它在收到外部事件后
+\* 直接绑定上面的操作符。该假动作只用于避免 Tool 启动时展开 Next。
+ControlledNext == UNCHANGED vars
+
 TypeOK ==
     /\ currentTerm \in [Server -> Terms]
     /\ state \in [Server -> {Follower, Candidate, Leader}]

@@ -64,3 +64,37 @@ func TestOpenJournalRepairsPartialLastRecord(t *testing.T) {
 		t.Fatalf("last = %v/%v", last, err)
 	}
 }
+
+func TestKeepJSONLinesDropsUncommittedAndPartialRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.jsonl")
+	if err := os.WriteFile(path, []byte("{\"index\":0}\n{\"index\":1}\n{\"index\":2}\n{\"index\":"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := KeepJSONLines(path, 2); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{\"index\":0}\n{\"index\":1}\n" {
+		t.Fatalf("retained JSONL = %q", data)
+	}
+	if err := KeepJSONLines(path, 3); err == nil {
+		t.Fatal("KeepJSONLines accepted fewer records than the checkpoint requires")
+	}
+}
+
+func TestReadJSONLinesRequiresExactWatermark(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corpus.jsonl")
+	if err := os.WriteFile(path, []byte("{\"id\":1}\n{\"id\":2}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	values, err := ReadJSONLines[map[string]int](path, 2)
+	if err != nil || len(values) != 2 || values[1]["id"] != 2 {
+		t.Fatalf("values = %v, err = %v", values, err)
+	}
+	if _, err := ReadJSONLines[map[string]int](path, 1); err == nil {
+		t.Fatal("ReadJSONLines accepted a mismatched watermark")
+	}
+}

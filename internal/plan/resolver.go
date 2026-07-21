@@ -15,14 +15,16 @@ const (
 // ResolverConfig 限制单条 PlanAction 的展开规模，避免一个错误计划产生过多
 // tick 或 Concrete Action。限制不属于 core.Action 的语义。
 type ResolverConfig struct {
-	MaxAdvanceTicks uint64 `json:"max_advance_ticks"`
-	MaxBatch        int    `json:"max_batch"`
+	MaxAdvanceTicks   uint64 `json:"max_advance_ticks"`
+	MaxBatch          int    `json:"max_batch"`
+	ClampMessageStart bool   `json:"clamp_message_start"`
 }
 
 func DefaultResolverConfig() ResolverConfig {
 	return ResolverConfig{
-		MaxAdvanceTicks: defaultMaxAdvanceTicks,
-		MaxBatch:        defaultMaxBatch,
+		MaxAdvanceTicks:   defaultMaxAdvanceTicks,
+		MaxBatch:          defaultMaxBatch,
+		ClampMessageStart: true,
 	}
 }
 
@@ -95,24 +97,36 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 			))
 		}
 	}
-	if selector.Start >= len(queue) {
+	if len(queue) == 0 {
 		result.Status = ResolutionEmptyQueue
 		result.ReasonCode = ReasonMessageNotAvailable
 		result.Reason = fmt.Sprintf("link %s has no message at position %d", selector.Link, selector.Start)
 		return result
 	}
+	start := selector.Start
+	clamped := false
+	if start >= len(queue) {
+		if !r.config.ClampMessageStart {
+			result.Status = ResolutionEmptyQueue
+			result.ReasonCode = ReasonMessageNotAvailable
+			result.Reason = fmt.Sprintf("link %s has no message at position %d", selector.Link, selector.Start)
+			return result
+		}
+		start = len(queue) - 1
+		clamped = true
+	}
 
-	end := selector.Start + selector.Count
+	end := start + selector.Count
 	if end > len(queue) {
 		end = len(queue)
 	}
-	selected := queue[selector.Start:end]
+	selected := queue[start:end]
 	result.Actions = make([]core.Action, len(selected))
 	for i, message := range selected {
 		position := message.Position
 		if action.Kind == ActionDeliver || action.Kind == ActionDrop {
 			// 前一个动作移除消息后，下一条选中消息会移动到相同的 Start。
-			position = selector.Start
+			position = start
 		}
 		result.Actions[i] = core.Action{
 			Kind:    concreteMessageKind(action.Kind),
@@ -125,10 +139,19 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 	result.Resolved = len(result.Actions)
 	if result.Resolved < result.Requested {
 		result.Status = ResolutionPartial
-		result.ReasonCode = ReasonPartialAvailability
-		result.Reason = fmt.Sprintf("requested %d messages but only %d are available", result.Requested, result.Resolved)
+		if clamped {
+			result.ReasonCode = ReasonSelectorStartClamped
+			result.Reason = fmt.Sprintf("message start %d clamped to %d; requested %d messages but only %d are available", selector.Start, start, result.Requested, result.Resolved)
+		} else {
+			result.ReasonCode = ReasonPartialAvailability
+			result.Reason = fmt.Sprintf("requested %d messages but only %d are available", result.Requested, result.Resolved)
+		}
 	} else {
 		result.Status = ResolutionResolved
+		if clamped {
+			result.ReasonCode = ReasonSelectorStartClamped
+			result.Reason = fmt.Sprintf("message start %d clamped to %d", selector.Start, start)
+		}
 	}
 	return result
 }

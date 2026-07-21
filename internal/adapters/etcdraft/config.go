@@ -29,9 +29,30 @@ type Config struct {
 	MaxSizePerMsg    uint64
 	MaxInflightMsgs  int
 	MaxInflightBytes uint64
+	Snapshot         SnapshotPolicy
+	Faults           FaultPolicy
 
 	// Logger 为 nil 时使用 etcd-raft 的默认 Logger。
 	Logger raft.Logger
+}
+
+// FaultPolicy 保存只用于受控缺陷复现实验的 SUT fault injection。正常运行的
+// VoteQuorumDivisor 为2，即 floor(n/2)+1；设为3复现 ModelFuzz 论文中的
+// floor(n/3)+1 选举 quorum mutant。
+type FaultPolicy struct {
+	VoteQuorumDivisor int `json:"vote_quorum_divisor"`
+}
+
+const (
+	normalVoteQuorumDivisor   = 2
+	weakenedVoteQuorumDivisor = 3
+)
+
+// SnapshotPolicy 模拟应用层按已应用日志数量维护 snapshot 和压缩日志。
+// Threshold 为0时关闭；RetainEntries 表示 snapshot 点之前仍保留的条目数。
+type SnapshotPolicy struct {
+	Threshold     uint64 `json:"threshold"`
+	RetainEntries uint64 `json:"retain_entries"`
 }
 
 // DefaultConfig 返回当前最小实验配置：三个 voter、10 个 tick 的选举超时
@@ -44,6 +65,7 @@ func DefaultConfig() Config {
 		MaxSizePerMsg:    math.MaxUint64,
 		MaxInflightMsgs:  256,
 		MaxInflightBytes: math.MaxUint64,
+		Faults:           FaultPolicy{VoteQuorumDivisor: normalVoteQuorumDivisor},
 	}
 }
 
@@ -66,6 +88,9 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.MaxInflightBytes == 0 {
 		c.MaxInflightBytes = defaults.MaxInflightBytes
+	}
+	if c.Faults.VoteQuorumDivisor == 0 {
+		c.Faults.VoteQuorumDivisor = defaults.Faults.VoteQuorumDivisor
 	}
 
 	c.NodeIDs = append([]core.NodeID(nil), c.NodeIDs...)
@@ -94,6 +119,13 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.MaxInflightBytes < c.MaxSizePerMsg {
 		return Config{}, fmt.Errorf("%w: max inflight bytes must be at least max message size", ErrInvalidConfig)
+	}
+	if c.Faults.VoteQuorumDivisor != normalVoteQuorumDivisor &&
+		c.Faults.VoteQuorumDivisor != weakenedVoteQuorumDivisor {
+		return Config{}, fmt.Errorf("%w: vote quorum divisor must be 2 (normal) or 3 (ModelFuzz mutant)", ErrInvalidConfig)
+	}
+	if c.Faults.VoteQuorumDivisor == weakenedVoteQuorumDivisor && len(c.NodeIDs) < 4 {
+		return Config{}, fmt.Errorf("%w: vote quorum divisor 3 needs at least four voters to differ from majority", ErrInvalidConfig)
 	}
 	return c, nil
 }

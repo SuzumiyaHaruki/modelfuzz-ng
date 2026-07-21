@@ -25,6 +25,7 @@ type Config struct {
 	MaxMutationsPerCorpus  int   `json:"max_mutations_per_corpus_entry"`
 	RandomSeedInterval     int   `json:"random_seed_interval,omitempty"`
 	RandomSeedsPerInterval int   `json:"random_seeds_per_interval,omitempty"`
+	MaxReadyCandidates     int   `json:"max_ready_candidates"`
 }
 
 // Execute 必须为每次调用创建独立 Engine/Runtime。result 即使失败也应包含
@@ -67,7 +68,9 @@ type FeedbackOptions struct {
 	Mutator         mutation.Mutator
 	// Resume 恢复一个此前由同一 Config 产生的反馈实验。
 	Resume *Checkpoint
-	Hooks  Hooks
+	// ResumeCorpusEntries 是 corpus.jsonl 中 checkpoint 水位以前的完整条目。
+	ResumeCorpusEntries []corpus.Entry
+	Hooks               Hooks
 	// CheckpointEvery 表示每完成多少次执行写一次检查点；零等价于1。
 	CheckpointEvery int
 	// ConfigurationFingerprint 由 CLI 对 SUT、Engine、Policy 和 Mutator 配置
@@ -140,8 +143,10 @@ type CoveragePoint struct {
 }
 
 type Report struct {
-	Config                       Config                    `json:"config"`
-	Runs                         []Run                     `json:"runs"`
+	Config Config `json:"config"`
+	// Runs 仅供非反馈式的进程内批量执行使用。反馈实验的逐运行明细写入
+	// runs.jsonl，汇总报告和 checkpoint 不再复制完整历史。
+	Runs                         []Run                     `json:"runs,omitempty"`
 	CompletedRuns                int                       `json:"completed_runs"`
 	Succeeded                    int                       `json:"succeeded"`
 	Failed                       int                       `json:"failed"`
@@ -155,6 +160,8 @@ type Report struct {
 	RetainedRuns                 int                       `json:"retained_runs"`
 	InitialExecutions            int                       `json:"initial_executions"`
 	GeneratedMutations           int                       `json:"generated_mutations"`
+	AdmittedMutations            int                       `json:"admitted_mutations"`
+	DiscardedMutations           int                       `json:"discarded_mutations"`
 	ExecutedMutations            int                       `json:"executed_mutations"`
 	MutationErrors               []string                  `json:"mutation_errors,omitempty"`
 	ActionCounts                 map[string]int            `json:"action_counts"`
@@ -173,6 +180,7 @@ type Report struct {
 	RunsPerSecond                float64                   `json:"runs_per_second"`
 	MaxCorpusDepth               int                       `json:"max_corpus_depth"`
 	MaxQueuedMessages            int                       `json:"max_queued_messages"`
+	PeakReadyCandidates          int                       `json:"peak_ready_candidates"`
 	CoverageTimeline             []CoveragePoint           `json:"coverage_timeline"`
 	ElapsedMillis                int64                     `json:"elapsed_millis"`
 	PlansObserved                int                       `json:"plans_observed"`
@@ -186,6 +194,14 @@ type Report struct {
 	DuplicateModelStatePathRatio float64                   `json:"duplicate_model_state_path_ratio"`
 	NoveltyBySource              map[string]SourceNovelty  `json:"novelty_by_source"`
 	PeriodicSeedExecutions       int                       `json:"periodic_seed_executions"`
+	SnapshotsCreated             int                       `json:"snapshots_created"`
+	SnapshotsSent                int                       `json:"snapshots_sent"`
+	SnapshotsDelivered           int                       `json:"snapshots_delivered"`
+	SnapshotsApplied             int                       `json:"snapshots_applied"`
+	SnapshotsRejectedOrStale     int                       `json:"snapshots_rejected_or_stale"`
+	LogsCompacted                int                       `json:"logs_compacted"`
+	CompactedEntries             uint64                    `json:"compacted_entries"`
+	SnapshotBytes                uint64                    `json:"snapshot_bytes"`
 }
 
 type Runner struct {
@@ -209,12 +225,15 @@ func New(config Config) (*Runner, error) {
 		config.InitialPopulation = min(4, config.Runs)
 	}
 	if config.MutationsPerNewState == 0 {
-		config.MutationsPerNewState = 2
+		config.MutationsPerNewState = 1
 	}
 	if config.MaxMutationsPerCorpus == 0 {
-		config.MaxMutationsPerCorpus = 8
+		config.MaxMutationsPerCorpus = 2
 	}
-	if config.InitialPopulation < 0 || config.MutationsPerNewState < 0 || config.MaxMutationsPerCorpus < 0 {
+	if config.MaxReadyCandidates == 0 {
+		config.MaxReadyCandidates = 4096
+	}
+	if config.InitialPopulation < 0 || config.MutationsPerNewState < 0 || config.MaxMutationsPerCorpus < 0 || config.MaxReadyCandidates < 0 {
 		return nil, fmt.Errorf("feedback experiment bounds must be non-negative")
 	}
 	if config.RandomSeedInterval < 0 || config.RandomSeedsPerInterval < 0 {
@@ -286,12 +305,12 @@ type mutationDone struct {
 
 // RunFeedback 执行“种子 -> 模型状态覆盖 -> Corpus -> Mutation -> 新候选”的闭环。
 // Mutation 在独立 goroutine 中运行，因此 LLM 等待可以与后续候选执行重叠。
-func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execute FeedbackExecute) (Report, corpus.Snapshot, error) {
+func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execute FeedbackExecute) (Report, corpus.Checkpoint, error) {
 	if r == nil || execute == nil {
-		return Report{}, corpus.Snapshot{}, fmt.Errorf("experiment runner and feedback execute callback must not be nil")
+		return Report{}, corpus.Checkpoint{}, fmt.Errorf("experiment runner and feedback execute callback must not be nil")
 	}
 	if options.Mutator == nil {
-		return Report{}, corpus.Snapshot{}, fmt.Errorf("feedback mutator must not be nil")
+		return Report{}, corpus.Checkpoint{}, fmt.Errorf("feedback mutator must not be nil")
 	}
 	if options.InitializerName == "" {
 		if options.Initializer == nil {
@@ -303,7 +322,7 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 	if options.CheckpointEvery <= 0 {
 		options.CheckpointEvery = 1
 	}
-	report := newReport(r.config, true)
+	accumulator := newReportAccumulator(r.config)
 	collection := corpus.New()
 	ready := make([]Candidate, 0)
 	rerun := make([]ScheduledCandidate, 0)
@@ -319,18 +338,22 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 
 	if options.Resume != nil {
 		if err := options.Resume.Validate(r.config, options.ConfigurationFingerprint); err != nil {
-			return report, collection.Snapshot(), err
+			return accumulator.finalize(collection.Len(), 0), collection.Checkpoint(), err
 		}
 		var err error
-		collection, err = corpus.Restore(options.Resume.Corpus)
+		collection, err = corpus.RestoreCheckpoint(options.Resume.Corpus, options.ResumeCorpusEntries)
 		if err != nil {
-			return report, corpus.Snapshot{}, err
+			return accumulator.finalize(0, 0), corpus.Checkpoint{}, err
 		}
-		report = options.Resume.Report
+		accumulator = restoreReportAccumulator(options.Resume.Aggregation)
 		ready = copyCandidates(options.Resume.Ready)
 		rerun = append(rerun, options.Resume.InFlight...)
-		for _, request := range options.Resume.PendingMutations {
-			pending[request.Entry.ID] = request
+		for _, saved := range options.Resume.PendingMutations {
+			entry, found := collection.Entry(saved.EntryID)
+			if !found {
+				return accumulator.finalize(collection.Len(), 0), collection.Checkpoint(), fmt.Errorf("pending mutation references missing corpus entry %s", saved.EntryID)
+			}
+			pending[saved.EntryID] = mutation.Request{Entry: entry, Count: saved.Count, Seed: saved.Seed}
 		}
 		nextCandidateID, nextRunIndex, completed = options.Resume.NextCandidateID, options.Resume.NextRunIndex, options.Resume.Completed
 		nextRandomSeedAt, randomSeedsDue = options.Resume.NextRandomSeedAt, options.Resume.RandomSeedsDue
@@ -340,10 +363,15 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 		var err error
 		ready, nextCandidateID, err = r.initialCandidates(ctx, options, r.config.InitialPopulation, r.config.BaseSeed, 0)
 		if err != nil {
-			return aggregate(report), collection.Snapshot(), err
+			return accumulator.finalize(collection.Len(), 0), collection.Checkpoint(), err
+		}
+		if len(ready) > r.config.MaxReadyCandidates {
+			ready = ready[len(ready)-r.config.MaxReadyCandidates:]
 		}
 	}
-	novelty := newNoveltyTracker(report)
+	if len(ready) > accumulator.report.PeakReadyCandidates {
+		accumulator.report.PeakReadyCandidates = len(ready)
+	}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -393,26 +421,26 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 			return nil
 		}
 		elapsedMillis := (elapsedOffset + time.Since(started)).Milliseconds()
-		checkpointReport := finalizeFeedbackReport(report, collection, elapsedMillis)
 		state := Checkpoint{
-			Version: CheckpointVersion, SavedAt: time.Now().UTC(), Config: r.config, Report: checkpointReport,
-			Corpus: collection.Snapshot(), Ready: copyCandidates(ready), InFlight: mergeScheduled(rerun, scheduledValues(inFlight)),
-			PendingMutations: pendingValues(pending), NextCandidateID: nextCandidateID,
-			NextRunIndex: nextRunIndex, Completed: completed, EventSequence: eventSequence,
+			Version: CheckpointVersion, SavedAt: time.Now().UTC(), Config: r.config,
+			Aggregation: accumulator.snapshot(collection.Len(), elapsedMillis),
+			Corpus:      collection.Checkpoint(), Ready: copyCandidates(ready), InFlight: mergeScheduled(rerun, scheduledValues(inFlight)),
+			PendingMutations: pendingCheckpointValues(pending), NextCandidateID: nextCandidateID,
+			NextRunIndex: nextRunIndex, Completed: completed, RunSummaryCount: completed, EventSequence: eventSequence,
 			NextRandomSeedAt: nextRandomSeedAt, RandomSeedsDue: randomSeedsDue,
 			ElapsedMillis:            elapsedMillis,
 			ConfigurationFingerprint: options.ConfigurationFingerprint,
 		}
 		return options.Hooks.OnCheckpoint(state)
 	}
-	stopWithError := func(cause error) (Report, corpus.Snapshot, error) {
+	stopWithError := func(cause error) (Report, corpus.Checkpoint, error) {
 		cancel()
 		executionWorkers.Wait()
 		mutationWorker.Wait()
 		_ = emit(Event{Kind: EventExperimentCanceled, Error: cause.Error()})
 		_ = checkpoint(true)
-		report = finalizeFeedbackReport(report, collection, (elapsedOffset + time.Since(started)).Milliseconds())
-		return report, collection.Snapshot(), cause
+		report := accumulator.finalize(collection.Len(), (elapsedOffset + time.Since(started)).Milliseconds())
+		return report, collection.Checkpoint(), cause
 	}
 	if options.Resume != nil {
 		if err := emit(Event{Kind: EventExperimentResumed}); err != nil {
@@ -498,24 +526,32 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 				nextRandomSeedAt += r.config.RandomSeedInterval
 			}
 			run := feedbackRun(done)
-			novelty.classify(&run)
+			accumulator.classify(&run)
 			switch done.candidate.Kind {
 			case CandidateMutation:
-				report.ExecutedMutations++
+				accumulator.report.ExecutedMutations++
 			case CandidateInitial:
-				report.InitialExecutions++
+				accumulator.report.InitialExecutions++
 			}
 			if run.Succeeded && len(done.execution.Result.ModelStates) > 0 {
 				entry, retained, corpusErr := collection.Consider(corpus.Input{
 					ParentID: done.candidate.ParentID, Source: done.candidate.Source,
 					Depth: done.candidate.Depth, RunIndex: done.index, Seed: done.seed,
-					Plan: done.execution.Plan, Actions: done.execution.Result.Actions,
+					Plan:   done.execution.Plan,
 					States: done.execution.Result.ModelStates,
 				})
 				if corpusErr != nil {
 					run.Error = joinErrorText(run.Error, corpusErr.Error())
 					run.Succeeded = false
 				} else if retained {
+					if options.Hooks.OnCorpusEntry != nil {
+						if err := options.Hooks.OnCorpusEntry(entry); err != nil {
+							if rollbackErr := collection.RollbackLast(entry); rollbackErr != nil {
+								return stopWithError(fmt.Errorf("persist corpus entry: %w; rollback: %v", err, rollbackErr))
+							}
+							return stopWithError(fmt.Errorf("persist corpus entry: %w", err))
+						}
+					}
 					run.Retained, run.CorpusID = true, entry.ID
 					run.NewStateKeys = append([]int64(nil), entry.NewStateKeys...)
 					count := mutationCount(len(entry.NewStateKeys), r.config.MutationsPerNewState, r.config.MaxMutationsPerCorpus)
@@ -528,16 +564,16 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 					}
 				}
 			}
-			report.Runs[done.index] = run
-			report.CoverageTimeline = append(report.CoverageTimeline, coveragePoint(report, collection, completed,
-				(elapsedOffset+time.Since(started)).Milliseconds()))
+			if err := accumulator.addRun(run, collection.Len(), (elapsedOffset + time.Since(started)).Milliseconds()); err != nil {
+				return stopWithError(err)
+			}
 			completion := Completion{Run: run, Candidate: copyCandidate(done.candidate), Execution: done.execution}
 			if options.Hooks.OnRunComplete != nil {
 				if err := options.Hooks.OnRunComplete(completion); err != nil {
 					return stopWithError(err)
 				}
 			}
-			if err := emit(Event{Kind: EventRunCompleted, Run: &run, Candidate: &done.candidate, CorpusID: run.CorpusID}); err != nil {
+			if err := emit(Event{Kind: EventRunCompleted, RunIndex: run.Index, CandidateID: done.candidate.ID, CorpusID: run.CorpusID}); err != nil {
 				return stopWithError(err)
 			}
 			if err := checkpoint(false); err != nil {
@@ -546,22 +582,32 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 		case mutated := <-mutationResults:
 			delete(pending, mutated.entry.ID)
 			if mutated.err != nil {
-				report.MutationErrors = append(report.MutationErrors, fmt.Sprintf("%s: %v", mutated.entry.ID, mutated.err))
+				accumulator.report.MutationErrors = append(accumulator.report.MutationErrors, fmt.Sprintf("%s: %v", mutated.entry.ID, mutated.err))
 				if err := emit(Event{Kind: EventMutationCompleted, CorpusID: mutated.entry.ID, Error: mutated.err.Error()}); err != nil {
 					return stopWithError(err)
 				}
 				continue
 			}
-			report.GeneratedMutations += len(mutated.plans)
+			accumulator.report.GeneratedMutations += len(mutated.plans)
 			for _, sequence := range mutated.plans {
 				if nextRunIndex+len(ready) >= r.config.Runs {
-					break
+					accumulator.report.DiscardedMutations++
+					continue
 				}
 				copy := sequence.Copy()
-				ready = append(ready, Candidate{
+				candidate := Candidate{
 					ID: fmt.Sprintf("candidate-%06d", nextCandidateID), ParentID: mutated.entry.ID,
 					Kind: CandidateMutation, Source: options.Mutator.Name(), Depth: mutated.entry.Depth + 1, Plan: &copy,
-				})
+				}
+				if len(ready) == r.config.MaxReadyCandidates {
+					ready = ready[1:]
+					accumulator.report.DiscardedMutations++
+				}
+				ready = append(ready, candidate)
+				accumulator.report.AdmittedMutations++
+				if len(ready) > accumulator.report.PeakReadyCandidates {
+					accumulator.report.PeakReadyCandidates = len(ready)
+				}
 				nextCandidateID++
 			}
 			if err := emit(Event{Kind: EventMutationCompleted, CorpusID: mutated.entry.ID, MutationCount: len(mutated.plans)}); err != nil {
@@ -578,23 +624,15 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 		delete(pending, key)
 	}
 	if err := emit(Event{Kind: EventExperimentCompleted}); err != nil {
-		report = finalizeFeedbackReport(report, collection, (elapsedOffset + time.Since(started)).Milliseconds())
-		return report, collection.Snapshot(), err
+		report := accumulator.finalize(collection.Len(), (elapsedOffset + time.Since(started)).Milliseconds())
+		return report, collection.Checkpoint(), err
 	}
 	if err := checkpoint(true); err != nil {
-		report = finalizeFeedbackReport(report, collection, (elapsedOffset + time.Since(started)).Milliseconds())
-		return report, collection.Snapshot(), err
+		report := accumulator.finalize(collection.Len(), (elapsedOffset + time.Since(started)).Milliseconds())
+		return report, collection.Checkpoint(), err
 	}
-	report = finalizeFeedbackReport(report, collection, (elapsedOffset + time.Since(started)).Milliseconds())
-	return report, collection.Snapshot(), nil
-}
-
-func finalizeFeedbackReport(report Report, collection *corpus.Corpus, elapsedMillis int64) Report {
-	report.ElapsedMillis = elapsedMillis
-	report = aggregate(report)
-	report.CorpusEntries = collection.Len()
-	report.RetainedRuns = report.CorpusEntries
-	return report
+	report := accumulator.finalize(collection.Len(), (elapsedOffset + time.Since(started)).Milliseconds())
+	return report, collection.Checkpoint(), nil
 }
 
 func (r *Runner) initialCandidates(ctx context.Context, options FeedbackOptions, count int, seed int64, nextID int) ([]Candidate, int, error) {
@@ -789,6 +827,14 @@ func aggregate(report Report) Report {
 		report.TotalModelEvents += run.ModelEvents
 		durations = append(durations, run.DurationMicros)
 		if run.Metrics != nil {
+			report.SnapshotsCreated += run.Metrics.SnapshotsCreated
+			report.SnapshotsSent += run.Metrics.SnapshotsSent
+			report.SnapshotsDelivered += run.Metrics.SnapshotsDelivered
+			report.SnapshotsApplied += run.Metrics.SnapshotsApplied
+			report.SnapshotsRejectedOrStale += run.Metrics.SnapshotsRejectedOrStale
+			report.LogsCompacted += run.Metrics.LogsCompacted
+			report.CompactedEntries += run.Metrics.CompactedEntries
+			report.SnapshotBytes += run.Metrics.SnapshotBytes
 			mergeCounts(report.ActionCounts, run.Metrics.ActionCounts)
 			mergeCounts(report.EffectCounts, run.Metrics.EffectCounts)
 			mergeCounts(report.MessageTypeCounts, run.Metrics.MessageTypeCounts)
@@ -854,6 +900,12 @@ func newReport(config Config, feedback bool) Report {
 		CoverageTimeline: make([]CoveragePoint, 0, config.Runs),
 		NoveltyBySource:  make(map[string]SourceNovelty),
 	}
+}
+
+func newFeedbackReport(config Config) Report {
+	report := newReport(config, true)
+	report.Runs = nil
+	return report
 }
 
 func duplicateRatio(observed, unique int) float64 {
@@ -934,6 +986,15 @@ func pendingValues(values map[string]mutation.Request) []mutation.Request {
 		result = append(result, value)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Entry.RunIndex < result[j].Entry.RunIndex })
+	return result
+}
+
+func pendingCheckpointValues(values map[string]mutation.Request) []PendingMutation {
+	requests := pendingValues(values)
+	result := make([]PendingMutation, len(requests))
+	for index, request := range requests {
+		result[index] = PendingMutation{EntryID: request.Entry.ID, Count: request.Count, Seed: request.Seed}
+	}
 	return result
 }
 

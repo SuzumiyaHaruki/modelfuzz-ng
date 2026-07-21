@@ -120,6 +120,97 @@ func ReadLastJSONLine(path string, destination any) error {
 	return json.Unmarshal(last, destination)
 }
 
+// ReadJSONLines 按顺序读取 exactly 条 JSONL 记录。调用方应先通过
+// KeepJSONLines 按 checkpoint 水位修复并截断孤儿尾记录。
+func ReadJSONLines[T any](path string, exactly int) ([]T, error) {
+	if exactly < 0 {
+		return nil, fmt.Errorf("JSONL expected count must not be negative")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open JSONL %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	result := make([]T, 0, exactly)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+		var value T
+		if err := json.Unmarshal(scanner.Bytes(), &value); err != nil {
+			return nil, fmt.Errorf("decode JSONL %s record %d: %w", path, len(result), err)
+		}
+		result = append(result, value)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan JSONL %s: %w", path, err)
+	}
+	if len(result) != exactly {
+		return nil, fmt.Errorf("JSONL %s has %d records, expected %d", path, len(result), exactly)
+	}
+	return result, nil
+}
+
+// KeepJSONLines 修复不完整尾行，并只保留前 keep 条已完整写入的记录。
+// checkpoint 使用它丢弃“run summary 已落盘、但 checkpoint 尚未提交”窗口中的
+// 孤儿记录，使恢复后可以安全地确定性重跑对应候选。
+func KeepJSONLines(path string, keep int) error {
+	if keep < 0 {
+		return fmt.Errorf("JSONL keep count must not be negative")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create JSONL directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open JSONL %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	if err := repairPartialLine(file); err != nil {
+		return fmt.Errorf("repair JSONL %s: %w", path, err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	reader := bufio.NewReader(file)
+	count := 0
+	offset := int64(0)
+	boundary := int64(0)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		offset += int64(len(line))
+		if len(line) > 0 {
+			count++
+			if count == keep {
+				boundary = offset
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("scan JSONL %s: %w", path, readErr)
+		}
+	}
+	if count < keep {
+		return fmt.Errorf("JSONL %s has %d records, checkpoint requires %d", path, count, keep)
+	}
+	if keep == 0 {
+		boundary = 0
+	}
+	if count > keep {
+		if err := file.Truncate(boundary); err != nil {
+			return fmt.Errorf("truncate JSONL %s: %w", path, err)
+		}
+		if err := file.Sync(); err != nil {
+			return fmt.Errorf("sync JSONL %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 func repairPartialLine(file *os.File) error {
 	information, err := file.Stat()
 	if err != nil || information.Size() == 0 {

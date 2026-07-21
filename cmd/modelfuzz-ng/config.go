@@ -15,14 +15,18 @@ import (
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
 )
 
+const defaultMaxPlanActions = 1000
+
 type raftSettings struct {
-	NodeIDs          []core.NodeID `json:"node_ids"`
-	ElectionTick     int           `json:"election_tick"`
-	HeartbeatTick    int           `json:"heartbeat_tick"`
-	MaxSizePerMsg    uint64        `json:"max_size_per_message"`
-	MaxInflightMsgs  int           `json:"max_inflight_messages"`
-	MaxInflightBytes uint64        `json:"max_inflight_bytes"`
-	VerboseLogging   bool          `json:"verbose_logging"`
+	NodeIDs          []core.NodeID           `json:"node_ids"`
+	ElectionTick     int                     `json:"election_tick"`
+	HeartbeatTick    int                     `json:"heartbeat_tick"`
+	MaxSizePerMsg    uint64                  `json:"max_size_per_message"`
+	MaxInflightMsgs  int                     `json:"max_inflight_messages"`
+	MaxInflightBytes uint64                  `json:"max_inflight_bytes"`
+	Snapshot         etcdraft.SnapshotPolicy `json:"snapshot"`
+	Faults           etcdraft.FaultPolicy    `json:"faults"`
+	VerboseLogging   bool                    `json:"verbose_logging"`
 }
 
 func (s raftSettings) adapterConfig() etcdraft.Config {
@@ -33,6 +37,8 @@ func (s raftSettings) adapterConfig() etcdraft.Config {
 		MaxSizePerMsg:    s.MaxSizePerMsg,
 		MaxInflightMsgs:  s.MaxInflightMsgs,
 		MaxInflightBytes: s.MaxInflightBytes,
+		Snapshot:         s.Snapshot,
+		Faults:           s.Faults,
 	}
 }
 
@@ -64,6 +70,8 @@ func defaultCLIConfig() cliConfig {
 			MaxSizePerMsg:    raftDefaults.MaxSizePerMsg,
 			MaxInflightMsgs:  raftDefaults.MaxInflightMsgs,
 			MaxInflightBytes: raftDefaults.MaxInflightBytes,
+			Snapshot:         raftDefaults.Snapshot,
+			Faults:           raftDefaults.Faults,
 		},
 		Model: raftmodel.DefaultConfig(),
 		Runtime: runtimepkg.Limits{
@@ -71,7 +79,7 @@ func defaultCLIConfig() cliConfig {
 		},
 		Resolver: plan.DefaultResolverConfig(),
 		Engine: engine.Config{
-			MaxPlanActions: 256, MaxConsecutiveNoops: 32,
+			MaxPlanActions: defaultMaxPlanActions, MaxConsecutiveNoops: 32,
 		},
 		TLC: tlcSettings{TimeoutSeconds: 30},
 	}
