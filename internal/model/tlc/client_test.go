@@ -3,6 +3,7 @@ package tlc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -56,5 +57,24 @@ func TestExecuteRejectsMismatchedResponse(t *testing.T) {
 	_, err = client.Execute(context.Background(), []model.Event{model.NewEvent("Timeout", map[string]any{"node": 1})})
 	if err == nil {
 		t.Fatal("Execute succeeded with mismatched states and keys")
+	}
+}
+
+func TestExecuteReturnsStructuredStrictServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = writer.Write([]byte(`{"error":{"code":"disabled_action","event_index":3,"event_name":"Timeout","message":"action is disabled"}}`))
+	}))
+	defer server.Close()
+	client, err := NewClientWithHTTPClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Execute(context.Background(), []model.Event{model.NewEvent("Timeout", map[string]any{"node": 1})})
+	var executionError *ExecutionError
+	if !errors.As(err, &executionError) || executionError.StatusCode != http.StatusUnprocessableEntity ||
+		executionError.Code != "disabled_action" || executionError.EventIndex != 3 || executionError.EventName != "Timeout" {
+		t.Fatalf("structured error = %#v / %v", executionError, err)
 	}
 }

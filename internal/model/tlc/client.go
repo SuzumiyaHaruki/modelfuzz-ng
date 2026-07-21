@@ -101,6 +101,11 @@ func (c *Client) Execute(ctx context.Context, events []model.Event) ([]State, er
 		return nil, fmt.Errorf("%w: body exceeds %d bytes", ErrInvalidResponse, maxResponseBytes)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		var decodedError executeErrorResponse
+		if json.Unmarshal(responseBody, &decodedError) == nil && decodedError.Error.Code != "" {
+			decodedError.Error.StatusCode = response.StatusCode
+			return nil, &decodedError.Error
+		}
 		return nil, fmt.Errorf("TLC returned %s: %s", response.Status, strings.TrimSpace(string(responseBody)))
 	}
 

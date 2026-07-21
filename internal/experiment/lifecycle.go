@@ -8,10 +8,10 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/mutation"
 )
 
-// Version 3 将 Corpus 中的完整 Trace 替换为紧凑的具体 ActionSequence。
-// v2 及更早版本既缺少当前调度字段，也使用不同的 Corpus 格式，因此拒绝
-// 静默恢复，避免实验语义或恢复数据发生变化。
-const CheckpointVersion uint32 = 3
+// Version 4 对应 NG 自有严格 TLC Server 和补强后的 Raft invariant。官方
+// TLC v1.8.0 的状态 fingerprint 与旧 ModelFuzz fork 不同，因此禁止把 v3
+// Corpus/coverage 接到新模型执行语义后继续运行。
+const CheckpointVersion uint32 = 4
 
 type EventKind string
 

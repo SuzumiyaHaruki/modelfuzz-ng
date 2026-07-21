@@ -2,6 +2,8 @@
 /bin/
 /coverage/
 /models/raft/states/
+/tools/tlc-server/.cache/
+/tools/tlc-server/build/
 *.out
 .env
 .env.*

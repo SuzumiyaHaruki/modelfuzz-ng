@@ -25,6 +25,7 @@ Quorum == {q \in SUBSET Server : Cardinality(q) * 2 > Cardinality(Server)}
 Terms == 0..LargestTerm
 LogIndices == 0..MaxLogIndex
 AllValues == 1..MaxValue \cup {Nil}
+ValidEntries == [term : Terms, value : AllValues]
 LastTerm(l) == IF Len(l) = 0 THEN 0 ELSE l[Len(l)].term
 Min(s) == CHOOSE x \in s : \A y \in s : x <= y
 Max(s) == CHOOSE x \in s : \A y \in s : x >= y
@@ -249,15 +250,37 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
-    /\ currentTerm \in [Server -> Nat]
+    /\ currentTerm \in [Server -> Terms]
     /\ state \in [Server -> {Follower, Candidate, Leader}]
     /\ votedFor \in [Server -> Server \cup {Nil}]
-    /\ commitIndex \in [Server -> Nat]
+    /\ log \in [Server -> Seq(ValidEntries)]
+    /\ \A i \in Server : Len(log[i]) <= MaxLogIndex
+    /\ commitIndex \in [Server -> LogIndices]
+    /\ \A i \in Server : commitIndex[i] <= Len(log[i])
+    /\ votesResponded \in [Server -> SUBSET Server]
+    /\ votesGranted \in [Server -> SUBSET Server]
+    /\ \A i \in Server : votesGranted[i] \subseteq votesResponded[i]
+    /\ nextIndex \in [Server -> [Server -> 1..(MaxLogIndex + 1)]]
+    /\ matchIndex \in [Server -> [Server -> LogIndices]]
     /\ currentActive \subseteq Server
 
 OnlyOneLeader ==
     \A i, j \in currentActive :
         (i /= j /\ currentTerm[i] = currentTerm[j] /\ state[i] = Leader)
         => state[j] /= Leader
+
+\* 任意两个节点在各自 commitIndex 的共同前缀上必须保存完全相同的 entry。
+\* 该不变量与 Go Raft Oracle 的 committed-prefix 检查相互独立。
+CommittedPrefixAgreement ==
+    \A i, j \in Server :
+        \A k \in 1..Min({commitIndex[i], commitIndex[j]}) :
+            log[i][k] = log[j][k]
+
+\* 两份日志在同一索引拥有相同 term 时，该索引之前的整个前缀必须一致。
+LogMatching ==
+    \A i, j \in Server :
+        \A k \in 1..Min({Len(log[i]), Len(log[j])}) :
+            log[i][k].term = log[j][k].term
+            => SubSeq(log[i], 1, k) = SubSeq(log[j], 1, k)
 
 =============================================================================

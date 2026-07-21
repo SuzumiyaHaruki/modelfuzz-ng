@@ -145,8 +145,21 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 		switch effect.Kind {
 		case core.EffectTimerFired:
 			if effect.TimerFired.TypeHint == "election" {
-				if termOf(transition.Before, effect.TimerFired.Node) >= m.config.LargestTerm {
+				beforeTerm, afterTerm, err := electionTimerTerms(effect.TimerFired, transition)
+				if err != nil {
+					return nil, err
+				}
+				// 对 Leader 调用 Campaign 时 etcd-raft 会保持状态不变。Adapter
+				// 仍记录这次强制 timer 尝试，但模型必须明确 stutter，不能生成
+				// 在当前 TLA+ 状态下 disabled 的 Timeout。
+				if afterTerm == beforeTerm {
+					continue
+				}
+				if beforeTerm >= m.config.LargestTerm {
 					return nil, fmt.Errorf("%w: timeout exceeds LargestTerm %d", ErrUnsupportedSemantics, m.config.LargestTerm)
+				}
+				if afterTerm != beforeTerm+1 {
+					return nil, fmt.Errorf("%w: election timer changed term from %d to %d", ErrUnsupportedSemantics, beforeTerm, afterTerm)
 				}
 				events = append(events, model.NewEvent("Timeout", map[string]any{
 					"node": uint64(effect.TimerFired.Node),
@@ -194,6 +207,29 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 		events = append(events, model.NewEvent("AdvanceCommitIndex", map[string]any{"i": uint64(node)}))
 	}
 	return events, nil
+}
+
+// electionTimerTerms 优先读取 Effect 记录的单次 timeout 边界。一次 AdvanceTime
+// 可以包含同一节点的多次自然超时，此时 Transition 的总 before/after term 无法表示
+// 每一次跳变。旧 Trace 没有该 metadata 时，退回到全局 Observation 以保持兼容。
+func electionTimerTerms(fired *core.TimerFired, transition model.Transition) (uint64, uint64, error) {
+	beforeText, hasBefore := fired.Metadata["term_before"]
+	afterText, hasAfter := fired.Metadata["term_after"]
+	if !hasBefore && !hasAfter {
+		return termOf(transition.Before, fired.Node), termOf(transition.After, fired.Node), nil
+	}
+	if !hasBefore || !hasAfter {
+		return 0, 0, fmt.Errorf("%w: election timer metadata must contain term_before and term_after", ErrUnsupportedSemantics)
+	}
+	before, beforeErr := strconv.ParseUint(beforeText, 10, 64)
+	after, afterErr := strconv.ParseUint(afterText, 10, 64)
+	if beforeErr != nil || afterErr != nil {
+		return 0, 0, fmt.Errorf(
+			"%w: election timer has invalid term metadata %q -> %q",
+			ErrUnsupportedSemantics, beforeText, afterText,
+		)
+	}
+	return before, after, nil
 }
 
 func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effect, before core.Observation) ([]model.Event, error) {

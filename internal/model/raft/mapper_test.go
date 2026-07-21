@@ -197,6 +197,72 @@ func TestMapperMapsFollowerProposalOnlyWhenLeaderReceivesIt(t *testing.T) {
 	_ = followerReady
 }
 
+func TestMapperTreatsLeaderForcedTimeoutAttemptAsStutter(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	nodes := []core.NodeObservation{
+		{ID: 1, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("leader")},
+		{ID: 2, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
+		{ID: 3, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
+	}
+	record := core.StepRecord{
+		Action: core.Action{Kind: core.ActionTimeout, Node: 1},
+		Effects: []core.Effect{{Kind: core.EffectTimerFired, TimerFired: &core.TimerFired{
+			Node: 1, Epoch: 1, Source: core.TimerFireForced, TypeHint: "election", RoleHint: "leader",
+		}}},
+		NodesBefore: nodes,
+		NodesAfter:  nodes,
+	}
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events)
+}
+
+func TestMapperUsesPerEffectTermsForMultipleNaturalTimeouts(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	beforeNodes := []core.NodeObservation{
+		{ID: 1, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("candidate")},
+		{ID: 2, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
+		{ID: 3, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
+	}
+	afterNodes := make([]core.NodeObservation, len(beforeNodes))
+	copy(afterNodes, beforeNodes)
+	beforeNodes[0].Semantic["term"] = uint64(0)
+	afterNodes[0].Semantic = modelNode("candidate")
+	afterNodes[0].Semantic["term"] = uint64(2)
+	record := core.StepRecord{
+		TimeBefore: 0,
+		TimeAfter:  20,
+		Action:     core.Action{Kind: core.ActionAdvanceTime, TargetTime: 20},
+		Effects: []core.Effect{
+			{At: 10, Kind: core.EffectTimerFired, TimerFired: &core.TimerFired{
+				Node: 1, Epoch: 1, Source: core.TimerFireNatural, TypeHint: "election", RoleHint: "candidate",
+				Metadata: map[string]string{"term_before": "0", "term_after": "1"},
+			}},
+			{At: 20, Kind: core.EffectTimerFired, TimerFired: &core.TimerFired{
+				Node: 1, Epoch: 1, Source: core.TimerFireNatural, TypeHint: "election", RoleHint: "candidate",
+				Metadata: map[string]string{"term_before": "1", "term_after": "2"},
+			}},
+		},
+		NodesBefore: beforeNodes,
+		NodesAfter:  afterNodes,
+	}
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "Timeout", "Timeout")
+}
+
 func TestMapperRejectsSemanticsOutsideLightweightModel(t *testing.T) {
 	mapper := raftmodel.NewMapper()
 	record := deliveredRecord("MsgSnap", nil, false)

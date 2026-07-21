@@ -48,17 +48,19 @@ go run ./cmd/modelfuzz-ng run \
   -output runs/election-local
 ```
 
-使用原 ModelFuzz 的 `tlc-controlled` 源码树时，可从其目录启动服务：
+连接模型时，直接启动仓库内自带的严格 controlled TLC 服务：
 
 ```bash
-java -cp 'class:lib/*:lib/gson/*:lib/javax.mail/*:lib/jline/*' tlc2.TLCServer \
-  -mapperparams 'name=raft;port=2023' \
-  /path/to/modelfuzz-ng/models/raft/raft.tla \
-  -config /path/to/modelfuzz-ng/models/raft/raft.cfg
+tools/tlc-server/run.sh \
+  --model models/raft/raft.tla \
+  --config models/raft/raft.cfg \
+  --port 2023
 ```
 
-`name=raft` 不能省略：模型文件名是小写 `raft`，旧服务否则会选择默认 Mapper，
-造成事件被错误映射但 HTTP 请求仍然成功。服务启动后，CLI 增加：
+首次运行会下载并校验官方 TLA+ Tools v1.8.0，再编译 NG 自己维护的 Java 服务层；
+不再依赖原 ModelFuzz artifact。该服务严格拒绝无法映射、当前状态下不可执行、产生
+多个后继或违反模型 invariant 的事件，不会把它们静默当作 stutter。服务启动后，
+CLI 增加：
 
 ```bash
 -tlc http://127.0.0.1:2023
@@ -196,7 +198,8 @@ MessageID；某次成功执行只有在 controlled TLC 返回至少一个全局�
 注入阈值和待注入数量都进入 checkpoint，因此恢复不会重复或跳过注入。
 
 不连接 TLC 时没有模型状态可用于反馈，命令仍可作为随机基线运行，但会给出警告且
-`corpus.json` 保持为空。连接旧 controlled TLC 时必须使用 `-parallelism 1`。
+`corpus.json` 保持为空。当前严格 controlled TLC 逐请求串行执行；连接它时建议使用
+`-parallelism 1`，避免创建不能提升模型吞吐的并发请求。
 实验根目录新增：
 
 - `corpus.json`：全局覆盖键及被保留的 Plan/Concrete ActionSequence；
@@ -229,7 +232,7 @@ go run ./cmd/modelfuzz-ng experiment -resume runs/random-local \
 ```
 
 恢复会继续使用原来的 run index、seed、Corpus 和候选队列；中断时尚未完成的候选
-允许确定性重跑。当前 checkpoint 格式版本为 v3；检查点包含实验配置指纹，修改
+允许确定性重跑。当前 checkpoint 格式版本为 v4；检查点包含实验配置指纹，修改
 SUT、Engine、Policy 或 Mutator 配置后不能误接着旧实验运行。JSONL 最后一条若因
 进程崩溃只写入了一部分，重新打开时只截去该不完整尾记录。
 
@@ -300,6 +303,8 @@ go run ./cmd/modelfuzz-ng experiment \
 [`docs/experiments/novelty-reseed-20260721.md`](docs/experiments/novelty-reseed-20260721.md)。
 失败分类、紧凑 checkpoint v3 和中断恢复实验见
 [`docs/experiments/failure-checkpoint-v3-20260721.md`](docs/experiments/failure-checkpoint-v3-20260721.md)。
+自有严格 TLC 服务迁移、模型 invariant、兼容性及性能对照见
+[`docs/experiments/strict-tlc-migration-20260721.md`](docs/experiments/strict-tlc-migration-20260721.md)。
 DeepSeek 官方接口核对、付费统计修复和接入前检查见
 [`docs/experiments/deepseek-readiness-20260721.md`](docs/experiments/deepseek-readiness-20260721.md)。
 

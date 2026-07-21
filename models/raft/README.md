@@ -40,6 +40,9 @@ Timeout
 - 模型使用 `currentActive`、`RemoveFromActive` 和 `AddToActive` 表达
   crash/restart；崩溃保留稳定状态，恢复会重置节点的 Raft 易失状态。
 - snapshot、membership change 和 PreVote 尚未建模，Mapper 会明确拒绝对应语义。
+- `TypeOK` 对 term、日志 entry、日志长度、commit、投票集合以及 leader 复制索引
+  做完整有界检查；`CommittedPrefixAgreement` 和 `LogMatching` 分别检查已提交
+  前缀一致性与 Raft 日志匹配性质。
 
 `raft.tla` 的动作名和参数保持与原 controlled TLC 的 `RaftActionMapper` 兼容，
 启动 TLC HTTP 服务时将本目录作为模型目录，并选择 `raft.tla`/`raft.cfg`。

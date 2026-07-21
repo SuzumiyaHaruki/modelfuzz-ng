@@ -154,6 +154,13 @@ modelfuzz-ng/
 │       ├── README.md
 │       ├── raft.cfg
 │       └── raft.tla
+├── tools/
+│   └── tlc-server/                  # NG自有严格controlled TLC服务
+│       ├── src/main/java/           # HTTP协议、Raft事件映射和TLC驱动
+│       ├── src/test/resources/      # invariant和多后继错误模型
+│       ├── build.sh
+│       ├── run.sh
+│       └── test.sh
 ├── .gitignore
 ├── go.mod
 └── go.sum
@@ -163,7 +170,7 @@ modelfuzz-ng/
 可通过 Runtime 端到端运行的 `internal/adapters/etcdraft` 最小适配器，以及
 Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
 Plan 数据结构和 Resolver。当前也已经具备 Engine、反馈式 Experiment 和 CLI，
-可以把 JSON Plan、真实 Raft、模型事件映射和可选的 controlled TLC 串成一次
+可以把 JSON Plan、真实 Raft、模型事件映射和 NG 自有严格 controlled TLC 串成一次
 完整执行，并持久化全部中间产物；LLM 初始化与变异是默认关闭的可选策略。
 
 ## 4. 建议的目标目录
@@ -307,6 +314,14 @@ modelfuzz-ng/
 │       ├── raft.tla
 │       └── raft.cfg
 │
+├── tools/                            # 非Go的构建与运行工具
+│   └── tlc-server/                   # 已有：严格controlled TLC服务
+│       ├── src/main/java/            # HTTP服务和Raft事件Mapper
+│       ├── src/test/resources/       # 服务端错误语义测试模型
+│       ├── build.sh                  # 固定版本并校验官方TLA+ Tools
+│       ├── run.sh
+│       └── test.sh
+│
 ├── scripts/                          # 构建、运行和实验辅助脚本
 │   ├── test.sh
 │   └── run-etcdraft.sh
@@ -427,6 +442,11 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 - 通用 `Mapper` 不解释具体协议；
 - `model/raft` 识别选举超时、实际投递的 Raft 消息、leader 变化和提交；
 - `model/tlc` 发送事件序列，并接收 TLC 状态文本与 fingerprint key。
+
+`tools/tlc-server` 是模型执行服务端边界。它从唯一初始状态严格重放每个请求，要求
+外部事件唯一映射到一个 enabled TLA+ Action，并在每个后继状态检查 model constraint
+和 cfg 中的 invariant。协议或模型错误返回稳定的结构化原因码，由 `model/tlc`
+保留为 `ExecutionError`，不再像旧服务一样把 disabled action 静默处理成 stutter。
 
 模型映射以实际 Effect 为准。例如 `ActionDeliver` 只有在 Adapter 成功接收消息并
 记录 `raft.message_delivered` 后才会变成 `DeliverMessage`。Drop 和 Duplicate
