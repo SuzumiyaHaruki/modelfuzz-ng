@@ -26,7 +26,9 @@
   "engine": {
     "fail_on_partial": false,
     "fail_on_skipped": false,
-    "fail_on_empty_queue": false
+    "fail_on_empty_queue": false,
+    "max_plan_actions": 256,
+    "max_consecutive_noops": 32
   },
   "tlc": {
     "timeout_seconds": 30

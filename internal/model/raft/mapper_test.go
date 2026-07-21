@@ -102,6 +102,101 @@ func TestMapperMapsElectionPath(t *testing.T) {
 	}
 }
 
+func TestMapperMapsCrashAndRestartToControlledTLCEvents(t *testing.T) {
+	config := etcdraft.DefaultConfig()
+	config.ElectionTick = 100
+	config.Logger = &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)}
+	adapter, err := etcdraft.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{ExecutionID: "model-crash-restart", Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Reset(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mapper := raftmodel.NewMapper()
+
+	crash := execute(t, runtime, core.Action{Kind: core.ActionCrash, Node: 2})
+	crashEvents := mapResult(t, mapper, crash)
+	assertEventNames(t, crashEvents, "Remove")
+	if crashEvents[0].Params["i"] != uint64(2) {
+		t.Fatalf("crash params = %+v", crashEvents[0].Params)
+	}
+
+	restart := execute(t, runtime, core.Action{Kind: core.ActionRestart, Node: 2})
+	restartEvents := mapResult(t, mapper, restart)
+	assertEventNames(t, restartEvents, "Add")
+	if restartEvents[0].Params["i"] != uint64(2) {
+		t.Fatalf("restart params = %+v", restartEvents[0].Params)
+	}
+	if restart.BeforeObservation.Nodes[1].Epoch+1 != restart.Observation.Nodes[1].Epoch {
+		t.Fatalf("node epoch did not advance: before=%+v after=%+v",
+			restart.BeforeObservation.Nodes[1], restart.Observation.Nodes[1])
+	}
+
+	encoded, err := json.Marshal(restart.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted core.StepRecord
+	if err := json.Unmarshal(encoded, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	offline, err := model.TransitionFromRecord(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlineEvents, err := mapper.Map(offline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, offlineEvents, "Add")
+}
+
+func TestMapperMapsFollowerProposalOnlyWhenLeaderReceivesIt(t *testing.T) {
+	config := etcdraft.DefaultConfig()
+	config.ElectionTick = 100
+	config.Logger = &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)}
+	adapter, err := etcdraft.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{ExecutionID: "model-forwarded-proposal", Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Reset(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mapper := raftmodel.NewMapper()
+
+	// 没有已知 Leader 的 follower 会由 etcd-raft 明确丢弃 proposal，模型 stutter。
+	dropped := execute(t, runtime, core.Action{Kind: core.ActionRequest, Node: 2, Request: []byte("1")})
+	assertEventNames(t, mapResult(t, mapper, dropped))
+
+	timeout := execute(t, runtime, core.Action{Kind: core.ActionTimeout, Node: 1})
+	vote := findMessage(t, timeout.Observation, "MsgVote", 1, 2)
+	voteResult := execute(t, runtime, deliverAction(vote))
+	response := findMessage(t, voteResult.Observation, "MsgVoteResp", 2, 1)
+	leaderResult := execute(t, runtime, deliverAction(response))
+	appendMessage := findMessage(t, leaderResult.Observation, "MsgApp", 1, 2)
+	followerReady := execute(t, runtime, deliverAction(appendMessage))
+
+	forwarded := execute(t, runtime, core.Action{Kind: core.ActionRequest, Node: 2, Request: []byte("1")})
+	assertEventNames(t, mapResult(t, mapper, forwarded))
+	proposal := findMessage(t, forwarded.Observation, "MsgProp", 2, 1)
+	accepted := execute(t, runtime, deliverAction(proposal))
+	events := mapResult(t, mapper, accepted)
+	assertEventNames(t, events, "ClientRequest")
+	if events[0].Params["request"] != 1 || events[0].Params["leader"] != uint64(1) {
+		t.Fatalf("forwarded proposal event = %+v", events[0])
+	}
+	_ = followerReady
+}
+
 func TestMapperRejectsSemanticsOutsideLightweightModel(t *testing.T) {
 	mapper := raftmodel.NewMapper()
 	record := deliveredRecord("MsgSnap", nil, false)
@@ -158,6 +253,29 @@ func TestMapperDoesNotPartiallyAcceptRejectedMultiEntryAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEventNames(t, events, "DeliverMessage")
+}
+
+func TestMapperTreatsIgnoredMultiEntryAppendAsSingleStutter(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	record := deliveredRecord("MsgApp", []map[string]any{
+		{"Term": uint64(1), "Data": "1"},
+		{"Term": uint64(1), "Data": "2"},
+	}, false)
+	// 没有 MsgAppResp 表示目标节点直接忽略了旧任期消息。
+	record.Effects = record.Effects[:1]
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "DeliverMessage")
+	entries := events[0].Params["entries"].([]map[string]any)
+	if len(entries) != 1 || entries[0]["Data"] != "1" {
+		t.Fatalf("ignored entries = %+v", entries)
+	}
 }
 
 func deliveredRecord(messageType string, entries []map[string]any, rejected bool) core.StepRecord {

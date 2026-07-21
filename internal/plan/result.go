@@ -6,21 +6,46 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 )
 
-// ResolutionStatus 描述 PlanAction 根据当前 Observation 展开的结果。
-// Resolved 只表示具体动作已经完整解析；Runtime 的执行结果由 Engine 另行记录。
+// ResolutionStatus 描述 PlanAction 根据当前 Observation 展开并通过模型 Profile
+// 预检后的结果。Resolved 只表示具体动作已解析且可执行；Runtime 的实际执行结果
+// 仍由 Engine 另行记录。inapplicable/model_bound 由 Engine 在预检阶段细化写入。
 type ResolutionStatus string
 
+type ResolutionReasonCode string
+
 const (
-	ResolutionResolved   ResolutionStatus = "resolved"
-	ResolutionPartial    ResolutionStatus = "partial"
-	ResolutionSkipped    ResolutionStatus = "skipped"
-	ResolutionInvalid    ResolutionStatus = "invalid"
-	ResolutionEmptyQueue ResolutionStatus = "empty_queue"
+	ResolutionResolved     ResolutionStatus = "resolved"
+	ResolutionPartial      ResolutionStatus = "partial"
+	ResolutionSkipped      ResolutionStatus = "skipped"
+	ResolutionInapplicable ResolutionStatus = "inapplicable"
+	ResolutionModelBound   ResolutionStatus = "model_bound"
+	ResolutionUnsupported  ResolutionStatus = "unsupported_by_model"
+	ResolutionInvalid      ResolutionStatus = "invalid"
+	ResolutionEmptyQueue   ResolutionStatus = "empty_queue"
+)
+
+const (
+	ReasonResolverUnavailable ResolutionReasonCode = "resolver_unavailable"
+	ReasonInvalidPlan         ResolutionReasonCode = "invalid_plan"
+	ReasonInvalidObservation  ResolutionReasonCode = "invalid_observation"
+	ReasonUnknownActionKind   ResolutionReasonCode = "unknown_action_kind"
+	ReasonBatchLimit          ResolutionReasonCode = "batch_limit"
+	ReasonNodeNotObserved     ResolutionReasonCode = "node_not_observed"
+	ReasonTargetNotRunning    ResolutionReasonCode = "target_not_running"
+	ReasonInvalidQueue        ResolutionReasonCode = "invalid_queue"
+	ReasonMessageNotAvailable ResolutionReasonCode = "message_not_available"
+	ReasonPartialAvailability ResolutionReasonCode = "partial_availability"
+	ReasonAdvanceLimit        ResolutionReasonCode = "advance_limit"
+	ReasonTimeOverflow        ResolutionReasonCode = "time_overflow"
+	ReasonNodeAlreadyCrashed  ResolutionReasonCode = "node_already_crashed"
+	ReasonNodeAlreadyRunning  ResolutionReasonCode = "node_already_running"
+	ReasonMultipleDecisions   ResolutionReasonCode = "multiple_profile_decisions"
 )
 
 func (s ResolutionStatus) Valid() bool {
 	switch s {
 	case ResolutionResolved, ResolutionPartial, ResolutionSkipped,
+		ResolutionInapplicable, ResolutionModelBound, ResolutionUnsupported,
 		ResolutionInvalid, ResolutionEmptyQueue:
 		return true
 	default:
@@ -31,12 +56,13 @@ func (s ResolutionStatus) Valid() bool {
 // Resolution 保存一次解析的输入副本、状态和具体动作。Requested/Resolved
 // 对消息批量动作分别表示请求数量和实际解析数量；其他动作的 Requested 为 1。
 type Resolution struct {
-	Plan      PlanAction       `json:"plan"`
-	Status    ResolutionStatus `json:"status"`
-	Requested int              `json:"requested"`
-	Resolved  int              `json:"resolved"`
-	Reason    string           `json:"reason,omitempty"`
-	Actions   []core.Action    `json:"actions,omitempty"`
+	Plan       PlanAction           `json:"plan"`
+	Status     ResolutionStatus     `json:"status"`
+	Requested  int                  `json:"requested"`
+	Resolved   int                  `json:"resolved"`
+	ReasonCode ResolutionReasonCode `json:"reason_code,omitempty"`
+	Reason     string               `json:"reason,omitempty"`
+	Actions    []core.Action        `json:"actions,omitempty"`
 }
 
 func (r Resolution) Validate() error {
@@ -74,7 +100,8 @@ func (r Resolution) Validate() error {
 		if r.Resolved == 0 || r.Resolved >= r.Requested {
 			return fmt.Errorf("%w: partial resolution requires 0 < resolved < requested", ErrInvalidPlan)
 		}
-	case ResolutionSkipped, ResolutionInvalid, ResolutionEmptyQueue:
+	case ResolutionSkipped, ResolutionInapplicable, ResolutionModelBound, ResolutionUnsupported,
+		ResolutionInvalid, ResolutionEmptyQueue:
 		if r.Resolved != 0 {
 			return fmt.Errorf("%w: %s resolution must not contain actions", ErrInvalidPlan, r.Status)
 		}

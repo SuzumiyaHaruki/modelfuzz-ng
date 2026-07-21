@@ -10,12 +10,15 @@ import (
 func TestResolvePartialMessageBatch(t *testing.T) {
 	resolver := newTestResolver(t)
 	link := core.LinkID{From: 1, To: 2}
+	observation := testObservation()
+	observation.Nodes[1].Status = core.NodeRunning
+	observation.Nodes[1].Semantic["role"] = "follower"
 	result := resolver.Resolve(PlanAction{
 		Kind: ActionDeliver,
 		Messages: &MessageRangeSelector{
 			Link: link, Start: 0, Count: 5,
 		},
-	}, testObservation())
+	}, observation)
 
 	if result.Status != ResolutionPartial || result.Requested != 5 || result.Resolved != 3 {
 		t.Fatalf("resolution = %+v", result)
@@ -31,6 +34,23 @@ func TestResolvePartialMessageBatch(t *testing.T) {
 		if action.Selector == nil || action.Selector.Link != link || action.Selector.Position != 0 {
 			t.Fatalf("action %d selector = %+v", i, action.Selector)
 		}
+	}
+}
+
+func TestResolveSkipsDeliveryToCrashedNodeButAllowsQueueControl(t *testing.T) {
+	resolver := newTestResolver(t)
+	link := core.LinkID{From: 1, To: 2}
+	deliver := resolver.Resolve(PlanAction{Kind: ActionDeliver, Messages: &MessageRangeSelector{
+		Link: link, Count: 1,
+	}}, testObservation())
+	if deliver.Status != ResolutionSkipped || deliver.Resolved != 0 {
+		t.Fatalf("deliver to crashed node = %+v", deliver)
+	}
+	drop := resolver.Resolve(PlanAction{Kind: ActionDrop, Messages: &MessageRangeSelector{
+		Link: link, Count: 1,
+	}}, testObservation())
+	if drop.Status != ResolutionResolved || drop.Resolved != 1 {
+		t.Fatalf("drop queued message for crashed node = %+v", drop)
 	}
 }
 
@@ -125,6 +145,8 @@ func TestResolveNodeActionsBestEffort(t *testing.T) {
 func TestResolveRejectsInvalidQueuePositions(t *testing.T) {
 	resolver := newTestResolver(t)
 	observation := testObservation()
+	observation.Nodes[1].Status = core.NodeRunning
+	observation.Nodes[1].Semantic["role"] = "follower"
 	observation.Messages[1].Position = 4
 	result := resolver.Resolve(PlanAction{
 		Kind: ActionDeliver,

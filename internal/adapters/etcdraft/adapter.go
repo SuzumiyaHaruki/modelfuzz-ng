@@ -3,12 +3,15 @@ package etcdraft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/sut"
 	raft "go.etcd.io/raft/v3"
 )
+
+const proposalDroppedEvent = "raft.proposal_dropped"
 
 // Adapter 驱动一组内存中的 etcd-raft RawNode。逻辑时钟、网络队列和
 // MessageID 均由上层 Runtime 管理。
@@ -173,6 +176,12 @@ func (a *Adapter) Request(ctx context.Context, at core.LogicalTime, id core.Node
 		return nil, fmt.Errorf("request must not be empty")
 	}
 	if err := n.raw.Propose(append([]byte(nil), request...)); err != nil {
+		if errors.Is(err, raft.ErrProposalDropped) {
+			status := n.raw.BasicStatus()
+			return []core.Effect{modelEffect(at, proposalDroppedEvent, id, map[string]any{
+				"role": roleName(status.RaftState), "leader": status.Lead,
+			})}, nil
+		}
 		return nil, fmt.Errorf("propose on node %s: %w", id, err)
 	}
 	return a.drainReady(n, at, true)

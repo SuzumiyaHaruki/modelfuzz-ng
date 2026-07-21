@@ -24,22 +24,38 @@ const (
 	StatusModelFailed      Status = "model_failed"
 )
 
+// TerminationReason 说明一条变长轨迹为什么停止。它和 Status 分离：达到预算或
+// 连续没有可执行动作都是正常终止，不应伪装成 Runtime 失败。
+type TerminationReason string
+
+const (
+	TerminationPlanComplete     TerminationReason = "plan_complete"
+	TerminationPolicyComplete   TerminationReason = "policy_complete"
+	TerminationPlanActionBudget TerminationReason = "plan_action_budget"
+	TerminationRuntimeBudget    TerminationReason = "runtime_budget"
+	TerminationConsecutiveNoops TerminationReason = "consecutive_noops"
+	TerminationModelBound       TerminationReason = "model_bound_reached"
+)
+
 // Result 保存一次执行可以持久化的全部核心产物。即使 Run 返回错误，Result
 // 也会尽量包含错误发生前已经完成的 Resolution、Action、Trace 和模型事件。
 type Result struct {
-	Status          Status              `json:"status"`
-	Error           string              `json:"error,omitempty"`
-	ModelExecuted   bool                `json:"model_executed"`
-	BudgetExhausted bool                `json:"budget_exhausted,omitempty"`
-	Resolutions     []plan.Resolution   `json:"resolutions"`
-	Actions         core.ActionSequence `json:"actions"`
-	Trace           core.Trace          `json:"trace"`
-	ModelEvents     []model.Event       `json:"model_events"`
-	ModelStates     []model.State       `json:"model_states"`
-	OracleFindings  []oracle.Finding    `json:"oracle_findings"`
-	Failure         *core.FailureRecord `json:"failure,omitempty"`
-	Initial         core.Observation    `json:"initial_observation"`
-	Final           core.Observation    `json:"final_observation"`
+	Status            Status              `json:"status"`
+	Error             string              `json:"error,omitempty"`
+	ModelExecuted     bool                `json:"model_executed"`
+	BudgetExhausted   bool                `json:"budget_exhausted,omitempty"`
+	Termination       TerminationReason   `json:"termination,omitempty"`
+	TerminationCode   string              `json:"termination_code,omitempty"`
+	TerminationDetail string              `json:"termination_detail,omitempty"`
+	Resolutions       []plan.Resolution   `json:"resolutions"`
+	Actions           core.ActionSequence `json:"actions"`
+	Trace             core.Trace          `json:"trace"`
+	ModelEvents       []model.Event       `json:"model_events"`
+	ModelStates       []model.State       `json:"model_states"`
+	OracleFindings    []oracle.Finding    `json:"oracle_findings"`
+	Failure           *core.FailureRecord `json:"failure,omitempty"`
+	Initial           core.Observation    `json:"initial_observation"`
+	Final             core.Observation    `json:"final_observation"`
 }
 
 func newResult() Result {

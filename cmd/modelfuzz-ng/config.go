@@ -70,7 +70,10 @@ func defaultCLIConfig() cliConfig {
 			MaxActions: 10000, MaxTicks: 10000, MaxEffects: 100000, MaxQueuedMessages: 100000,
 		},
 		Resolver: plan.DefaultResolverConfig(),
-		TLC:      tlcSettings{TimeoutSeconds: 30},
+		Engine: engine.Config{
+			MaxPlanActions: 256, MaxConsecutiveNoops: 32,
+		},
+		TLC: tlcSettings{TimeoutSeconds: 30},
 	}
 }
 
@@ -132,7 +135,7 @@ func decodeStrictJSON(data []byte, target any) error {
 
 func validateAlignedNodes(raftNodes, modelNodes []core.NodeID) error {
 	if len(raftNodes) != len(modelNodes) {
-		return fmt.Errorf("Raft 有 %d 个节点，但模型有 %d 个节点", len(raftNodes), len(modelNodes))
+		return fmt.Errorf("raft 有 %d 个节点，但模型有 %d 个节点", len(raftNodes), len(modelNodes))
 	}
 	modelSet := make(map[core.NodeID]struct{}, len(modelNodes))
 	for _, id := range modelNodes {
@@ -143,7 +146,7 @@ func validateAlignedNodes(raftNodes, modelNodes []core.NodeID) error {
 	}
 	for _, id := range raftNodes {
 		if _, exists := modelSet[id]; !exists {
-			return fmt.Errorf("Raft 节点 %s 不在模型 Server 中", id)
+			return fmt.Errorf("raft 节点 %s 不在模型 Server 中", id)
 		}
 	}
 	return nil

@@ -115,15 +115,14 @@ func produceElectionTrace(t *testing.T) core.Trace {
 	t.Helper()
 	runtime := newRuntime(t, "replay-test", 42)
 	ctx := context.Background()
-	observation, err := runtime.Reset(ctx)
-	if err != nil {
+	if _, err := runtime.Reset(ctx); err != nil {
 		t.Fatal(err)
 	}
 	step, err := runtime.Execute(ctx, core.Action{Kind: core.ActionTimeout, Node: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	observation = step.Observation
+	observation := step.Observation
 	vote := findObserved(t, observation, "MsgVote", 1, 2)
 	step, err = runtime.Execute(ctx, deliver(vote))
 	if err != nil {

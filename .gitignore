@@ -3,3 +3,6 @@
 /coverage/
 /models/raft/states/
 *.out
+.env
+.env.*
+!.env.example

@@ -11,13 +11,15 @@ CONSTANTS Server, MaxValue, Follower, Candidate, Leader, Nil,
 VARIABLES currentTerm, state, votedFor,
           log, commitIndex,
           votesResponded, votesGranted,
-          nextIndex, matchIndex
+          nextIndex, matchIndex,
+          currentActive
 
 serverVars    == <<currentTerm, state, votedFor>>
 logVars       == <<log, commitIndex>>
 candidateVars == <<votesResponded, votesGranted>>
 leaderVars    == <<nextIndex, matchIndex>>
-vars          == <<serverVars, candidateVars, leaderVars, logVars>>
+globalVars    == <<currentActive>>
+vars          == <<serverVars, candidateVars, leaderVars, logVars, globalVars>>
 
 Quorum == {q \in SUBSET Server : Cardinality(q) * 2 > Cardinality(Server)}
 Terms == 0..LargestTerm
@@ -37,9 +39,29 @@ Init ==
     /\ votesGranted = [i \in Server |-> {}]
     /\ nextIndex = [i \in Server |-> [j \in Server |-> 1]]
     /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
+    /\ currentActive = Server
+
+\* 原 ModelFuzz 用 currentActive 与 Remove/Add 表示 crash/restart。这里保留
+\* 相同的受控 Mapper 接口，但把恢复节点的易失状态重置合并到 AddToActive，
+\* 避免 Add 和另一个不受控 Restart 动作之间出现中间状态。
+RemoveFromActive(i) ==
+    /\ i \in currentActive
+    /\ currentActive' = currentActive \ {i}
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars>>
+
+AddToActive(i) ==
+    /\ i \notin currentActive
+    /\ currentActive' = currentActive \union {i}
+    /\ state' = [state EXCEPT ![i] = Follower]
+    /\ votesResponded' = [votesResponded EXCEPT ![i] = {}]
+    /\ votesGranted' = [votesGranted EXCEPT ![i] = {}]
+    /\ nextIndex' = [nextIndex EXCEPT ![i] = [j \in Server |-> 1]]
+    /\ matchIndex' = [matchIndex EXCEPT ![i] = [j \in Server |-> 0]]
+    /\ UNCHANGED <<currentTerm, votedFor, logVars>>
 
 \* 节点 i 发生选举超时。自然超时和强制超时在该抽象层语义相同。
 Timeout(i) ==
+    /\ i \in currentActive
     /\ state[i] \in {Follower, Candidate}
     /\ currentTerm[i] < LargestTerm
     /\ state' = [state EXCEPT ![i] = Candidate]
@@ -47,9 +69,10 @@ Timeout(i) ==
     /\ votedFor' = [votedFor EXCEPT ![i] = i]
     /\ votesResponded' = [votesResponded EXCEPT ![i] = {i}]
     /\ votesGranted' = [votesGranted EXCEPT ![i] = {i}]
-    /\ UNCHANGED <<leaderVars, logVars>>
+    /\ UNCHANGED <<leaderVars, logVars, globalVars>>
 
 BecomeLeader(i) ==
+    /\ i \in currentActive
     /\ state[i] = Candidate
     /\ votesGranted[i] \in Quorum
     /\ state' = [state EXCEPT ![i] = Leader]
@@ -57,17 +80,19 @@ BecomeLeader(i) ==
                          ![i] = [j \in Server |-> Len(log[i]) + 1]]
     /\ matchIndex' = [matchIndex EXCEPT
                           ![i] = [j \in Server |-> 0]]
-    /\ UNCHANGED <<currentTerm, votedFor, candidateVars, logVars>>
+    /\ UNCHANGED <<currentTerm, votedFor, candidateVars, logVars, globalVars>>
 
 \* v=Nil(配置中为 0) 表示 etcd-raft 成为 leader 时自动追加的 no-op。
 ClientRequest(i, v) ==
+    /\ i \in currentActive
     /\ state[i] = Leader
     /\ Len(log[i]) < MaxLogIndex
     /\ log' = [log EXCEPT
                    ![i] = Append(@, [term |-> currentTerm[i], value |-> v])]
-    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, commitIndex>>
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, commitIndex, globalVars>>
 
 AdvanceCommitIndex(i) ==
+    /\ i \in currentActive
     /\ state[i] = Leader
     /\ LET Agree(index) == {i} \cup {j \in Server : matchIndex[i][j] >= index}
            agreed == {index \in 1..Len(log[i]) : Agree(index) \in Quorum}
@@ -76,7 +101,7 @@ AdvanceCommitIndex(i) ==
                         THEN Max(agreed)
                         ELSE commitIndex[i]
        IN commitIndex' = [commitIndex EXCEPT ![i] = newCommit]
-    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, log>>
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, log, globalVars>>
 
 \* i 是接收者，j 是发送者。参数名与原 RaftActionMapper 保持一致。
 HandleRequestVoteRequest(i, j, lTerm, lIndex, term) ==
@@ -90,11 +115,12 @@ HandleRequestVoteRequest(i, j, lTerm, lIndex, term) ==
                  /\ logOK
                  /\ oldVote \in {Nil, j}
     IN
+    /\ i \in currentActive
     /\ i /= j
     /\ currentTerm' = [currentTerm EXCEPT ![i] = cTerm]
     /\ state' = [state EXCEPT ![i] = cState]
     /\ votedFor' = [votedFor EXCEPT ![i] = IF grant THEN j ELSE oldVote]
-    /\ UNCHANGED <<candidateVars, leaderVars, logVars>>
+    /\ UNCHANGED <<candidateVars, leaderVars, logVars, globalVars>>
 
 HandleRequestVoteResponse(i, j, term, grant) ==
     LET newer == term > currentTerm[i]
@@ -102,6 +128,7 @@ HandleRequestVoteResponse(i, j, term, grant) ==
         canCount == /\ current
                     /\ state[i] = Candidate
     IN
+    /\ i \in currentActive
     /\ i /= j
     /\ currentTerm' = [currentTerm EXCEPT ![i] = IF newer THEN term ELSE @]
     /\ state' = [state EXCEPT ![i] = IF newer THEN Follower ELSE @]
@@ -110,7 +137,7 @@ HandleRequestVoteResponse(i, j, term, grant) ==
                               ![i] = IF canCount THEN @ \cup {j} ELSE @]
     /\ votesGranted' = [votesGranted EXCEPT
                             ![i] = IF canCount /\ grant THEN @ \cup {j} ELSE @]
-    /\ UNCHANGED <<leaderVars, logVars>>
+    /\ UNCHANGED <<leaderVars, logVars, globalVars>>
 
 LogMatches(i, pLogIndex, pLogTerm) ==
     \/ pLogIndex = 0
@@ -126,6 +153,7 @@ HandleNilAppendEntriesRequest(i, j, pLogIndex, pLogTerm, term, cIndex) ==
                      THEN Min({cIndex, Len(log[i])})
                      ELSE commitIndex[i]
     IN
+    /\ i \in currentActive
     /\ i /= j
     /\ currentTerm' = [currentTerm EXCEPT ![i] = newTerm]
     /\ state' = [state EXCEPT
@@ -133,7 +161,7 @@ HandleNilAppendEntriesRequest(i, j, pLogIndex, pLogTerm, term, cIndex) ==
     /\ votedFor' = [votedFor EXCEPT
                         ![i] = IF term > currentTerm[i] THEN Nil ELSE @]
     /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommit]
-    /\ UNCHANGED <<candidateVars, leaderVars, log>>
+    /\ UNCHANGED <<candidateVars, leaderVars, log, globalVars>>
 
 \* 与原 ModelFuzz 一样，单次只抽象 MsgApp 中的第一条 entry。
 HandleAppendEntriesRequest(i, j, pLogIndex, pLogTerm,
@@ -151,6 +179,7 @@ HandleAppendEntriesRequest(i, j, pLogIndex, pLogTerm,
                      THEN Min({cIndex, Len(newLog)})
                      ELSE commitIndex[i]
     IN
+    /\ i \in currentActive
     /\ i /= j
     /\ pLogIndex < MaxLogIndex
     /\ currentTerm' = [currentTerm EXCEPT
@@ -161,7 +190,7 @@ HandleAppendEntriesRequest(i, j, pLogIndex, pLogTerm,
                         ![i] = IF term > currentTerm[i] THEN Nil ELSE @]
     /\ log' = [log EXCEPT ![i] = newLog]
     /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommit]
-    /\ UNCHANGED <<candidateVars, leaderVars>>
+    /\ UNCHANGED <<candidateVars, leaderVars, globalVars>>
 
 HandleAppendEntriesResponse(i, j, term, success, mIndex) ==
     LET current == term = currentTerm[i]
@@ -185,6 +214,7 @@ HandleAppendEntriesResponse(i, j, term, success, mIndex) ==
                      THEN Max(agreed)
                      ELSE commitIndex[i]
     IN
+    /\ i \in currentActive
     /\ i /= j
     /\ currentTerm' = [currentTerm EXCEPT ![i] = IF newer THEN term ELSE @]
     /\ state' = [state EXCEPT ![i] = IF newer THEN Follower ELSE @]
@@ -192,9 +222,11 @@ HandleAppendEntriesResponse(i, j, term, success, mIndex) ==
     /\ nextIndex' = updatedNext
     /\ matchIndex' = updatedMatch
     /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommit]
-    /\ UNCHANGED <<candidateVars, log>>
+    /\ UNCHANGED <<candidateVars, log, globalVars>>
 
 Next ==
+    \/ \E i \in Server : RemoveFromActive(i)
+    \/ \E i \in Server : AddToActive(i)
     \/ \E i \in Server : Timeout(i)
     \/ \E i \in Server : BecomeLeader(i)
     \/ \E i \in Server, v \in AllValues : ClientRequest(i, v)
@@ -221,9 +253,10 @@ TypeOK ==
     /\ state \in [Server -> {Follower, Candidate, Leader}]
     /\ votedFor \in [Server -> Server \cup {Nil}]
     /\ commitIndex \in [Server -> Nat]
+    /\ currentActive \subseteq Server
 
 OnlyOneLeader ==
-    \A i, j \in Server :
+    \A i, j \in currentActive :
         (i /= j /\ currentTerm[i] = currentTerm[j] /\ state[i] = Leader)
         => state[j] /= Leader
 

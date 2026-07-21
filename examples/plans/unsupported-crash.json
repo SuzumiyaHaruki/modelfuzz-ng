@@ -3,6 +3,6 @@
     {"kind": "crash", "node": 1}
   ],
   "metadata": {
-    "description": "用于验证基础Raft Profile会在修改SUT前拒绝crash"
+    "description": "最小crash示例；当前Raft Profile会映射为Remove事件"
   }
 }

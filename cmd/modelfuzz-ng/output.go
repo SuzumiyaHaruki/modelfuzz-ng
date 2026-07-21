@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/persistence"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 )
@@ -72,34 +72,5 @@ func writeArtifacts(directory string, config cliConfig, sequence plan.PlanSequen
 }
 
 func writeJSONFile(path string, value any) error {
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".modelfuzz-ng-*.tmp")
-	if err != nil {
-		return fmt.Errorf("创建临时文件 %s: %w", path, err)
-	}
-	temporaryPath := temporary.Name()
-	keep := false
-	defer func() {
-		_ = temporary.Close()
-		if !keep {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-
-	encoder := json.NewEncoder(temporary)
-	encoder.SetIndent("", "  ")
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
-		return fmt.Errorf("编码 %s: %w", path, err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("同步 %s: %w", path, err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("关闭 %s: %w", path, err)
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("写入 %s: %w", path, err)
-	}
-	keep = true
-	return nil
+	return persistence.WriteJSONAtomic(path, value)
 }

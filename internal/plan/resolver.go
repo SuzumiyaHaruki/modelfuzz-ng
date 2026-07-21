@@ -9,7 +9,7 @@ import (
 
 const (
 	defaultMaxAdvanceTicks uint64 = 100
-	defaultMaxBatch               = 1024
+	defaultMaxBatch        int    = 1024
 )
 
 // ResolverConfig 限制单条 PlanAction 的展开规模，避免一个错误计划产生过多
@@ -49,13 +49,13 @@ func NewResolver(config ResolverConfig) (*Resolver, error) {
 func (r *Resolver) Resolve(action PlanAction, observation core.Observation) Resolution {
 	result := Resolution{Plan: action.Copy(), Requested: 1}
 	if r == nil {
-		return invalidResolution(result, "resolver is nil")
+		return invalidResolution(result, ReasonResolverUnavailable, "resolver is nil")
 	}
 	if err := action.Validate(); err != nil {
-		return invalidResolution(result, err.Error())
+		return invalidResolution(result, ReasonInvalidPlan, err.Error())
 	}
 	if err := observation.Validate(); err != nil {
-		return invalidResolution(result, "invalid observation: "+err.Error())
+		return invalidResolution(result, ReasonInvalidObservation, "invalid observation: "+err.Error())
 	}
 
 	switch action.Kind {
@@ -66,7 +66,7 @@ func (r *Resolver) Resolve(action PlanAction, observation core.Observation) Reso
 	case ActionTimeout, ActionCrash, ActionRestart, ActionRequest:
 		return r.resolveNode(result, action, observation)
 	default:
-		return invalidResolution(result, "unknown action kind")
+		return invalidResolution(result, ReasonUnknownActionKind, "unknown action kind")
 	}
 }
 
@@ -74,13 +74,22 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 	selector := *action.Messages
 	result.Requested = selector.Count
 	if selector.Count > r.config.MaxBatch {
-		return invalidResolution(result, fmt.Sprintf("message count %d exceeds MaxBatch %d", selector.Count, r.config.MaxBatch))
+		return invalidResolution(result, ReasonBatchLimit, fmt.Sprintf("message count %d exceeds MaxBatch %d", selector.Count, r.config.MaxBatch))
+	}
+	if action.Kind == ActionDeliver {
+		target, found := observedNode(observation, selector.Link.To)
+		if !found {
+			return skippedResolution(result, ReasonNodeNotObserved, fmt.Sprintf("target node %s is not present in the observation", selector.Link.To))
+		}
+		if target.Status != core.NodeRunning {
+			return skippedResolution(result, ReasonTargetNotRunning, fmt.Sprintf("target node %s is not running", selector.Link.To))
+		}
 	}
 
 	queue := messagesOnLink(observation, selector.Link)
 	for position, message := range queue {
 		if message.Position != position {
-			return invalidResolution(result, fmt.Sprintf(
+			return invalidResolution(result, ReasonInvalidQueue, fmt.Sprintf(
 				"link %s has non-contiguous position %d at queue index %d",
 				selector.Link, message.Position, position,
 			))
@@ -88,6 +97,7 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 	}
 	if selector.Start >= len(queue) {
 		result.Status = ResolutionEmptyQueue
+		result.ReasonCode = ReasonMessageNotAvailable
 		result.Reason = fmt.Sprintf("link %s has no message at position %d", selector.Link, selector.Start)
 		return result
 	}
@@ -115,6 +125,7 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 	result.Resolved = len(result.Actions)
 	if result.Resolved < result.Requested {
 		result.Status = ResolutionPartial
+		result.ReasonCode = ReasonPartialAvailability
 		result.Reason = fmt.Sprintf("requested %d messages but only %d are available", result.Requested, result.Resolved)
 	} else {
 		result.Status = ResolutionResolved
@@ -124,11 +135,11 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 
 func (r *Resolver) resolveTime(result Resolution, action PlanAction, observation core.Observation) Resolution {
 	if action.Ticks > r.config.MaxAdvanceTicks {
-		return invalidResolution(result, fmt.Sprintf("ticks %d exceeds MaxAdvanceTicks %d", action.Ticks, r.config.MaxAdvanceTicks))
+		return invalidResolution(result, ReasonAdvanceLimit, fmt.Sprintf("ticks %d exceeds MaxAdvanceTicks %d", action.Ticks, r.config.MaxAdvanceTicks))
 	}
 	target, err := observation.Time.Add(action.Ticks)
 	if err != nil {
-		return invalidResolution(result, err.Error())
+		return invalidResolution(result, ReasonTimeOverflow, err.Error())
 	}
 	result.Status = ResolutionResolved
 	result.Resolved = 1
@@ -140,6 +151,7 @@ func (r *Resolver) resolveNode(result Resolution, action PlanAction, observation
 	node, found := observedNode(observation, action.Node)
 	if !found {
 		result.Status = ResolutionSkipped
+		result.ReasonCode = ReasonNodeNotObserved
 		result.Reason = fmt.Sprintf("node %s is not present in the observation", action.Node)
 		return result
 	}
@@ -147,19 +159,19 @@ func (r *Resolver) resolveNode(result Resolution, action PlanAction, observation
 	switch action.Kind {
 	case ActionCrash:
 		if node.Status == core.NodeCrashed {
-			return skippedResolution(result, fmt.Sprintf("node %s is already crashed", action.Node))
+			return skippedResolution(result, ReasonNodeAlreadyCrashed, fmt.Sprintf("node %s is already crashed", action.Node))
 		}
 	case ActionRestart:
 		if node.Status == core.NodeRunning {
-			return skippedResolution(result, fmt.Sprintf("node %s is already running", action.Node))
+			return skippedResolution(result, ReasonNodeAlreadyRunning, fmt.Sprintf("node %s is already running", action.Node))
 		}
 	case ActionTimeout:
 		if node.Status != core.NodeRunning {
-			return skippedResolution(result, fmt.Sprintf("node %s is not running", action.Node))
+			return skippedResolution(result, ReasonTargetNotRunning, fmt.Sprintf("node %s is not running", action.Node))
 		}
 	case ActionRequest:
 		if node.Status != core.NodeRunning {
-			return skippedResolution(result, fmt.Sprintf("node %s is not running", action.Node))
+			return skippedResolution(result, ReasonTargetNotRunning, fmt.Sprintf("node %s is not running", action.Node))
 		}
 	}
 
@@ -173,16 +185,18 @@ func (r *Resolver) resolveNode(result Resolution, action PlanAction, observation
 	return result
 }
 
-func invalidResolution(result Resolution, reason string) Resolution {
+func invalidResolution(result Resolution, code ResolutionReasonCode, reason string) Resolution {
 	result.Status = ResolutionInvalid
+	result.ReasonCode = code
 	result.Reason = reason
 	result.Resolved = 0
 	result.Actions = nil
 	return result
 }
 
-func skippedResolution(result Resolution, reason string) Resolution {
+func skippedResolution(result Resolution, code ResolutionReasonCode, reason string) Resolution {
 	result.Status = ResolutionSkipped
+	result.ReasonCode = code
 	result.Reason = reason
 	result.Resolved = 0
 	result.Actions = nil

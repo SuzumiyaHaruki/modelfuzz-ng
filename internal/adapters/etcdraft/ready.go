@@ -18,7 +18,7 @@ func (a *Adapter) drainReady(n *node, at core.LogicalTime, emit bool) ([]core.Ef
 	effects := make([]core.Effect, 0)
 	for round := 0; n.raw.HasReady(); round++ {
 		if round >= maxReadyRounds {
-			return nil, fmt.Errorf("Ready processing exceeded %d rounds", maxReadyRounds)
+			return nil, fmt.Errorf("ready processing exceeded %d rounds", maxReadyRounds)
 		}
 		rd := n.raw.Ready()
 		current, err := a.handleReady(n, at, rd, emit)

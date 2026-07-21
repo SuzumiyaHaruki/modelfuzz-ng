@@ -36,6 +36,8 @@ modelfuzz-ng/
 ├── cmd/
 │   └── modelfuzz-ng/
 │       ├── config.go
+│       ├── experiment_store.go
+│       ├── experiment_store_test.go
 │       ├── main.go
 │       ├── main_test.go
 │       └── output.go
@@ -109,6 +111,35 @@ modelfuzz-ng/
 │   │   ├── recorder.go
 │   │   ├── runtime.go
 │   │   └── runtime_test.go
+│   ├── corpus/
+│   │   ├── corpus.go
+│   │   └── corpus_test.go
+│   ├── experiment/
+│   │   ├── digest.go
+│   │   ├── lifecycle.go
+│   │   ├── runner.go
+│   │   ├── statistics.go
+│   │   └── *_test.go
+│   ├── metrics/
+│   │   ├── metrics.go
+│   │   └── metrics_test.go
+│   ├── persistence/
+│   │   ├── files.go
+│   │   └── files_test.go
+│   ├── llm/
+│   │   ├── client.go
+│   │   ├── provider.go
+│   │   └── provider_test.go
+│   ├── mutation/
+│   │   ├── mutation.go
+│   │   ├── random.go
+│   │   ├── llm.go
+│   │   └── random_test.go
+│   ├── policy/
+│   │   ├── random.go
+│   │   ├── random_test.go
+│   │   ├── llm.go
+│   │   └── llm_test.go
 │   └── sut/
 │       └── adapter.go
 ├── examples/
@@ -131,9 +162,9 @@ modelfuzz-ng/
 当前阶段已经完成协议无关的 core 数据模型、最小 SUT 接口、基础 Runtime、
 可通过 Runtime 端到端运行的 `internal/adapters/etcdraft` 最小适配器，以及
 Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
-不依赖 LLM 的首版 Plan 数据结构和 Resolver。当前也已经具备 Engine 和 CLI，
+Plan 数据结构和 Resolver。当前也已经具备 Engine、反馈式 Experiment 和 CLI，
 可以把 JSON Plan、真实 Raft、模型事件映射和可选的 controlled TLC 串成一次
-完整执行，并持久化全部中间产物。
+完整执行，并持久化全部中间产物；LLM 初始化与变异是默认关闭的可选策略。
 
 ## 4. 建议的目标目录
 
@@ -216,19 +247,30 @@ modelfuzz-ng/
 │   │   ├── error.go                  # 分层错误分类
 │   │   └── *_test.go
 │   │
-│   ├── experiment/                   # 多次独立运行和覆盖汇总
-│   │   ├── runner.go
-│   │   └── runner_test.go
+│   ├── experiment/                   # 模型覆盖反馈闭环
+│   │   ├── runner.go                 # 已有：反馈队列、并发执行、周期种子和异步变异
+│   │   ├── digest.go                 # 已有：Plan、Trace和模型状态路径唯一性摘要
+│   │   ├── lifecycle.go              # 已有：事件、checkpoint和恢复校验
+│   │   ├── statistics.go             # 已有：稳定实验汇总结构
+│   │   └── *_test.go
 │   │
 │   ├── policy/                       # 在线计划生成和调度策略
 │   │   ├── random.go                 # 已有：确定性基础随机策略
 │   │   ├── random_test.go
+│   │   ├── llm.go                    # 已有：LLM prompt、解析和边界校验
+│   │   ├── llm_test.go
 │   │   ├── fair.go                   # 后续：有限公平/消息年龄策略
-│   │   └── llm/                      # 后续：LLM Plan生成
-│   │       ├── planner.go
-│   │       ├── prompt.go
-│   │       ├── schema.go
-│   │       └── client.go
+│   │
+│   ├── llm/                          # 已有：可替换的LLM传输层
+│   │   ├── client.go                 # 厂商无关JSON补全接口
+│   │   ├── provider.go               # DeepSeek/GLM/Qwen/Kimi兼容客户端与预设
+│   │   └── provider_test.go
+│   │
+│   ├── mutation/                     # 已有：Corpus Plan变异
+│   │   ├── mutation.go               # Mutator接口
+│   │   ├── random.go                 # 本地结构变异，含成对crash/restart插入
+│   │   ├── llm.go                    # LLM Mutator适配
+│   │   └── *_test.go
 │   │
 │   ├── oracle/                       # 系统正确性和模型检查
 │   │   ├── oracle.go                 # Oracle统一接口
@@ -243,15 +285,17 @@ modelfuzz-ng/
 │   │   ├── minimize.go               # 后续：失败轨迹缩减
 │   │   └── *_test.go
 │   │
-│   ├── corpus/                       # 后续：有价值Plan/Trace集合
+│   ├── corpus/                       # 已有：有价值Plan/Concrete ActionSequence集合
 │   │   ├── corpus.go
-│   │   ├── select.go
-│   │   ├── mutate.go
-│   │   └── *_test.go
+│   │   └── corpus_test.go
 │   │
-│   ├── metrics/                      # 后续：覆盖率和性能统计
+│   ├── metrics/                      # 已有：协议无关的执行、覆盖和性能统计
 │   │   ├── metrics.go
-│   │   └── reporter.go
+│   │   └── metrics_test.go
+│   │
+│   ├── persistence/                  # 已有：原子JSON与追加式JSONL
+│   │   ├── files.go
+│   │   └── files_test.go
 │   │
 │   └── coordinator/                  # 可选：并行worker和任务协调
 │       ├── coordinator.go
@@ -390,15 +434,9 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 
 ### 5.7 `internal/engine`
 
-负责更高层的 fuzzing 生命周期：
-
-- 创建和重置 Runtime；
-- 请求 Policy 生成 Plan；
-- 执行 Plan；
-- 调用 Oracle；
-- 收集 Coverage/Metrics；
-- 将有价值的 Plan/Trace 放入 Corpus；
-- 控制 iteration 和总体预算。
+负责一条 Plan 的单次执行闭环：解析 Plan、驱动 Runtime、映射模型事件、调用
+模型执行器和 Oracle，并返回可持久化 Result。跨执行的覆盖、Corpus 和调度由
+`internal/experiment` 管理，Engine 不保存全局搜索状态。
 
 ### 5.8 `internal/policy`
 
@@ -406,10 +444,14 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 基础 Random 策略按 seed 确定性选择动作类别，再在当前可执行的节点或消息中选择
 具体对象；因此能够选择非 FIFO 位置，也不会用过期 MessageID。
 
-建议先实现简单随机策略，验证完整执行链路；LLM 策略在 Plan schema 和 Runtime 行为稳定后加入。这样可以区分基础框架问题和 LLM 生成问题。
+LLM Planner 与随机 Policy 共享 Plan schema。它只生成并校验 Plan，不直接访问
+Runtime；初始化采用思考模式，变异采用非思考模式。
 
-`internal/experiment` 为每个 seed 创建独立 Engine/Runtime，支持无 TLC 时并行运行，
-并汇总状态、Action/Effect/模型事件数量和跨运行唯一模型状态。
+`internal/experiment` 为每次候选创建独立 Engine/Runtime，维护 FIFO 候选队列，
+把覆盖到全局新模型状态的 Plan/Concrete ActionSequence 放入 `internal/corpus`，再通过
+`internal/mutation` 异步产生后代。无 TLC 时仍可并行运行随机种子，但没有可用于
+保留和反馈的模型状态。生命周期事件同时驱动统计和持久化；checkpoint 保存 ready、
+in-flight、pending mutation、Corpus 和部分报告，恢复时不会从第一条 seed 重跑。
 
 ### 5.9 `internal/oracle`
 
@@ -454,7 +496,9 @@ Timed Effects + New Observation
     +----> Trace Recorder
     +----> Model Mapper ----> TLC Client ----> Model States
     +----> Oracle
-    +----> Coverage / Corpus / Metrics
+    +----> Experiment Coverage ----> Corpus ----> Mutation --+
+             ^                                            |
+             +---------------- Candidate Queue <----------+
 ```
 
 自然 timer 触发不返回到 Policy 变成新的可选 Action，而是作为执行 `AdvanceTime` 时产生的 `EffectTimerFired` 记录。
@@ -465,8 +509,10 @@ Timed Effects + New Observation
 
 ```text
 cmd
+  -> experiment -> corpus / mutation / engine / plan
+  -> policy / llm
   -> engine
-      -> plan / policy / oracle / corpus / metrics
+      -> plan / oracle / model
       -> runtime
           -> internal/sut接口
           -> core
@@ -520,16 +566,17 @@ core
 
 ### 阶段三：形成基础fuzzer
 
-1. 已完成单条Plan的Engine循环，待增加多轮探索调度；
-2. Random Policy；
-3. 基础 Oracle；
-4. Coverage和Metrics；
-5. Trace保存与重放；
-6. 简单Corpus和Mutation。
+1. 已完成单条Plan的Engine循环；
+2. 已完成基于实时Observation的Random Policy，包括消息调度、时间、请求和节点生命周期；
+3. 已完成基础Raft Oracle；
+4. 已完成基于模型状态覆盖的Corpus保留；
+5. 已完成Trace保存与重放；
+6. 已完成本地随机Mutation和反馈队列；
+7. 已完成独立 Metrics、增量 journal、原子 checkpoint、产物策略和恢复执行。
 
 ### 阶段四：加入高级能力
 
-1. LLM Plan生成；
+1. 已完成可选多 provider LLM 初始 Plan 和 Mutation 接入，待通过大规模对照实验优化 prompt；
 2. Partition/FairDeliver/RunUntilLeader等宏；
 3. 在已有TLA+执行链路上增加模型引导策略；
 4. 多worker并行执行；

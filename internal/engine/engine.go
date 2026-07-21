@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
@@ -27,9 +28,11 @@ type ActionSource interface {
 // Config 控制 best-effort Plan 的边界。默认允许 partial、skipped 和
 // empty_queue：这些状态会被记录，但不会终止整条 Plan。
 type Config struct {
-	FailOnPartial    bool `json:"fail_on_partial"`
-	FailOnSkipped    bool `json:"fail_on_skipped"`
-	FailOnEmptyQueue bool `json:"fail_on_empty_queue"`
+	FailOnPartial       bool `json:"fail_on_partial"`
+	FailOnSkipped       bool `json:"fail_on_skipped"`
+	FailOnEmptyQueue    bool `json:"fail_on_empty_queue"`
+	MaxPlanActions      int  `json:"max_plan_actions"`
+	MaxConsecutiveNoops int  `json:"max_consecutive_noops"`
 }
 
 // Engine 是单线程执行器。一个实例可以顺序运行多条 Plan；每次 Run 都会
@@ -56,6 +59,9 @@ func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, ex
 	if mapper == nil {
 		return nil, fmt.Errorf("%w: mapper is nil", ErrInvalidConfig)
 	}
+	if config.MaxPlanActions < 0 || config.MaxConsecutiveNoops < 0 {
+		return nil, fmt.Errorf("%w: engine budgets must not be negative", ErrInvalidConfig)
+	}
 	for index, checker := range checkers {
 		if checker == nil {
 			return nil, fmt.Errorf("%w: oracle %d is nil", ErrInvalidConfig, index)
@@ -74,7 +80,13 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 	if err := sequence.Validate(); err != nil {
 		return fail(newResult(), StatusInvalidPlan, fmt.Errorf("%w: %v", ErrInvalidPlan, err))
 	}
-	return e.run(ctx, len(sequence.Actions), false, nil, func(index int, _ core.Observation) (plan.PlanAction, bool, error) {
+	maximum := len(sequence.Actions)
+	budgeted := false
+	if e != nil && e.config.MaxPlanActions > 0 && maximum > e.config.MaxPlanActions {
+		maximum = e.config.MaxPlanActions
+		budgeted = true
+	}
+	return e.run(ctx, maximum, budgeted, false, nil, func(index int, _ core.Observation) (plan.PlanAction, bool, error) {
 		return sequence.Actions[index].Copy(), true, nil
 	})
 }
@@ -88,7 +100,10 @@ func (e *Engine) RunSource(ctx context.Context, source ActionSource, maxPlanActi
 	if maxPlanActions <= 0 {
 		return fail(newResult(), StatusPolicyFailed, fmt.Errorf("%w: max plan actions must be positive", ErrPolicy))
 	}
-	return e.run(ctx, maxPlanActions, true, source.Reset, func(_ int, observation core.Observation) (plan.PlanAction, bool, error) {
+	if e != nil && e.config.MaxPlanActions > 0 && maxPlanActions > e.config.MaxPlanActions {
+		maxPlanActions = e.config.MaxPlanActions
+	}
+	return e.run(ctx, maxPlanActions, true, true, source.Reset, func(_ int, observation core.Observation) (plan.PlanAction, bool, error) {
 		return source.Next(observation.Copy())
 	})
 }
@@ -96,7 +111,7 @@ func (e *Engine) RunSource(ctx context.Context, source ActionSource, maxPlanActi
 type sourceInitializer func(core.Observation) error
 type nextAction func(int, core.Observation) (plan.PlanAction, bool, error)
 
-func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize sourceInitializer, next nextAction) (Result, error) {
+func (e *Engine) run(ctx context.Context, maximum int, budgeted, online bool, initialize sourceInitializer, next nextAction) (Result, error) {
 	result := newResult()
 	if e == nil || e.runtime == nil || e.resolver == nil || e.mapper == nil {
 		return fail(result, StatusRuntimeFailed, fmt.Errorf("%w: engine is not initialized", ErrInvalidConfig))
@@ -134,6 +149,11 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 	}
 
 	processed := 0
+	consecutiveNoops := 0
+	policyComplete := false
+	terminated := false
+
+planLoop:
 	for planIndex := 0; planIndex < maximum; planIndex++ {
 		if err := ctx.Err(); err != nil {
 			e.capture(&result, observation)
@@ -145,6 +165,7 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 			return fail(result, StatusPolicyFailed, fmt.Errorf("%w: action %d: %v", ErrPolicy, planIndex, err))
 		}
 		if !more {
+			policyComplete = true
 			break
 		}
 		if err := planned.Validate(); err != nil {
@@ -168,9 +189,49 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 			))
 		}
 
+		if len(resolution.Actions) == 0 {
+			consecutiveNoops++
+			if e.config.MaxConsecutiveNoops > 0 && consecutiveNoops >= e.config.MaxConsecutiveNoops {
+				result.BudgetExhausted = true
+				result.Termination = TerminationConsecutiveNoops
+				break
+			}
+			continue
+		}
+		executedInResolution := make([]core.Action, 0, len(resolution.Actions))
+		inapplicableReasons := make([]string, 0)
+		inapplicableCodes := make([]plan.ResolutionReasonCode, 0)
 		for actionIndex, action := range resolution.Actions {
 			if e.profile != nil {
 				if err := e.profile.ValidateAction(action, observation); err != nil {
+					if errors.Is(err, model.ErrActionInapplicable) {
+						inapplicableReasons = append(inapplicableReasons, err.Error())
+						inapplicableCodes = append(inapplicableCodes, plan.ResolutionReasonCode(model.CodeOf(err)))
+						continue
+					}
+					if errors.Is(err, model.ErrModelBoundReached) {
+						result.Termination = TerminationModelBound
+						result.TerminationCode = string(model.CodeOf(err))
+						result.TerminationDetail = err.Error()
+						if len(executedInResolution) == 0 {
+							markResolutionStopped(
+								&result.Resolutions[len(result.Resolutions)-1], plan.ResolutionModelBound,
+								plan.ResolutionReasonCode(model.CodeOf(err)), err.Error(),
+							)
+						} else {
+							markResolutionInapplicable(
+								&result.Resolutions[len(result.Resolutions)-1], executedInResolution,
+								[]plan.ResolutionReasonCode{plan.ResolutionReasonCode(model.CodeOf(err))}, []string{err.Error()},
+							)
+						}
+						terminated = true
+						break planLoop
+					}
+					result.TerminationCode = string(model.CodeOf(err))
+					markResolutionStopped(
+						&result.Resolutions[len(result.Resolutions)-1], plan.ResolutionUnsupported,
+						plan.ResolutionReasonCode(model.CodeOf(err)), err.Error(),
+					)
 					e.capture(&result, observation)
 					return fail(result, StatusUnsupported, fmt.Errorf(
 						"%w: plan action %d concrete action %d: %v", ErrUnsupported, planIndex, actionIndex, err,
@@ -180,6 +241,12 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 			step, err := e.runtime.Execute(ctx, action)
 			if err != nil {
 				e.capture(&result, observation)
+				if errors.Is(err, runtimepkg.ErrBudgetExceeded) {
+					result.BudgetExhausted = true
+					result.Termination = TerminationRuntimeBudget
+					terminated = true
+					break planLoop
+				}
 				status := StatusRuntimeFailed
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					status = StatusCanceled
@@ -191,6 +258,7 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 			observation = step.Observation.Copy()
 			result.Final = observation.Copy()
 			result.Actions.Actions = append(result.Actions.Actions, action.Copy())
+			executedInResolution = append(executedInResolution, action.Copy())
 
 			transition := model.Transition{
 				Before: step.BeforeObservation,
@@ -225,9 +293,31 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted bool, initialize
 				))
 			}
 		}
+		if len(inapplicableReasons) > 0 {
+			markResolutionInapplicable(
+				&result.Resolutions[len(result.Resolutions)-1], executedInResolution, inapplicableCodes, inapplicableReasons,
+			)
+		}
+		if len(executedInResolution) == 0 {
+			consecutiveNoops++
+			if e.config.MaxConsecutiveNoops > 0 && consecutiveNoops >= e.config.MaxConsecutiveNoops {
+				result.BudgetExhausted = true
+				result.Termination = TerminationConsecutiveNoops
+				break
+			}
+		} else {
+			consecutiveNoops = 0
+		}
 	}
-	if budgeted && processed == maximum {
+	if result.Termination == "" && budgeted && processed == maximum {
 		result.BudgetExhausted = true
+		result.Termination = TerminationPlanActionBudget
+	} else if result.Termination == "" && policyComplete {
+		result.Termination = TerminationPolicyComplete
+	} else if result.Termination == "" && !online {
+		result.Termination = TerminationPlanComplete
+	} else if result.Termination == "" && terminated {
+		result.Termination = TerminationRuntimeBudget
 	}
 
 	e.capture(&result, observation)
@@ -280,6 +370,42 @@ func (e *Engine) capture(result *Result, observation core.Observation) {
 		result.Trace = trace
 	}
 	result.Failure = e.runtime.Failure()
+}
+
+func markResolutionStopped(resolution *plan.Resolution, status plan.ResolutionStatus, code plan.ResolutionReasonCode, reason string) {
+	resolution.Status = status
+	resolution.Resolved = 0
+	resolution.Actions = nil
+	resolution.ReasonCode = code
+	resolution.Reason = reason
+}
+
+func markResolutionInapplicable(resolution *plan.Resolution, executed []core.Action, codes []plan.ResolutionReasonCode, reasons []string) {
+	resolution.Actions = make([]core.Action, len(executed))
+	for index, action := range executed {
+		resolution.Actions[index] = action.Copy()
+	}
+	resolution.Resolved = len(executed)
+	resolution.ReasonCode = combinedReasonCode(codes)
+	resolution.Reason = strings.Join(reasons, "; ")
+	if resolution.Resolved == 0 {
+		resolution.Status = plan.ResolutionInapplicable
+	} else if resolution.Resolved < resolution.Requested {
+		resolution.Status = plan.ResolutionPartial
+	}
+}
+
+func combinedReasonCode(codes []plan.ResolutionReasonCode) plan.ResolutionReasonCode {
+	if len(codes) == 0 {
+		return ""
+	}
+	first := codes[0]
+	for _, code := range codes[1:] {
+		if code != first {
+			return plan.ReasonMultipleDecisions
+		}
+	}
+	return first
 }
 
 func fail(result Result, status Status, err error) (Result, error) {

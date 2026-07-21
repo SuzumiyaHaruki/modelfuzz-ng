@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
+	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 )
 
@@ -19,6 +20,8 @@ type RandomWeights struct {
 	Timeout      int `json:"timeout"`
 	Request      int `json:"request"`
 	AdvanceTicks int `json:"advance_ticks"`
+	Crash        int `json:"crash"`
+	Restart      int `json:"restart"`
 }
 
 // RandomConfig 把随机基线限制在当前有界 Raft Profile 内。
@@ -26,13 +29,17 @@ type RandomConfig struct {
 	MaxValue    int           `json:"max_value"`
 	MaxLogIndex uint64        `json:"max_log_index"`
 	LargestTerm uint64        `json:"largest_term"`
+	MaxCrashed  int           `json:"max_crashed"`
 	Weights     RandomWeights `json:"weights"`
 }
 
 func DefaultRandomConfig() RandomConfig {
 	return RandomConfig{
-		MaxValue: 5, MaxLogIndex: 5, LargestTerm: 5,
-		Weights: RandomWeights{Deliver: 50, Drop: 5, Duplicate: 5, Timeout: 20, Request: 15, AdvanceTicks: 5},
+		MaxValue: 5, MaxLogIndex: 5, LargestTerm: 5, MaxCrashed: 1,
+		Weights: RandomWeights{
+			Deliver: 50, Drop: 5, Duplicate: 5, Timeout: 20, Request: 15,
+			AdvanceTicks: 5, Crash: 5, Restart: 10,
+		},
 	}
 }
 
@@ -43,13 +50,22 @@ type Random struct {
 	seed      int64
 	random    *rand.Rand
 	generated []plan.PlanAction
+	profile   *raftmodel.Mapper
 }
 
 func NewRandom(seed int64, config RandomConfig) (*Random, error) {
 	if err := validateRandomConfig(config); err != nil {
 		return nil, err
 	}
-	return &Random{config: config, seed: seed, random: rand.New(rand.NewSource(seed))}, nil
+	profileConfig := raftmodel.DefaultConfig()
+	profileConfig.MaxValue = config.MaxValue
+	profileConfig.MaxLogIndex = config.MaxLogIndex
+	profileConfig.LargestTerm = config.LargestTerm
+	profile, err := raftmodel.NewMapperWithConfig(profileConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create random policy profile: %w", err)
+	}
+	return &Random{config: config, seed: seed, random: rand.New(rand.NewSource(seed)), profile: profile}, nil
 }
 
 func (p *Random) Reset(initial core.Observation) error {
@@ -115,7 +131,7 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 	duplicate := make([]plan.PlanAction, 0, len(messages))
 	for _, message := range messages {
 		action := messagePlanAction(plan.ActionDeliver, message)
-		if p.messageWithinProfile(message) {
+		if p.messageWithinProfile(observation, message) && observedNodeRunning(observation, message.To) {
 			deliver = append(deliver, action)
 		}
 		drop = append(drop, messagePlanAction(plan.ActionDrop, message))
@@ -126,21 +142,48 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 	timeouts := make([]plan.PlanAction, 0, len(nodes))
 	requests := make([]plan.PlanAction, 0, len(nodes)*p.config.MaxValue)
+	crashes := make([]plan.PlanAction, 0, len(nodes))
+	restarts := make([]plan.PlanAction, 0, len(nodes))
+	runningCount := 0
+	crashedCount := 0
 	for _, node := range nodes {
+		switch node.Status {
+		case core.NodeRunning:
+			runningCount++
+		case core.NodeCrashed:
+			crashedCount++
+		}
+	}
+	for _, node := range nodes {
+		if node.Status == core.NodeCrashed {
+			restarts = append(restarts, plan.PlanAction{Kind: plan.ActionRestart, Node: node.ID})
+			continue
+		}
 		if node.Status != core.NodeRunning {
 			continue
 		}
+		if runningCount > 1 && crashedCount < p.config.MaxCrashed {
+			crashes = append(crashes, plan.PlanAction{Kind: plan.ActionCrash, Node: node.ID})
+		}
 		role, _ := node.Semantic["role"].(string)
 		term, termOK := semanticUint(node.Semantic["term"])
-		if role != "leader" && termOK && term < p.config.LargestTerm {
+		lastIndex, indexOK := semanticUint(node.Semantic["last_index"])
+		// 成为 Leader 时 etcd-raft 会自动追加 no-op，因此日志已到模型上限的
+		// 节点不能再由有界随机策略主动发起新选举。
+		if role != "leader" && termOK && term < p.config.LargestTerm &&
+			indexOK && lastIndex < p.config.MaxLogIndex {
 			timeouts = append(timeouts, plan.PlanAction{Kind: plan.ActionTimeout, Node: node.ID})
 		}
-		lastIndex, indexOK := semanticUint(node.Semantic["last_index"])
-		if role == "leader" && indexOK && lastIndex < p.config.MaxLogIndex {
+		if requestTargetUsable(observation, node, p.config.MaxLogIndex) {
 			for value := 1; value <= p.config.MaxValue; value++ {
 				requests = append(requests, plan.PlanAction{Kind: plan.ActionRequest, Node: node.ID, Request: strconv.Itoa(value)})
 			}
 		}
+	}
+	advance := make([]plan.PlanAction, 0, 1)
+	advanceAction := core.Action{Kind: core.ActionAdvanceTime, TargetTime: observation.Time + 1}
+	if observation.Time < ^core.LogicalTime(0) && p.profile.ValidateAction(advanceAction, observation) == nil {
+		advance = append(advance, plan.PlanAction{Kind: plan.ActionAdvanceTicks, Ticks: 1})
 	}
 
 	return []actionGroup{
@@ -149,21 +192,52 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 		{weight: p.config.Weights.Duplicate, actions: duplicate},
 		{weight: p.config.Weights.Timeout, actions: timeouts},
 		{weight: p.config.Weights.Request, actions: requests},
-		{weight: p.config.Weights.AdvanceTicks, actions: []plan.PlanAction{{Kind: plan.ActionAdvanceTicks, Ticks: 1}}},
+		{weight: p.config.Weights.AdvanceTicks, actions: advance},
+		{weight: p.config.Weights.Crash, actions: crashes},
+		{weight: p.config.Weights.Restart, actions: restarts},
 	}
 }
 
-func (p *Random) messageWithinProfile(message core.MessageObservation) bool {
-	switch message.TypeHint {
-	case "MsgVote", "MsgVoteResp", "MsgAppResp", "MsgHeartbeat", "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp":
-		return true
-	case "MsgApp":
-		count, countErr := strconv.ParseUint(message.Metadata["entry_count"], 10, 64)
-		index, indexErr := strconv.ParseUint(message.Metadata["index"], 10, 64)
-		return countErr == nil && indexErr == nil && index <= p.config.MaxLogIndex && count <= p.config.MaxLogIndex-index
-	default:
+func observedNodeRunning(observation core.Observation, id core.NodeID) bool {
+	for _, node := range observation.Nodes {
+		if node.ID == id {
+			return node.Status == core.NodeRunning
+		}
+	}
+	return false
+}
+
+func requestTargetUsable(observation core.Observation, target core.NodeObservation, maxLogIndex uint64) bool {
+	role, _ := target.Semantic["role"].(string)
+	if role == "leader" {
+		lastIndex, ok := semanticUint(target.Semantic["last_index"])
+		return ok && lastIndex < maxLogIndex
+	}
+	if role != "follower" {
 		return false
 	}
+	leader, ok := semanticUint(target.Semantic["leader"])
+	if !ok || leader == 0 {
+		return false
+	}
+	for _, node := range observation.Nodes {
+		if uint64(node.ID) != leader || node.Status != core.NodeRunning || node.Semantic["role"] != "leader" {
+			continue
+		}
+		lastIndex, indexOK := semanticUint(node.Semantic["last_index"])
+		return indexOK && lastIndex < maxLogIndex
+	}
+	return false
+}
+
+func (p *Random) messageWithinProfile(observation core.Observation, message core.MessageObservation) bool {
+	action := core.Action{
+		Kind: core.ActionDeliver, Message: message.ID,
+		Selector: &core.MessageSelector{
+			Link: core.LinkID{From: message.From, To: message.To}, Position: message.Position,
+		},
+	}
+	return p.profile != nil && p.profile.ValidateAction(action, observation) == nil
 }
 
 func messagePlanAction(kind plan.ActionKind, message core.MessageObservation) plan.PlanAction {
@@ -173,11 +247,12 @@ func messagePlanAction(kind plan.ActionKind, message core.MessageObservation) pl
 }
 
 func validateRandomConfig(config RandomConfig) error {
-	if config.MaxValue <= 0 || config.MaxLogIndex == 0 || config.LargestTerm == 0 {
+	if config.MaxValue <= 0 || config.MaxLogIndex == 0 || config.LargestTerm == 0 || config.MaxCrashed <= 0 {
 		return fmt.Errorf("random policy bounds must be positive")
 	}
 	weights := []int{config.Weights.Deliver, config.Weights.Drop, config.Weights.Duplicate,
-		config.Weights.Timeout, config.Weights.Request, config.Weights.AdvanceTicks}
+		config.Weights.Timeout, config.Weights.Request, config.Weights.AdvanceTicks,
+		config.Weights.Crash, config.Weights.Restart}
 	total := 0
 	for _, weight := range weights {
 		if weight < 0 {

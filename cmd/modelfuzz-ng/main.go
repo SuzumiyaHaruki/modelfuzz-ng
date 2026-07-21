@@ -19,10 +19,13 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/mutation"
 	raftoracle "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/oracle/raft"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/persistence"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	randompolicy "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/policy"
 	runtimepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/runtime"
@@ -66,22 +69,117 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("modelfuzz-ng experiment", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	outputPath := flags.String("output", "", "新的批量实验目录（必填，不覆盖）")
+	outputPath := flags.String("output", "", "新的批量实验目录；恢复时可省略")
+	resumePath := flags.String("resume", "", "从已有实验目录的 checkpoint.json 恢复")
+	artifactPolicyText := flags.String("artifact-policy", "all", "逐运行产物策略: all、retained、failures、summary")
+	checkpointEvery := flags.Int("checkpoint-every", 1, "每完成多少条执行原子保存一次 checkpoint")
 	configPath := flags.String("config", "", "可选的 JSON 配置文件")
 	tlcAddress := flags.String("tlc", "", "覆盖配置中的 controlled TLC 地址")
-	runs := flags.Int("runs", 10, "独立运行次数")
-	steps := flags.Int("steps", 50, "每次运行的最大在线 PlanAction 数")
+	runs := flags.Int("runs", 10, "反馈闭环中的总执行次数")
+	maxPlanActions := flags.Int("max-plan-actions", 50, "每条变长轨迹最多处理的 PlanAction 数")
 	parallelism := flags.Int("parallelism", 1, "并发运行数；controlled TLC 当前只能为1")
 	seedText := flags.String("seed", "", "覆盖第一条运行的随机种子；后续逐次加1")
+	llmInit := flags.Bool("llm-init", false, "使用 LLM 生成初始 Plan；默认使用在线随机策略")
+	llmMutate := flags.Bool("llm-mutate", false, "使用 LLM 变异 Corpus Plan；默认使用本地随机变异")
+	initialPopulation := flags.Int("initial-population", 4, "开始反馈变异前准备的种子 Plan 数")
+	mutationsPerState := flags.Int("mutations-per-state", 2, "每个全局新模型状态生成的变异数")
+	maxMutationsPerCorpus := flags.Int("max-mutations-per-corpus", 8, "单个 Corpus 条目的最大变异数")
+	randomSeedInterval := flags.Int("random-seed-interval", 0, "每完成多少次执行优先注入在线随机种子；0 表示关闭")
+	randomSeedsPerInterval := flags.Int("random-seeds-per-interval", 1, "每次周期注入的在线随机种子数")
+	llmProvider := flags.String("llm-provider", string(llm.DefaultProvider), "LLM provider: deepseek、glm、qwen 或 kimi")
+	llmModel := flags.String("llm-model", "", "覆盖 provider 的默认模型")
+	llmBaseURL := flags.String("llm-base-url", "", "覆盖 provider 的 OpenAI-compatible API 基础地址")
+	llmAPIKeyEnv := flags.String("llm-api-key-env", "", "覆盖保存 API Key 的环境变量名称")
+	llmTimeout := flags.Duration("llm-timeout", 90*time.Second, "单次 LLM 请求超时")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("无法识别的位置参数: %v", flags.Args())
 	}
-	if *outputPath == "" {
+	setFlags := make(map[string]bool)
+	flags.Visit(func(value *flag.Flag) { setFlags[value.Name] = true })
+	if *resumePath == "" && *outputPath == "" {
 		flags.Usage()
-		return fmt.Errorf("-output 为必填项")
+		return fmt.Errorf("新实验需要 -output，恢复实验需要 -resume")
+	}
+	var resumeCheckpoint *experiment.Checkpoint
+	var previousLLMStats llm.Stats
+	if *resumePath != "" {
+		resumeDirectory := filepath.Clean(*resumePath)
+		if *outputPath != "" && filepath.Clean(*outputPath) != resumeDirectory {
+			return fmt.Errorf("-resume 与 -output 必须指向同一目录")
+		}
+		*outputPath = resumeDirectory
+		if setFlags["config"] {
+			return fmt.Errorf("恢复实验使用原目录中的 config.json，不能同时指定 -config")
+		}
+		*configPath = filepath.Join(resumeDirectory, "config.json")
+		resumeCheckpoint = &experiment.Checkpoint{}
+		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "checkpoint.json"), resumeCheckpoint); err != nil {
+			return fmt.Errorf("读取恢复点: %w", err)
+		}
+		var savedSettings experimentSettings
+		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "experiment-settings.json"), &savedSettings); err != nil {
+			return fmt.Errorf("读取原实验设置: %w", err)
+		}
+		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "llm-stats.json"), &previousLLMStats); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("读取原 LLM 统计: %w", err)
+		}
+		if !setFlags["artifact-policy"] {
+			*artifactPolicyText = string(savedSettings.ArtifactPolicy)
+		}
+		if !setFlags["checkpoint-every"] {
+			*checkpointEvery = savedSettings.CheckpointEvery
+		}
+		if !setFlags["llm-init"] {
+			*llmInit = savedSettings.LLMInit
+		}
+		if !setFlags["llm-mutate"] {
+			*llmMutate = savedSettings.LLMMutate
+		}
+		if !setFlags["llm-provider"] && savedSettings.LLMProvider != "" {
+			*llmProvider = string(savedSettings.LLMProvider)
+		}
+		if !setFlags["llm-model"] {
+			*llmModel = savedSettings.LLMModel
+		}
+		if !setFlags["llm-base-url"] {
+			*llmBaseURL = savedSettings.LLMBaseURL
+		}
+		if !setFlags["llm-api-key-env"] {
+			*llmAPIKeyEnv = savedSettings.LLMAPIKeyEnv
+		}
+		if !setFlags["llm-timeout"] && savedSettings.LLMTimeoutMillis > 0 {
+			*llmTimeout = time.Duration(savedSettings.LLMTimeoutMillis) * time.Millisecond
+		}
+		resumeValues := map[string][2]int{
+			"runs": {*runs, resumeCheckpoint.Config.Runs}, "parallelism": {*parallelism, resumeCheckpoint.Config.Parallelism},
+			"initial-population":        {*initialPopulation, resumeCheckpoint.Config.InitialPopulation},
+			"mutations-per-state":       {*mutationsPerState, resumeCheckpoint.Config.MutationsPerNewState},
+			"max-mutations-per-corpus":  {*maxMutationsPerCorpus, resumeCheckpoint.Config.MaxMutationsPerCorpus},
+			"random-seed-interval":      {*randomSeedInterval, resumeCheckpoint.Config.RandomSeedInterval},
+			"random-seeds-per-interval": {*randomSeedsPerInterval, resumeCheckpoint.Config.RandomSeedsPerInterval},
+		}
+		for name, values := range resumeValues {
+			if setFlags[name] && values[0] != values[1] {
+				return fmt.Errorf("恢复时 -%s=%d 与 checkpoint 中的 %d 不一致", name, values[0], values[1])
+			}
+		}
+		*runs = resumeCheckpoint.Config.Runs
+		*parallelism = resumeCheckpoint.Config.Parallelism
+		*initialPopulation = resumeCheckpoint.Config.InitialPopulation
+		*mutationsPerState = resumeCheckpoint.Config.MutationsPerNewState
+		*maxMutationsPerCorpus = resumeCheckpoint.Config.MaxMutationsPerCorpus
+		*randomSeedInterval = resumeCheckpoint.Config.RandomSeedInterval
+		*randomSeedsPerInterval = resumeCheckpoint.Config.RandomSeedsPerInterval
+	}
+	if *checkpointEvery <= 0 {
+		return fmt.Errorf("-checkpoint-every 必须为正数")
+	}
+	artifactPolicy, err := parseArtifactPolicy(*artifactPolicyText)
+	if err != nil {
+		return err
 	}
 	config, err := loadCLIConfig(*configPath)
 	if err != nil {
@@ -90,6 +188,9 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	if *tlcAddress != "" {
 		config.TLC.Address = *tlcAddress
 	}
+	if resumeCheckpoint != nil && (*seedText != "" || setFlags["tlc"]) {
+		return fmt.Errorf("恢复时不能覆盖 seed 或 TLC 地址")
+	}
 	if *seedText != "" {
 		seed, err := strconv.ParseInt(*seedText, 10, 64)
 		if err != nil {
@@ -97,67 +198,220 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 		config.Seed = seed
 	}
-	if *steps <= 0 {
-		return fmt.Errorf("-steps 必须为正数")
+	if *maxPlanActions <= 0 {
+		return fmt.Errorf("-max-plan-actions 必须为正数")
+	}
+	if resumeCheckpoint != nil {
+		if setFlags["max-plan-actions"] && *maxPlanActions != config.Engine.MaxPlanActions {
+			return fmt.Errorf("恢复时 -max-plan-actions=%d 与原配置中的 %d 不一致", *maxPlanActions, config.Engine.MaxPlanActions)
+		}
+		*maxPlanActions = config.Engine.MaxPlanActions
+		if config.Seed != resumeCheckpoint.Config.BaseSeed {
+			return fmt.Errorf("原 config.json 的 seed 与 checkpoint 不一致")
+		}
+	} else {
+		config.Engine.MaxPlanActions = *maxPlanActions
 	}
 	if config.TLC.Address != "" && *parallelism != 1 {
 		return fmt.Errorf("旧 controlled TLC 不保证请求隔离，连接 TLC 时 -parallelism 必须为1")
 	}
 	if err := validateAlignedNodes(config.Raft.NodeIDs, config.Model.NodeIDs); err != nil {
-		return fmt.Errorf("Raft/模型配置不一致: %w", err)
+		return fmt.Errorf("raft/模型配置不一致: %w", err)
 	}
-	runner, err := experiment.New(experiment.Config{Runs: *runs, BaseSeed: config.Seed, Parallelism: *parallelism})
+	experimentConfig := experiment.Config{
+		Runs: *runs, BaseSeed: config.Seed, Parallelism: *parallelism,
+		InitialPopulation: *initialPopulation, MutationsPerNewState: *mutationsPerState,
+		MaxMutationsPerCorpus: *maxMutationsPerCorpus, RandomSeedInterval: *randomSeedInterval,
+		RandomSeedsPerInterval: *randomSeedsPerInterval,
+	}
+	runner, err := experiment.New(experimentConfig)
 	if err != nil {
 		return err
 	}
+	experimentConfig = runner.Config()
 	policyConfig := randompolicy.DefaultRandomConfig()
 	policyConfig.MaxValue = config.Model.MaxValue
 	policyConfig.MaxLogIndex = config.Model.MaxLogIndex
 	policyConfig.LargestTerm = config.Model.LargestTerm
-	if err := createOutputDirectory(*outputPath); err != nil {
+	mutationConfig := mutation.RandomConfig{
+		NodeIDs: append([]core.NodeID(nil), config.Raft.NodeIDs...), MaxValue: config.Model.MaxValue,
+		MaxTicks: 5, MaxActions: *maxPlanActions, MaxCrashed: policyConfig.MaxCrashed,
+	}
+	localMutator, err := mutation.NewRandom(mutationConfig)
+	if err != nil {
 		return err
 	}
-	report, runErr := runner.Run(ctx, func(ctx context.Context, index int, seed int64) (engine.Result, error) {
-		runConfig := config
-		runConfig.Seed = seed
-		runConfig.ExecutionID = core.ExecutionID(fmt.Sprintf("%s-random-%04d", config.ExecutionID, index))
-		policy, err := randompolicy.NewRandom(seed, policyConfig)
+	var selectedMutator mutation.Mutator = localMutator
+	var llmClient *llm.Client
+	var effectiveLLMProvider llm.Provider
+	var effectiveLLMModel, effectiveLLMBaseURL, effectiveAPIKeyEnv string
+	feedbackOptions := experiment.FeedbackOptions{InitializerName: "random_init"}
+	if *llmInit || *llmMutate {
+		effectiveLLMProvider, err = llm.ParseProvider(*llmProvider)
 		if err != nil {
-			return engine.Result{}, err
+			return err
 		}
-		runEngine, err := buildEngine(runConfig, stderr)
+		preset, err := llm.Preset(effectiveLLMProvider)
 		if err != nil {
-			return engine.Result{}, err
+			return err
 		}
-		result, engineErr := runEngine.RunSource(ctx, policy, *steps)
-		runDirectory := filepath.Join(*outputPath, fmt.Sprintf("run-%04d-seed-%d", index, seed))
-		if err := createOutputDirectory(runDirectory); err != nil {
-			return result, errors.Join(engineErr, err)
+		effectiveLLMModel = *llmModel
+		if effectiveLLMModel == "" {
+			effectiveLLMModel = preset.DefaultModel
 		}
-		if err := writeArtifacts(runDirectory, runConfig, policy.Sequence(), result); err != nil {
-			return result, errors.Join(engineErr, err)
+		effectiveLLMBaseURL = *llmBaseURL
+		if effectiveLLMBaseURL == "" {
+			effectiveLLMBaseURL = preset.DefaultBaseURL
 		}
-		return result, engineErr
-	})
+		effectiveAPIKeyEnv = *llmAPIKeyEnv
+		if effectiveAPIKeyEnv == "" {
+			effectiveAPIKeyEnv = preset.DefaultAPIKeyEnv
+		}
+		apiKey := os.Getenv(effectiveAPIKeyEnv)
+		if apiKey == "" {
+			return fmt.Errorf("开启 %s LLM 后必须通过 %s 环境变量提供 API Key；不要写入配置或仓库", effectiveLLMProvider, effectiveAPIKeyEnv)
+		}
+		llmClient, err = llm.NewClient(llm.Config{
+			Provider: effectiveLLMProvider, BaseURL: effectiveLLMBaseURL,
+			APIKey: apiKey, Model: effectiveLLMModel, Timeout: *llmTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		planner, err := randompolicy.NewLLMPlanner(llmClient, randompolicy.LLMConfig{
+			NodeIDs: append([]core.NodeID(nil), config.Raft.NodeIDs...), MaxValue: config.Model.MaxValue,
+			MaxTicks: mutationConfig.MaxTicks, MaxActions: *maxPlanActions,
+			MaxCrashed: policyConfig.MaxCrashed, MaxLogIndex: config.Model.MaxLogIndex,
+			LargestTerm: config.Model.LargestTerm,
+		})
+		if err != nil {
+			return err
+		}
+		if *llmInit {
+			feedbackOptions.InitializerName = "llm_init"
+			feedbackOptions.Initializer = func(ctx context.Context, count int, _ int64) ([]plan.PlanSequence, error) {
+				return planner.Generate(ctx, randompolicy.GenerationRequest{Mode: randompolicy.GenerationInitial, Count: count})
+			}
+		}
+		if *llmMutate {
+			selectedMutator, err = mutation.NewLLM(planner)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	feedbackOptions.Mutator = selectedMutator
+	feedbackOptions.Resume = resumeCheckpoint
+	feedbackOptions.CheckpointEvery = *checkpointEvery
+	if resumeCheckpoint == nil {
+		if err := createOutputDirectory(*outputPath); err != nil {
+			return err
+		}
+	} else if information, err := os.Stat(*outputPath); err != nil || !information.IsDir() {
+		return fmt.Errorf("恢复目录 %s 不存在或不是目录", *outputPath)
+	}
+	settings := experimentSettings{
+		LLMInit: *llmInit, LLMMutate: *llmMutate, Initializer: feedbackOptions.InitializerName,
+		Mutator: selectedMutator.Name(), RandomMutation: mutationConfig,
+		ArtifactPolicy: artifactPolicy, CheckpointEvery: *checkpointEvery,
+	}
+	if *llmInit || *llmMutate {
+		settings.LLMProvider = effectiveLLMProvider
+		settings.LLMModel = effectiveLLMModel
+		settings.LLMBaseURL = effectiveLLMBaseURL
+		settings.LLMAPIKeyEnv = effectiveAPIKeyEnv
+		settings.LLMTimeoutMillis = llmTimeout.Milliseconds()
+	}
+	fingerprintSettings := settings
+	fingerprintSettings.ArtifactPolicy = ""
+	fingerprintSettings.CheckpointEvery = 0
+	fingerprint, err := configurationFingerprint(config, experimentConfig, policyConfig, fingerprintSettings)
+	if err != nil {
+		return err
+	}
+	feedbackOptions.ConfigurationFingerprint = fingerprint
+	if resumeCheckpoint == nil {
+		for _, artifact := range []struct {
+			name  string
+			value any
+		}{
+			{name: "config.json", value: config},
+			{name: "policy-config.json", value: policyConfig},
+			{name: "experiment-settings.json", value: settings},
+		} {
+			if err := writeJSONFile(filepath.Join(*outputPath, artifact.name), artifact.value); err != nil {
+				return err
+			}
+		}
+	}
+	store, err := openExperimentStore(*outputPath, artifactPolicy)
+	if err != nil {
+		return err
+	}
+	store.config = config
+	if llmClient != nil {
+		store.llmStats = func() llm.Stats { return previousLLMStats.Add(llmClient.Stats()) }
+	}
+	if resumeCheckpoint != nil && store.lastEventSequence > resumeCheckpoint.EventSequence {
+		resumeCheckpoint.EventSequence = store.lastEventSequence
+	}
+	feedbackOptions.Hooks = store.hooks()
+	if config.TLC.Address == "" {
+		_, _ = fmt.Fprintln(stderr, "警告: 未连接 TLC，本次运行不会返回模型状态，Corpus 将保持为空，闭环会持续补充初始种子")
+	}
+	report, corpusSnapshot, runErr := runner.RunFeedback(ctx, feedbackOptions,
+		func(ctx context.Context, index int, seed int64, candidate experiment.Candidate) (experiment.FeedbackExecution, error) {
+			runConfig := config
+			runConfig.Seed = seed
+			runConfig.ExecutionID = core.ExecutionID(fmt.Sprintf("%s-feedback-%04d", config.ExecutionID, index))
+			runEngine, err := buildEngine(runConfig, stderr)
+			if err != nil {
+				return experiment.FeedbackExecution{}, err
+			}
+			var sequence plan.PlanSequence
+			var result engine.Result
+			var engineErr error
+			if candidate.Plan == nil {
+				policy, err := randompolicy.NewRandom(seed, policyConfig)
+				if err != nil {
+					return experiment.FeedbackExecution{}, err
+				}
+				result, engineErr = runEngine.RunSource(ctx, policy, *maxPlanActions)
+				sequence = policy.Sequence()
+			} else {
+				sequence = candidate.Plan.Copy()
+				result, engineErr = runEngine.Run(ctx, sequence)
+			}
+			execution := experiment.FeedbackExecution{Result: result, Plan: sequence}
+			return execution, engineErr
+		})
+	storeErr := store.Close()
 	rootArtifacts := []struct {
 		name  string
 		value any
 	}{
-		{name: "config.json", value: config},
-		{name: "policy-config.json", value: policyConfig},
+		{name: "corpus.json", value: corpusSnapshot},
 		{name: "experiment-report.json", value: report},
+		{name: "experiment-metrics.json", value: report.Statistics()},
+	}
+	if store.llmStats != nil {
+		rootArtifacts = append(rootArtifacts, struct {
+			name  string
+			value any
+		}{name: "llm-stats.json", value: store.llmStats()})
 	}
 	for _, artifact := range rootArtifacts {
 		if err := writeJSONFile(filepath.Join(*outputPath, artifact.name), artifact.value); err != nil {
-			return errors.Join(runErr, err)
+			return errors.Join(runErr, storeErr, err)
 		}
 	}
-	fmt.Fprintf(stdout,
-		"批量实验结束: runs=%d succeeded=%d failed=%d actions=%d model_events=%d unique_model_states=%d output=%s\n",
-		len(report.Runs), report.Succeeded, report.Failed, report.TotalActions,
-		report.TotalModelEvents, report.UniqueModelStates, *outputPath,
+	_, outputErr := fmt.Fprintf(stdout,
+		"反馈实验结束: runs=%d succeeded=%d failed=%d corpus=%d mutations=%d periodic_seeds=%d actions=%d model_events=%d unique_model_states=%d unique_plans=%d unique_traces=%d unique_state_paths=%d output=%s\n",
+		report.CompletedRuns, report.Succeeded, report.Failed, report.CorpusEntries,
+		report.ExecutedMutations, report.PeriodicSeedExecutions, report.TotalActions, report.TotalModelEvents,
+		report.UniqueModelStates, report.UniquePlans, report.UniqueTraces, report.UniqueModelStatePaths, *outputPath,
 	)
-	return runErr
+	return errors.Join(runErr, storeErr, outputErr)
 }
 
 func replayCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -203,9 +457,9 @@ func replayCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if writeErr != nil {
 		return errors.Join(replayErr, writeErr)
 	}
-	fmt.Fprintf(stdout, "重放结束: status=%s matched_steps=%d output=%s\n",
+	_, outputErr := fmt.Fprintf(stdout, "重放结束: status=%s matched_steps=%d output=%s\n",
 		result.Status, result.MatchedSteps, *outputPath)
-	return replayErr
+	return errors.Join(replayErr, outputErr)
 }
 
 func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -252,7 +506,7 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		config.Engine.FailOnEmptyQueue = true
 	}
 	if err := validateAlignedNodes(config.Raft.NodeIDs, config.Model.NodeIDs); err != nil {
-		return fmt.Errorf("Raft/模型配置不一致: %w", err)
+		return fmt.Errorf("raft/模型配置不一致: %w", err)
 	}
 
 	sequence, err := readPlan(*planPath)
@@ -272,12 +526,12 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if writeErr != nil {
 		return errors.Join(runErr, writeErr)
 	}
-	fmt.Fprintf(stdout,
+	_, outputErr := fmt.Fprintf(stdout,
 		"运行结束: status=%s actions=%d effects=%d model_events=%d model_states=%d oracle_findings=%d output=%s\n",
 		result.Status, len(result.Actions.Actions), countEffects(result),
 		len(result.ModelEvents), len(result.ModelStates), len(result.OracleFindings), *outputPath,
 	)
-	return runErr
+	return errors.Join(runErr, outputErr)
 }
 
 func buildEngine(config cliConfig, logOutput io.Writer) (*engine.Engine, error) {
@@ -341,10 +595,10 @@ func countEffects(result engine.Result) int {
 }
 
 func printRootUsage(output io.Writer) {
-	fmt.Fprintln(output, "用法:")
-	fmt.Fprintln(output, "  modelfuzz-ng run -plan PLAN.json -output RUN_DIR [选项]")
-	fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
-	fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
-	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
+	_, _ = fmt.Fprintln(output, "用法:")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng run -plan PLAN.json -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output)
+	_, _ = fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
 }

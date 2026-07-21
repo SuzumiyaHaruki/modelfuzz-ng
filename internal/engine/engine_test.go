@@ -134,8 +134,49 @@ func TestEngineRunSourceUsesLatestObservationAndStopsVoluntarily(t *testing.T) {
 	if result.Status != StatusCompleted || result.BudgetExhausted || len(result.Resolutions) != 2 || len(result.Trace.Steps) != 2 {
 		t.Fatalf("source result = %+v", result)
 	}
+	if result.Termination != TerminationPolicyComplete {
+		t.Fatalf("termination = %q, want %q", result.Termination, TerminationPolicyComplete)
+	}
 	if result.Actions.Actions[1].Kind != core.ActionDeliver {
 		t.Fatalf("second action = %+v", result.Actions.Actions[1])
+	}
+}
+
+func TestEngineStopsStaticPlanAtPlanActionBudget(t *testing.T) {
+	runner := newTestEngine(t, plan.DefaultResolverConfig(), nil, Config{MaxPlanActions: 2})
+	sequence := plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+	}}
+
+	result, err := runner.Run(context.Background(), sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusCompleted || !result.BudgetExhausted ||
+		result.Termination != TerminationPlanActionBudget || len(result.Resolutions) != 2 ||
+		len(result.Actions.Actions) != 2 || result.Final.Time != 2 {
+		t.Fatalf("budgeted result = %+v", result)
+	}
+}
+
+func TestEngineStopsAfterConsecutiveNoopResolutions(t *testing.T) {
+	runner := newTestEngine(t, plan.DefaultResolverConfig(), nil, Config{MaxConsecutiveNoops: 2})
+	sequence := plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionDrop, Messages: &plan.MessageRangeSelector{Link: core.LinkID{From: 1, To: 2}, Count: 1}},
+		{Kind: plan.ActionDrop, Messages: &plan.MessageRangeSelector{Link: core.LinkID{From: 2, To: 3}, Count: 1}},
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+	}}
+
+	result, err := runner.Run(context.Background(), sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusCompleted || !result.BudgetExhausted ||
+		result.Termination != TerminationConsecutiveNoops || len(result.Resolutions) != 2 ||
+		len(result.Actions.Actions) != 0 || result.Final.Time != 0 {
+		t.Fatalf("no-op result = %+v", result)
 	}
 }
 
@@ -161,6 +202,69 @@ func TestEngineRecordsBestEffortEmptyQueue(t *testing.T) {
 	}
 }
 
+func TestEngineExecutesDroppedFollowerProposalAsSuccessfulModelStutter(t *testing.T) {
+	executor := &recordingExecutor{}
+	engine := newTestEngine(t, plan.DefaultResolverConfig(), executor, Config{})
+	result, err := engine.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{{
+		Kind: plan.ActionRequest, Node: 1, Request: "1",
+	}}})
+	if err != nil || result.Status != StatusCompleted {
+		t.Fatalf("result/error = %+v/%v, want completed", result, err)
+	}
+	if len(result.Resolutions) != 1 || result.Resolutions[0].Status != plan.ResolutionResolved ||
+		len(result.Actions.Actions) != 1 || len(result.Trace.Steps) != 1 || executor.calls != 1 ||
+		len(result.ModelEvents) != 0 {
+		t.Fatalf("dropped-proposal result = %+v, executor calls = %d", result, executor.calls)
+	}
+	effects := result.Trace.Steps[0].Effects
+	if len(effects) != 1 || effects[0].Kind != core.EffectModelEvent ||
+		effects[0].ModelEvent.Name != "raft.proposal_dropped" {
+		t.Fatalf("dropped proposal effects = %+v", effects)
+	}
+}
+
+func TestEngineStopsNormallyAtModelBoundAndExecutesPrefix(t *testing.T) {
+	mapperConfig := raftmodel.DefaultConfig()
+	mapperConfig.LargestTerm = 1
+	mapper, err := raftmodel.NewMapperWithConfig(mapperConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &recordingExecutor{states: []model.State{{Key: 9}}}
+	engine := newTestEngineWithMapper(t, plan.DefaultResolverConfig(), mapper, executor, Config{})
+	result, err := engine.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionTimeout, Node: 1},
+		{Kind: plan.ActionTimeout, Node: 1},
+	}})
+	if err != nil || result.Status != StatusCompleted {
+		t.Fatalf("result/error = %+v/%v, want completed prefix", result, err)
+	}
+	if result.Termination != TerminationModelBound || result.TerminationCode != string(raftmodel.CodeTimeoutTermBound) || result.TerminationDetail == "" ||
+		len(result.Actions.Actions) != 1 || len(result.Trace.Steps) != 1 || executor.calls != 1 ||
+		len(result.ModelStates) != 1 {
+		t.Fatalf("model-bound result = %+v, executor calls = %d", result, executor.calls)
+	}
+	if result.Resolutions[1].Status != plan.ResolutionModelBound {
+		t.Fatalf("boundary resolution = %+v", result.Resolutions[1])
+	}
+}
+
+func TestEngineRecordsStableUnsupportedProfileCode(t *testing.T) {
+	executor := &recordingExecutor{}
+	engine := newTestEngine(t, plan.DefaultResolverConfig(), executor, Config{})
+	result, err := engine.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{{
+		Kind: plan.ActionRequest, Node: 1, Request: "not-a-model-value",
+	}}})
+	if !errors.Is(err, ErrUnsupported) || result.Status != StatusUnsupported {
+		t.Fatalf("result/error = %+v/%v, want unsupported", result, err)
+	}
+	if result.TerminationCode != string(raftmodel.CodeRequestInvalidValue) ||
+		len(result.Resolutions) != 1 || result.Resolutions[0].Status != plan.ResolutionUnsupported ||
+		result.Resolutions[0].ReasonCode != plan.ResolutionReasonCode(raftmodel.CodeRequestInvalidValue) {
+		t.Fatalf("unsupported classification = %+v", result)
+	}
+}
+
 func TestEngineStopsOnInvalidResolution(t *testing.T) {
 	resolverConfig := plan.DefaultResolverConfig()
 	resolverConfig.MaxAdvanceTicks = 1
@@ -181,21 +285,22 @@ func TestEngineStopsOnInvalidResolution(t *testing.T) {
 	}
 }
 
-func TestEngineRejectsUnsupportedActionBeforeRuntimeMutation(t *testing.T) {
+func TestEngineExecutesAndMapsCrash(t *testing.T) {
 	executor := &recordingExecutor{}
 	engine := newTestEngine(t, plan.DefaultResolverConfig(), executor, Config{})
 
 	result, err := engine.Run(context.Background(), plan.PlanSequence{Actions: []plan.PlanAction{{
 		Kind: plan.ActionCrash, Node: 1,
 	}}})
-	if !errors.Is(err, ErrUnsupported) || result.Status != StatusUnsupported {
-		t.Fatalf("result/error = %+v/%v, want unsupported failure", result, err)
+	if err != nil || result.Status != StatusCompleted {
+		t.Fatalf("result/error = %+v/%v, want completed", result, err)
 	}
-	if len(result.Actions.Actions) != 0 || len(result.Trace.Steps) != 0 || executor.calls != 0 {
-		t.Fatalf("unsupported action mutated runtime = %+v, calls=%d", result, executor.calls)
+	if len(result.Actions.Actions) != 1 || len(result.Trace.Steps) != 1 || executor.calls != 1 {
+		t.Fatalf("crash execution = %+v, calls=%d", result, executor.calls)
 	}
-	if result.Final.Nodes[0].Status != core.NodeRunning {
-		t.Fatalf("node was crashed before profile rejection: %+v", result.Final.Nodes[0])
+	if result.Final.Nodes[0].Status != core.NodeCrashed || len(result.ModelEvents) != 1 ||
+		result.ModelEvents[0].Name != "Remove" {
+		t.Fatalf("crash result = %+v", result)
 	}
 }
 
@@ -287,11 +392,32 @@ func newTestEngineWithOracles(t *testing.T, resolverConfig plan.ResolverConfig, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := plan.NewResolver(resolverConfig)
+	mapper, err := raftmodel.NewMapperWithConfig(raftmodel.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	mapper, err := raftmodel.NewMapperWithConfig(raftmodel.DefaultConfig())
+	return newTestEngineWithRuntimeAndMapper(t, runtime, resolverConfig, mapper, executor, engineConfig, checkers...)
+}
+
+func newTestEngineWithMapper(t *testing.T, resolverConfig plan.ResolverConfig, mapper model.Mapper, executor model.Executor, engineConfig Config) *Engine {
+	t.Helper()
+	adapterConfig := etcdraft.DefaultConfig()
+	adapterConfig.ElectionTick = 100
+	adapterConfig.Logger = &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)}
+	adapter, err := etcdraft.New(adapterConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{ExecutionID: "engine-test", Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newTestEngineWithRuntimeAndMapper(t, runtime, resolverConfig, mapper, executor, engineConfig)
+}
+
+func newTestEngineWithRuntimeAndMapper(t *testing.T, runtime *runtimepkg.Runtime, resolverConfig plan.ResolverConfig, mapper model.Mapper, executor model.Executor, engineConfig Config, checkers ...oracle.Checker) *Engine {
+	t.Helper()
+	resolver, err := plan.NewResolver(resolverConfig)
 	if err != nil {
 		t.Fatal(err)
 	}

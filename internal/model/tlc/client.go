@@ -91,7 +91,7 @@ func (c *Client) Execute(ctx context.Context, events []model.Event) ([]State, er
 	if err != nil {
 		return nil, fmt.Errorf("execute TLC trace: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	limited := io.LimitReader(response.Body, maxResponseBytes+1)
 	responseBody, err := io.ReadAll(limited)
 	if err != nil {

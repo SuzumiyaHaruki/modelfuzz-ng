@@ -14,22 +14,29 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 	running := 0
 	for _, id := range a.config.NodeIDs {
 		n := a.nodes[id]
-		semantic := make(map[string]any)
+		var semantic map[string]any
 		status := core.NodeCrashed
 		if n.running {
 			running++
 			status = core.NodeRunning
 			raftStatus := n.raw.BasicStatus()
 			semantic = map[string]any{
-				"role":       roleName(raftStatus.RaftState),
-				"term":       raftStatus.GetTerm(),
-				"vote":       raftStatus.GetVote(),
-				"leader":     raftStatus.Lead,
-				"commit":     raftStatus.GetCommit(),
-				"applied":    raftStatus.Applied,
-				"last_index": n.lastIndex,
-				"last_term":  n.lastTerm,
-				"log_digest": n.logDigest,
+				"role":                        roleName(raftStatus.RaftState),
+				"term":                        raftStatus.GetTerm(),
+				"vote":                        raftStatus.GetVote(),
+				"leader":                      raftStatus.Lead,
+				"commit":                      raftStatus.GetCommit(),
+				"applied":                     raftStatus.Applied,
+				"last_index":                  n.lastIndex,
+				"last_term":                   n.lastTerm,
+				"log_digest":                  n.logDigest,
+				"election_elapsed":            raftStatus.ElectionElapsed,
+				"election_timeout":            raftStatus.ElectionTimeout,
+				"randomized_election_timeout": raftStatus.RandomizedElectionTimeout,
+				"election_ticks_remaining":    ticksRemaining(raftStatus.RandomizedElectionTimeout, raftStatus.ElectionElapsed),
+				"heartbeat_elapsed":           raftStatus.HeartbeatElapsed,
+				"heartbeat_timeout":           raftStatus.HeartbeatTimeout,
+				"heartbeat_ticks_remaining":   ticksRemaining(raftStatus.HeartbeatTimeout, raftStatus.HeartbeatElapsed),
 			}
 		} else {
 			hardState, _, err := n.storage.InitialState()
@@ -79,6 +86,13 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 			"running_nodes": running,
 		},
 	}, nil
+}
+
+func ticksRemaining(timeout, elapsed int) int {
+	if timeout <= elapsed {
+		return 0
+	}
+	return timeout - elapsed
 }
 
 func committedCheckpoints(nodes []core.NodeObservation) []uint64 {

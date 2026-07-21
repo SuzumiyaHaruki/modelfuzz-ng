@@ -1,5 +1,9 @@
 # 基础 Raft 复制与提交实验（2026-07-20）
 
+> 本文记录当时的首版能力。2026-07-21 起模型已支持节点停机与恢复，原来的
+> `unsupported-crash.json` 预检结果已由
+> [`crash-restart-20260721.md`](crash-restart-20260721.md) 中的新实验取代。
+
 ## 目标
 
 验证一条 Plan 能连续经过 Plan Resolver、真实 etcd-raft、Trace、Raft Mapper
@@ -65,7 +69,7 @@ TLC 状态数不保证恒等于“事件数+1”，因为服务端状态抽象�
 自动测试另外覆盖了 MessageID、Effect 和 ObservationDigest 篡改。三类篡改均在
 第一处差异返回 `trace replay diverged`，且消息身份不一致时不会执行该 Action。
 
-## 模型能力预检
+## 当时的模型能力预检
 
 使用 `unsupported-crash.json` 请求 crash 节点 1。Engine 返回
 `unsupported_by_model`，Concrete Action 和 Trace Step 均为 0；最终 Observation

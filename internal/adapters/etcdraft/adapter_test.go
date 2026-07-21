@@ -102,6 +102,86 @@ func TestAdapterForceElectionAndDeliverVotesThroughRuntime(t *testing.T) {
 	findMessage(t, leaderResult.Observation, "MsgApp", 1, 2)
 }
 
+func TestAdapterForwardsFollowerRequestToKnownLeader(t *testing.T) {
+	r := newTestRuntime(t, testConfig(1, 2, 3))
+	ctx := context.Background()
+	timeout, err := r.Execute(ctx, core.Action{Kind: core.ActionTimeout, Node: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	voteResult := deliverObserved(t, r, findMessage(t, timeout.Observation, "MsgVote", 1, 2))
+	leaderResult := deliverObserved(t, r, findMessage(t, voteResult.Observation, "MsgVoteResp", 2, 1))
+	appendResult := deliverObserved(t, r, findMessage(t, leaderResult.Observation, "MsgApp", 1, 2))
+	if appendResult.Observation.Nodes[1].Semantic["leader"] != uint64(1) {
+		t.Fatalf("follower does not know leader: %+v", appendResult.Observation.Nodes[1].Semantic)
+	}
+
+	forwarded, err := r.Execute(ctx, core.Action{Kind: core.ActionRequest, Node: 2, Request: []byte("1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, effect := range forwarded.Record.Effects {
+		if effect.Kind == core.EffectModelEvent && effect.ModelEvent.Name == proposalDroppedEvent {
+			t.Fatalf("request with known leader was dropped: %+v", forwarded.Record.Effects)
+		}
+	}
+	proposal := findMessage(t, forwarded.Observation, "MsgProp", 2, 1)
+	beforeIndex := forwarded.Observation.Nodes[0].Semantic["last_index"].(uint64)
+	accepted := deliverObserved(t, r, proposal)
+	afterIndex := accepted.Observation.Nodes[0].Semantic["last_index"].(uint64)
+	if afterIndex != beforeIndex+1 {
+		t.Fatalf("leader last index = %d, want %d after forwarded proposal", afterIndex, beforeIndex+1)
+	}
+}
+
+func TestAdapterExposesAndAdvancesRaftTimerState(t *testing.T) {
+	r := newTestRuntime(t, testConfig(1))
+	initial, err := r.CurrentObservation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	semantic := initial.Nodes[0].Semantic
+	remaining, ok := semantic["election_ticks_remaining"].(int)
+	if !ok || remaining <= 0 || semantic["election_elapsed"] != 0 || semantic["election_timeout"] != 100 {
+		t.Fatalf("initial timer state = %+v", semantic)
+	}
+
+	oneTick, err := r.Execute(context.Background(), core.Action{Kind: core.ActionAdvanceTime, TargetTime: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterOne := oneTick.Observation.Nodes[0].Semantic
+	if afterOne["election_elapsed"] != 1 || afterOne["election_ticks_remaining"] != remaining-1 {
+		t.Fatalf("timer after one tick = %+v, initial remaining=%d", afterOne, remaining)
+	}
+
+	timeout, err := r.Execute(context.Background(), core.Action{Kind: core.ActionAdvanceTime, TargetTime: core.LogicalTime(remaining)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundNatural := false
+	for _, effect := range timeout.Record.Effects {
+		if effect.Kind == core.EffectTimerFired && effect.TimerFired.Node == 1 && effect.TimerFired.Source == core.TimerFireNatural {
+			foundNatural = true
+		}
+	}
+	if !foundNatural || timeout.Observation.Nodes[0].Semantic["term"] != uint64(1) {
+		t.Fatalf("natural timeout effects/observation = %+v / %+v", timeout.Record.Effects, timeout.Observation.Nodes[0])
+	}
+}
+
+func TestAdapterRecordsProposalDropWithoutFailingStep(t *testing.T) {
+	r := newTestRuntime(t, testConfig(1, 2, 3))
+	result, err := r.Execute(context.Background(), core.Action{Kind: core.ActionRequest, Node: 2, Request: []byte("1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Record.Effects) != 1 || result.Record.Effects[0].Kind != core.EffectModelEvent ||
+		result.Record.Effects[0].ModelEvent.Name != proposalDroppedEvent {
+		t.Fatalf("proposal drop effects = %+v", result.Record.Effects)
+	}
+}
+
 func TestAdapterSingleNodeCommitCrashAndRestart(t *testing.T) {
 	r := newTestRuntime(t, testConfig(1))
 	ctx := context.Background()
