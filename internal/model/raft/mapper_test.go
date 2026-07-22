@@ -394,6 +394,43 @@ func TestMapperTreatsIgnoredMultiEntryAppendAsSingleStutter(t *testing.T) {
 	}
 }
 
+func TestMapperTreatsAppendBehindCommitAsNilAppend(t *testing.T) {
+	mapper := raftmodel.NewMapper()
+	record := deliveredRecord("MsgApp", []map[string]any{
+		{"Term": uint64(1), "Data": "1"},
+		{"Term": uint64(1), "Data": "2"},
+		{"Term": uint64(1), "Data": "3"},
+	}, false)
+	record.Effects[0].ModelEvent.Params["index"] = uint64(1)
+	record.Effects[0].ModelEvent.Params["log_term"] = uint64(1)
+	for index := range record.NodesBefore {
+		if record.NodesBefore[index].ID != 2 {
+			continue
+		}
+		record.NodesBefore[index].Semantic["last_index"] = uint64(3)
+		record.NodesBefore[index].Semantic["last_term"] = uint64(1)
+		record.NodesBefore[index].Semantic["commit"] = uint64(2)
+		record.NodesAfter[index].Semantic["last_index"] = uint64(3)
+		record.NodesAfter[index].Semantic["last_term"] = uint64(1)
+		record.NodesAfter[index].Semantic["commit"] = uint64(2)
+	}
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "DeliverMessage")
+	if entries := events[0].Params["entries"].([]map[string]any); len(entries) != 0 {
+		t.Fatalf("entries = %+v, want nil append", entries)
+	}
+	if events[0].Params["index"] != uint64(0) || events[0].Params["commit"] != uint64(2) {
+		t.Fatalf("nil append params = %+v", events[0].Params)
+	}
+}
+
 func deliveredRecord(messageType string, entries []map[string]any, rejected bool) core.StepRecord {
 	params := map[string]any{
 		"type": messageType, "from": uint64(1), "to": uint64(2),

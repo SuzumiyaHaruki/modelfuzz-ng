@@ -7,9 +7,9 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 )
 
-// Version 6 将完整 Corpus 条目移出 checkpoint，改由 corpus.jsonl 追加保存。
-// checkpoint 只保留覆盖键、Corpus 水位、可恢复调度状态和增量汇总。
-const CheckpointVersion uint32 = 6
+// Version 7 在 v6 的紧凑 Corpus 水位上增加语义状态与语义转移覆盖，确保
+// 中断恢复后 Corpus 准入决策与不中断执行一致。
+const CheckpointVersion uint32 = 7
 
 type EventKind string
 
@@ -159,11 +159,21 @@ func (c Checkpoint) Validate(config Config, fingerprint string) error {
 	if err := validateUniqueInt64s(c.Corpus.CoverageKeys); err != nil {
 		return fmt.Errorf("checkpoint corpus coverage: %w", err)
 	}
+	if err := validateUniqueInt64s(c.Corpus.SemanticStateKeys); err != nil {
+		return fmt.Errorf("checkpoint corpus semantic-state coverage: %w", err)
+	}
+	if err := validateUniqueInt64s(c.Corpus.SemanticTransitionKeys); err != nil {
+		return fmt.Errorf("checkpoint corpus semantic-transition coverage: %w", err)
+	}
 	if c.Aggregation.Report.CorpusEntries != c.Corpus.EntryCount {
 		return fmt.Errorf("checkpoint summary and corpus entry counts differ")
 	}
 	if c.Aggregation.Report.UniqueModelStates != len(c.Aggregation.ModelStateKeys) {
 		return fmt.Errorf("checkpoint aggregate model-state count is inconsistent")
+	}
+	if c.Aggregation.Report.UniqueSemanticStates != len(c.Corpus.SemanticStateKeys) ||
+		c.Aggregation.Report.UniqueSemanticTransitions != len(c.Corpus.SemanticTransitionKeys) {
+		return fmt.Errorf("checkpoint semantic coverage counters are inconsistent")
 	}
 	modelStates := make(map[int64]struct{}, len(c.Aggregation.ModelStateKeys))
 	for _, key := range c.Aggregation.ModelStateKeys {

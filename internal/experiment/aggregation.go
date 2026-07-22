@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
 )
 
@@ -33,8 +34,12 @@ func (s AggregationSnapshot) Validate(config Config, completed int) error {
 	}
 	if s.Report.GeneratedMutations < 0 || s.Report.AdmittedMutations < 0 || s.Report.DiscardedMutations < 0 ||
 		s.Report.ExecutedMutations > s.Report.AdmittedMutations || s.Report.PeakReadyCandidates < 0 ||
-		s.Report.PeakReadyCandidates > config.MaxReadyCandidates {
+		s.Report.PeakReadyCandidates > config.MaxReadyCandidates || s.Report.UniqueSemanticStates < 0 ||
+		s.Report.UniqueSemanticTransitions < 0 {
 		return fmt.Errorf("summary mutation queue counters are invalid")
+	}
+	if err := validateCorpusAdmissions(s.Report); err != nil {
+		return err
 	}
 	if err := validateUniqueInts(s.CompletedRunIndices, 0, config.Runs); err != nil {
 		return fmt.Errorf("completed run indices: %w", err)
@@ -163,8 +168,13 @@ func (a *reportAccumulator) addRun(run Run, corpusEntries int, elapsedMillis int
 	}
 	if run.Source != "" {
 		source.NewModelStates += len(run.NewStateKeys)
+		source.NewSemanticStates += run.NewSemanticStates
+		source.NewSemanticTransitions += run.NewSemanticTransitions
 		r.NoveltyBySource[run.Source] = source
 	}
+	r.UniqueSemanticStates += run.NewSemanticStates
+	r.UniqueSemanticTransitions += run.NewSemanticTransitions
+	addCorpusAdmission(r, run.CorpusAdmission)
 	if run.CandidateKind == CandidatePeriodicRandom {
 		r.PeriodicSeedExecutions++
 	}
@@ -209,6 +219,7 @@ func (a *reportAccumulator) addRun(run Run, corpusEntries int, elapsedMillis int
 	r.CorpusEntries, r.RetainedRuns = corpusEntries, corpusEntries
 	point := CoveragePoint{
 		CompletedRuns: r.CompletedRuns, TotalActions: r.TotalActions, UniqueModelStates: r.UniqueModelStates,
+		UniqueSemanticStates: r.UniqueSemanticStates, UniqueSemanticTransitions: r.UniqueSemanticTransitions,
 		UniquePlans: r.UniquePlans, UniqueTraces: r.UniqueTraces, UniqueModelStatePaths: r.UniqueModelStatePaths,
 		CorpusEntries: corpusEntries, ElapsedMillis: elapsedMillis,
 	}
@@ -223,7 +234,42 @@ func shouldKeepCoveragePoint(existing []CoveragePoint, point CoveragePoint) bool
 		return true
 	}
 	last := existing[len(existing)-1]
-	return point.UniqueModelStates != last.UniqueModelStates || point.CorpusEntries != last.CorpusEntries
+	return point.UniqueModelStates != last.UniqueModelStates || point.UniqueSemanticStates != last.UniqueSemanticStates ||
+		point.UniqueSemanticTransitions != last.UniqueSemanticTransitions || point.CorpusEntries != last.CorpusEntries
+}
+
+func validateCorpusAdmissions(report Report) error {
+	known := map[string]struct{}{
+		string(corpus.AdmissionRetainedRaw):                        {},
+		string(corpus.AdmissionRetainedSemanticState):              {},
+		string(corpus.AdmissionRetainedSemanticTransition):         {},
+		string(corpus.AdmissionRetainedSemanticStateAndTransition): {},
+		string(corpus.AdmissionRejectedRawThreshold):               {},
+		string(corpus.AdmissionRejectedNoSemanticNovelty):          {},
+	}
+	total := 0
+	for reason, count := range report.CorpusAdmissionCounts {
+		if _, exists := known[reason]; !exists || count < 0 {
+			return fmt.Errorf("summary contains invalid corpus admission %q=%d", reason, count)
+		}
+		total += count
+	}
+	counts := report.CorpusAdmissionCounts
+	retained := counts[string(corpus.AdmissionRetainedRaw)] + counts[string(corpus.AdmissionRetainedSemanticState)] +
+		counts[string(corpus.AdmissionRetainedSemanticTransition)] + counts[string(corpus.AdmissionRetainedSemanticStateAndTransition)]
+	state := counts[string(corpus.AdmissionRetainedSemanticState)] + counts[string(corpus.AdmissionRetainedSemanticStateAndTransition)]
+	transition := counts[string(corpus.AdmissionRetainedSemanticTransition)] + counts[string(corpus.AdmissionRetainedSemanticStateAndTransition)]
+	if total > report.Succeeded || retained != report.CorpusEntries ||
+		report.RejectedRawThreshold != counts[string(corpus.AdmissionRejectedRawThreshold)] ||
+		report.RejectedNoSemanticNovelty != counts[string(corpus.AdmissionRejectedNoSemanticNovelty)] ||
+		report.RetainedBySemanticState != state || report.RetainedBySemanticTransition != transition {
+		return fmt.Errorf("summary corpus admission counters are inconsistent")
+	}
+	expectedDensity := noveltyPer100Actions(report.UniqueSemanticStates, report.UniqueSemanticTransitions, report.TotalActions)
+	if report.SemanticNoveltyPer100Actions != expectedDensity {
+		return fmt.Errorf("summary semantic novelty density is inconsistent")
+	}
+	return nil
 }
 
 func (a *reportAccumulator) finalize(corpusEntries int, elapsedMillis int64) Report {
@@ -236,6 +282,7 @@ func (a *reportAccumulator) finalize(corpusEntries int, elapsedMillis int64) Rep
 		r.ActionsPerSecond = float64(r.TotalActions) / seconds
 		r.RunsPerSecond = float64(r.CompletedRuns) / seconds
 	}
+	r.SemanticNoveltyPer100Actions = noveltyPer100Actions(r.UniqueSemanticStates, r.UniqueSemanticTransitions, r.TotalActions)
 	return *r
 }
 

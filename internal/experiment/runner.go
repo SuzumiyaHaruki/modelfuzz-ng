@@ -12,20 +12,28 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/mutation"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 )
 
 type Config struct {
-	Runs                   int   `json:"runs"`
-	BaseSeed               int64 `json:"base_seed"`
-	Parallelism            int   `json:"parallelism"`
-	InitialPopulation      int   `json:"initial_population"`
-	MutationsPerNewState   int   `json:"mutations_per_new_state"`
-	MaxMutationsPerCorpus  int   `json:"max_mutations_per_corpus_entry"`
-	RandomSeedInterval     int   `json:"random_seed_interval,omitempty"`
-	RandomSeedsPerInterval int   `json:"random_seeds_per_interval,omitempty"`
-	MaxReadyCandidates     int   `json:"max_ready_candidates"`
+	Runs                    int   `json:"runs"`
+	BaseSeed                int64 `json:"base_seed"`
+	Parallelism             int   `json:"parallelism"`
+	InitialPopulation       int   `json:"initial_population"`
+	MutationsPerNewState    int   `json:"mutations_per_new_state"`
+	MaxMutationsPerCorpus   int   `json:"max_mutations_per_corpus_entry"`
+	RandomSeedInterval      int   `json:"random_seed_interval,omitempty"`
+	RandomSeedsPerInterval  int   `json:"random_seeds_per_interval,omitempty"`
+	MaxReadyCandidates      int   `json:"max_ready_candidates"`
+	MinNewModelStates       int   `json:"min_new_model_states"`
+	SemanticCoverage        bool  `json:"semantic_coverage"`
+	LifecycleCooldown       int   `json:"lifecycle_cooldown"`
+	MaxCrashEpisodes        int   `json:"max_crash_episodes"`
+	CrashRestartPairPercent int   `json:"crash_restart_pair_percent"`
+	CrashWeight             int   `json:"crash_weight"`
+	RestartWeight           int   `json:"restart_weight"`
 }
 
 // Execute 必须为每次调用创建独立 Engine/Runtime。result 即使失败也应包含
@@ -63,9 +71,10 @@ type FeedbackExecute func(ctx context.Context, index int, seed int64, candidate 
 type Initializer func(ctx context.Context, count int, seed int64) ([]plan.PlanSequence, error)
 
 type FeedbackOptions struct {
-	InitializerName string
-	Initializer     Initializer
-	Mutator         mutation.Mutator
+	InitializerName   string
+	Initializer       Initializer
+	Mutator           mutation.Mutator
+	CoverageProjector func(states []model.State, events []model.Event) corpus.Projection
 	// Resume 恢复一个此前由同一 Config 产生的反馈实验。
 	Resume *Checkpoint
 	// ResumeCorpusEntries 是 corpus.jsonl 中 checkpoint 水位以前的完整条目。
@@ -81,39 +90,44 @@ type FeedbackOptions struct {
 type Run struct {
 	// omitempty 让尚未分配的固定槽位编码为 {}。这样 Runs 仍可按 index 直接
 	// 恢复，但大规模实验早期的 checkpoint 不会为每个未来运行写一套零值字段。
-	Completed            bool                     `json:"completed,omitempty"`
-	Index                int                      `json:"index"`
-	Seed                 int64                    `json:"seed,omitempty"`
-	Status               engine.Status            `json:"status,omitempty"`
-	Error                string                   `json:"error,omitempty"`
-	Succeeded            bool                     `json:"succeeded,omitempty"`
-	DurationMillis       int64                    `json:"duration_millis,omitempty"`
-	DurationMicros       int64                    `json:"duration_micros,omitempty"`
-	Actions              int                      `json:"actions,omitempty"`
-	Effects              int                      `json:"effects,omitempty"`
-	ModelEvents          int                      `json:"model_events,omitempty"`
-	ModelStates          int                      `json:"model_states,omitempty"`
-	OracleFindings       int                      `json:"oracle_findings,omitempty"`
-	BudgetExhausted      bool                     `json:"budget_exhausted,omitempty"`
-	StateKeys            []int64                  `json:"state_keys,omitempty"`
-	CandidateID          string                   `json:"candidate_id,omitempty"`
-	CandidateKind        CandidateKind            `json:"candidate_kind,omitempty"`
-	ParentID             string                   `json:"parent_id,omitempty"`
-	Source               string                   `json:"source,omitempty"`
-	Depth                int                      `json:"depth,omitempty"`
-	Retained             bool                     `json:"retained,omitempty"`
-	CorpusID             string                   `json:"corpus_id,omitempty"`
-	NewStateKeys         []int64                  `json:"new_state_keys,omitempty"`
-	Termination          engine.TerminationReason `json:"termination,omitempty"`
-	TerminationCode      string                   `json:"termination_code,omitempty"`
-	TerminationDetail    string                   `json:"termination_detail,omitempty"`
-	Metrics              *metrics.RunMetrics      `json:"metrics,omitempty"`
-	PlanDigest           string                   `json:"plan_digest,omitempty"`
-	TraceDigest          string                   `json:"trace_digest,omitempty"`
-	ModelStatePathDigest string                   `json:"model_state_path_digest,omitempty"`
-	NewPlan              bool                     `json:"new_plan,omitempty"`
-	NewTrace             bool                     `json:"new_trace,omitempty"`
-	NewModelStatePath    bool                     `json:"new_model_state_path,omitempty"`
+	Completed                    bool                     `json:"completed,omitempty"`
+	Index                        int                      `json:"index"`
+	Seed                         int64                    `json:"seed,omitempty"`
+	Status                       engine.Status            `json:"status,omitempty"`
+	Error                        string                   `json:"error,omitempty"`
+	Succeeded                    bool                     `json:"succeeded,omitempty"`
+	DurationMillis               int64                    `json:"duration_millis,omitempty"`
+	DurationMicros               int64                    `json:"duration_micros,omitempty"`
+	Actions                      int                      `json:"actions,omitempty"`
+	Effects                      int                      `json:"effects,omitempty"`
+	ModelEvents                  int                      `json:"model_events,omitempty"`
+	ModelStates                  int                      `json:"model_states,omitempty"`
+	OracleFindings               int                      `json:"oracle_findings,omitempty"`
+	BudgetExhausted              bool                     `json:"budget_exhausted,omitempty"`
+	StateKeys                    []int64                  `json:"state_keys,omitempty"`
+	CandidateID                  string                   `json:"candidate_id,omitempty"`
+	CandidateKind                CandidateKind            `json:"candidate_kind,omitempty"`
+	ParentID                     string                   `json:"parent_id,omitempty"`
+	Source                       string                   `json:"source,omitempty"`
+	Depth                        int                      `json:"depth,omitempty"`
+	Retained                     bool                     `json:"retained,omitempty"`
+	CorpusID                     string                   `json:"corpus_id,omitempty"`
+	NewStateKeys                 []int64                  `json:"new_state_keys,omitempty"`
+	NewRawStates                 int                      `json:"new_raw_states"`
+	NewSemanticStates            int                      `json:"new_semantic_states"`
+	NewSemanticTransitions       int                      `json:"new_semantic_transitions"`
+	CorpusAdmission              string                   `json:"corpus_admission"`
+	SemanticNoveltyPer100Actions float64                  `json:"semantic_novelty_per_100_actions"`
+	Termination                  engine.TerminationReason `json:"termination,omitempty"`
+	TerminationCode              string                   `json:"termination_code,omitempty"`
+	TerminationDetail            string                   `json:"termination_detail,omitempty"`
+	Metrics                      *metrics.RunMetrics      `json:"metrics,omitempty"`
+	PlanDigest                   string                   `json:"plan_digest,omitempty"`
+	TraceDigest                  string                   `json:"trace_digest,omitempty"`
+	ModelStatePathDigest         string                   `json:"model_state_path_digest,omitempty"`
+	NewPlan                      bool                     `json:"new_plan,omitempty"`
+	NewTrace                     bool                     `json:"new_trace,omitempty"`
+	NewModelStatePath            bool                     `json:"new_model_state_path,omitempty"`
 }
 
 // SourceNovelty 区分随机初始化、周期性随机注入、本地变异以及未来 LLM 来源
@@ -127,19 +141,23 @@ type SourceNovelty struct {
 	UniqueTracesDiscovered     int `json:"unique_traces_discovered"`
 	UniqueStatePathsDiscovered int `json:"unique_model_state_paths_discovered"`
 	NewModelStates             int `json:"new_model_states"`
+	NewSemanticStates          int `json:"new_semantic_states"`
+	NewSemanticTransitions     int `json:"new_semantic_transitions"`
 }
 
 // CoveragePoint 记录覆盖随实际完成顺序增长的曲线。并发运行时 CompletedRuns
 // 与 Run.Index 不一定相同，因此不从最终 Runs 数组事后推测。
 type CoveragePoint struct {
-	CompletedRuns         int   `json:"completed_runs"`
-	TotalActions          int   `json:"total_actions"`
-	UniqueModelStates     int   `json:"unique_model_states"`
-	UniquePlans           int   `json:"unique_plans"`
-	UniqueTraces          int   `json:"unique_traces"`
-	UniqueModelStatePaths int   `json:"unique_model_state_paths"`
-	CorpusEntries         int   `json:"corpus_entries"`
-	ElapsedMillis         int64 `json:"elapsed_millis"`
+	CompletedRuns             int   `json:"completed_runs"`
+	TotalActions              int   `json:"total_actions"`
+	UniqueModelStates         int   `json:"unique_model_states"`
+	UniqueSemanticStates      int   `json:"unique_semantic_states"`
+	UniqueSemanticTransitions int   `json:"unique_semantic_transitions"`
+	UniquePlans               int   `json:"unique_plans"`
+	UniqueTraces              int   `json:"unique_traces"`
+	UniqueModelStatePaths     int   `json:"unique_model_state_paths"`
+	CorpusEntries             int   `json:"corpus_entries"`
+	ElapsedMillis             int64 `json:"elapsed_millis"`
 }
 
 type Report struct {
@@ -155,9 +173,17 @@ type Report struct {
 	TotalEffects                 int                       `json:"total_effects"`
 	TotalModelEvents             int                       `json:"total_model_events"`
 	UniqueModelStates            int                       `json:"unique_model_states"`
+	UniqueSemanticStates         int                       `json:"unique_semantic_states"`
+	UniqueSemanticTransitions    int                       `json:"unique_semantic_transitions"`
+	SemanticNoveltyPer100Actions float64                   `json:"semantic_novelty_per_100_actions"`
 	Feedback                     bool                      `json:"feedback"`
 	CorpusEntries                int                       `json:"corpus_entries"`
 	RetainedRuns                 int                       `json:"retained_runs"`
+	RejectedRawThreshold         int                       `json:"rejected_raw_threshold"`
+	RejectedNoSemanticNovelty    int                       `json:"rejected_no_semantic_novelty"`
+	RetainedBySemanticState      int                       `json:"retained_by_semantic_state"`
+	RetainedBySemanticTransition int                       `json:"retained_by_semantic_transition"`
+	CorpusAdmissionCounts        map[string]int            `json:"corpus_admission_counts"`
 	InitialExecutions            int                       `json:"initial_executions"`
 	GeneratedMutations           int                       `json:"generated_mutations"`
 	AdmittedMutations            int                       `json:"admitted_mutations"`
@@ -233,7 +259,13 @@ func New(config Config) (*Runner, error) {
 	if config.MaxReadyCandidates == 0 {
 		config.MaxReadyCandidates = 4096
 	}
-	if config.InitialPopulation < 0 || config.MutationsPerNewState < 0 || config.MaxMutationsPerCorpus < 0 || config.MaxReadyCandidates < 0 {
+	if config.MinNewModelStates == 0 {
+		config.MinNewModelStates = 1
+	}
+	if config.MaxCrashEpisodes == 0 {
+		config.MaxCrashEpisodes = 4
+	}
+	if config.InitialPopulation < 0 || config.MutationsPerNewState < 0 || config.MaxMutationsPerCorpus < 0 || config.MaxReadyCandidates < 0 || config.MinNewModelStates < 0 || config.LifecycleCooldown < 0 || config.MaxCrashEpisodes < 0 || config.CrashRestartPairPercent < 0 || config.CrashRestartPairPercent > 100 || config.CrashWeight < 0 || config.RestartWeight < 0 {
 		return nil, fmt.Errorf("feedback experiment bounds must be non-negative")
 	}
 	if config.RandomSeedInterval < 0 || config.RandomSeedsPerInterval < 0 {
@@ -323,7 +355,8 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 		options.CheckpointEvery = 1
 	}
 	accumulator := newReportAccumulator(r.config)
-	collection := corpus.New()
+	corpusConfig := corpus.Config{MinNewModelStates: r.config.MinNewModelStates, RequireSemanticNovelty: r.config.SemanticCoverage}
+	collection := corpus.NewWithConfig(corpusConfig)
 	ready := make([]Candidate, 0)
 	rerun := make([]ScheduledCandidate, 0)
 	pending := make(map[string]mutation.Request)
@@ -341,7 +374,7 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 			return accumulator.finalize(collection.Len(), 0), collection.Checkpoint(), err
 		}
 		var err error
-		collection, err = corpus.RestoreCheckpoint(options.Resume.Corpus, options.ResumeCorpusEntries)
+		collection, err = corpus.RestoreCheckpointWithConfig(options.Resume.Corpus, options.ResumeCorpusEntries, corpusConfig)
 		if err != nil {
 			return accumulator.finalize(0, 0), corpus.Checkpoint{}, err
 		}
@@ -534,12 +567,26 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 				accumulator.report.InitialExecutions++
 			}
 			if run.Succeeded && len(done.execution.Result.ModelStates) > 0 {
+				projection := defaultCoverageProjection(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
+				if options.CoverageProjector != nil {
+					projection = options.CoverageProjector(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
+				}
 				entry, retained, corpusErr := collection.Consider(corpus.Input{
 					ParentID: done.candidate.ParentID, Source: done.candidate.Source,
 					Depth: done.candidate.Depth, RunIndex: done.index, Seed: done.seed,
-					Plan:   done.execution.Plan,
-					States: done.execution.Result.ModelStates,
+					Plan:                   done.execution.Plan,
+					States:                 done.execution.Result.ModelStates,
+					SemanticStateKeys:      projection.StateKeys,
+					SemanticTransitionKeys: projection.TransitionKeys,
 				})
+				run.NewStateKeys = append([]int64(nil), entry.NewStateKeys...)
+				run.NewRawStates = len(entry.NewStateKeys)
+				run.NewSemanticStates = len(entry.NewSemanticStateKeys)
+				run.NewSemanticTransitions = len(entry.NewSemanticTransitionKeys)
+				run.CorpusAdmission = string(entry.AdmissionReason)
+				if run.Actions > 0 {
+					run.SemanticNoveltyPer100Actions = float64(run.NewSemanticStates+run.NewSemanticTransitions) * 100 / float64(run.Actions)
+				}
 				if corpusErr != nil {
 					run.Error = joinErrorText(run.Error, corpusErr.Error())
 					run.Succeeded = false
@@ -553,8 +600,7 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 						}
 					}
 					run.Retained, run.CorpusID = true, entry.ID
-					run.NewStateKeys = append([]int64(nil), entry.NewStateKeys...)
-					count := mutationCount(len(entry.NewStateKeys), r.config.MutationsPerNewState, r.config.MaxMutationsPerCorpus)
+					count := mutationCount(max(1, len(entry.NewSemanticStateKeys)+len(entry.NewSemanticTransitionKeys)), r.config.MutationsPerNewState, r.config.MaxMutationsPerCorpus)
 					// 已经发出的执行占满总预算时不再启动没有机会被执行的变异，
 					// 对 LLM mutator 尤其可以避免一次无意义的远程调用。
 					if count > 0 && nextRunIndex < r.config.Runs {
@@ -704,6 +750,19 @@ func mutationCount(newStates, perState, maximum int) int {
 	return min(newStates*perState, maximum)
 }
 
+func defaultCoverageProjection(states []model.State, _ []model.Event) corpus.Projection {
+	keys := make(map[int64]struct{}, len(states))
+	for _, state := range states {
+		keys[state.Key] = struct{}{}
+	}
+	result := corpus.Projection{StateKeys: make([]int64, 0, len(keys))}
+	for key := range keys {
+		result.StateKeys = append(result.StateKeys, key)
+	}
+	sort.Slice(result.StateKeys, func(i, j int) bool { return result.StateKeys[i] < result.StateKeys[j] })
+	return result
+}
+
 func joinErrorText(existing, added string) string {
 	if existing == "" {
 		return added
@@ -748,6 +807,10 @@ func summarizeResult(index int, seed int64, result engine.Result, err error, dur
 func aggregate(report Report) Report {
 	report.Succeeded, report.Failed, report.CompletedRuns = 0, 0, 0
 	report.TotalActions, report.TotalEffects, report.TotalModelEvents, report.UniqueModelStates = 0, 0, 0, 0
+	report.UniqueSemanticStates, report.UniqueSemanticTransitions = 0, 0
+	report.RejectedRawThreshold, report.RejectedNoSemanticNovelty = 0, 0
+	report.RetainedBySemanticState, report.RetainedBySemanticTransition = 0, 0
+	report.CorpusAdmissionCounts = make(map[string]int)
 	report.StatusCounts = make(map[string]int)
 	report.ActionCounts = make(map[string]int)
 	report.EffectCounts = make(map[string]int)
@@ -811,8 +874,13 @@ func aggregate(report Report) Report {
 		}
 		if run.Source != "" {
 			source.NewModelStates += len(run.NewStateKeys)
+			source.NewSemanticStates += run.NewSemanticStates
+			source.NewSemanticTransitions += run.NewSemanticTransitions
 			report.NoveltyBySource[run.Source] = source
 		}
+		report.UniqueSemanticStates += run.NewSemanticStates
+		report.UniqueSemanticTransitions += run.NewSemanticTransitions
+		addCorpusAdmission(&report, run.CorpusAdmission)
 		if run.CandidateKind == CandidatePeriodicRandom {
 			report.PeriodicSeedExecutions++
 		}
@@ -885,6 +953,7 @@ func aggregate(report Report) Report {
 	} else {
 		report.ActionsPerSecond, report.RunsPerSecond = 0, 0
 	}
+	report.SemanticNoveltyPer100Actions = noveltyPer100Actions(report.UniqueSemanticStates, report.UniqueSemanticTransitions, report.TotalActions)
 	return report
 }
 
@@ -897,9 +966,37 @@ func newReport(config Config, feedback bool) Report {
 		DecisionCountsBySource: make(map[string]map[string]int),
 		ModelEventCounts:       make(map[string]int), OracleCounts: make(map[string]int),
 		TimerFireCounts: make(map[string]int), FailureCounts: make(map[string]int), TerminationCounts: make(map[string]int),
-		CoverageTimeline: make([]CoveragePoint, 0, config.Runs),
-		NoveltyBySource:  make(map[string]SourceNovelty),
+		CoverageTimeline:      make([]CoveragePoint, 0, config.Runs),
+		NoveltyBySource:       make(map[string]SourceNovelty),
+		CorpusAdmissionCounts: make(map[string]int),
 	}
+}
+
+func addCorpusAdmission(report *Report, reason string) {
+	if reason == "" {
+		return
+	}
+	report.CorpusAdmissionCounts[reason]++
+	switch corpus.AdmissionReason(reason) {
+	case corpus.AdmissionRejectedRawThreshold:
+		report.RejectedRawThreshold++
+	case corpus.AdmissionRejectedNoSemanticNovelty:
+		report.RejectedNoSemanticNovelty++
+	case corpus.AdmissionRetainedSemanticState:
+		report.RetainedBySemanticState++
+	case corpus.AdmissionRetainedSemanticTransition:
+		report.RetainedBySemanticTransition++
+	case corpus.AdmissionRetainedSemanticStateAndTransition:
+		report.RetainedBySemanticState++
+		report.RetainedBySemanticTransition++
+	}
+}
+
+func noveltyPer100Actions(states, transitions, actions int) float64 {
+	if actions == 0 {
+		return 0
+	}
+	return float64(states+transitions) * 100 / float64(actions)
 }
 
 func newFeedbackReport(config Config) Report {
@@ -943,8 +1040,10 @@ func coveragePoint(report Report, collection *corpus.Corpus, completed int, elap
 		remember(traces, run.TraceDigest)
 		remember(statePaths, run.ModelStatePathDigest)
 	}
+	semanticStates, semanticTransitions := collection.SemanticCoverageLen()
 	return CoveragePoint{
 		CompletedRuns: completed, TotalActions: actions, UniqueModelStates: len(states),
+		UniqueSemanticStates: semanticStates, UniqueSemanticTransitions: semanticTransitions,
 		UniquePlans: len(plans), UniqueTraces: len(traces), UniqueModelStatePaths: len(statePaths),
 		CorpusEntries: collection.Len(), ElapsedMillis: elapsedMillis,
 	}

@@ -26,22 +26,25 @@ type RandomWeights struct {
 
 // RandomConfig 把随机基线限制在当前有界 Raft Profile 内。
 type RandomConfig struct {
-	NodeIDs         []core.NodeID `json:"node_ids"`
-	MaxValue        int           `json:"max_value"`
-	MaxLogIndex     uint64        `json:"max_log_index"`
-	LargestTerm     uint64        `json:"largest_term"`
-	MaxCrashed      int           `json:"max_crashed"`
-	TimeoutCooldown int           `json:"timeout_cooldown"`
-	Weights         RandomWeights `json:"weights"`
+	NodeIDs           []core.NodeID `json:"node_ids"`
+	MaxValue          int           `json:"max_value"`
+	MaxLogIndex       uint64        `json:"max_log_index"`
+	LargestTerm       uint64        `json:"largest_term"`
+	MaxCrashed        int           `json:"max_crashed"`
+	TimeoutCooldown   int           `json:"timeout_cooldown"`
+	LifecycleCooldown int           `json:"lifecycle_cooldown"`
+	MaxCrashEpisodes  int           `json:"max_crash_episodes"`
+	Weights           RandomWeights `json:"weights"`
 }
 
 func DefaultRandomConfig() RandomConfig {
 	return RandomConfig{
 		NodeIDs: []core.NodeID{1, 2, 3}, MaxValue: 5, MaxLogIndex: 5,
 		LargestTerm: 5, MaxCrashed: 1, TimeoutCooldown: 4,
+		LifecycleCooldown: 48, MaxCrashEpisodes: 4,
 		Weights: RandomWeights{
 			Deliver: 60, Drop: 5, Duplicate: 5, Timeout: 5, Request: 15,
-			AdvanceTicks: 5, Crash: 5, Restart: 10,
+			AdvanceTicks: 5, Crash: 1, Restart: 10,
 		},
 	}
 }
@@ -49,11 +52,13 @@ func DefaultRandomConfig() RandomConfig {
 // Random 是确定性的在线随机基线。同一个 seed 和同一串 Observation 必须产生
 // 完全相同的动作序列。
 type Random struct {
-	config    RandomConfig
-	seed      int64
-	random    *rand.Rand
-	generated []plan.PlanAction
-	profile   *raftmodel.Mapper
+	config              RandomConfig
+	seed                int64
+	random              *rand.Rand
+	generated           []plan.PlanAction
+	crashEpisodes       int
+	lastLifecycleAction int
+	profile             *raftmodel.Mapper
 }
 
 func NewRandom(seed int64, config RandomConfig) (*Random, error) {
@@ -69,7 +74,10 @@ func NewRandom(seed int64, config RandomConfig) (*Random, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create random policy profile: %w", err)
 	}
-	return &Random{config: config, seed: seed, random: rand.New(rand.NewSource(seed)), profile: profile}, nil
+	return &Random{
+		config: config, seed: seed, random: rand.New(rand.NewSource(seed)),
+		lastLifecycleAction: -1, profile: profile,
+	}, nil
 }
 
 func (p *Random) Reset(initial core.Observation) error {
@@ -81,6 +89,8 @@ func (p *Random) Reset(initial core.Observation) error {
 	}
 	p.random = rand.New(rand.NewSource(p.seed))
 	p.generated = p.generated[:0]
+	p.crashEpisodes = 0
+	p.lastLifecycleAction = -1
 	return nil
 }
 
@@ -108,6 +118,13 @@ func (p *Random) Next(observation core.Observation) (plan.PlanAction, bool, erro
 		}
 		if draw < group.weight {
 			action := group.actions[p.random.Intn(len(group.actions))].Copy()
+			switch action.Kind {
+			case plan.ActionCrash:
+				p.crashEpisodes++
+				p.lastLifecycleAction = len(p.generated)
+			case plan.ActionRestart:
+				p.lastLifecycleAction = len(p.generated)
+			}
 			p.generated = append(p.generated, action.Copy())
 			return action, true, nil
 		}
@@ -170,7 +187,7 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 		if node.Status != core.NodeRunning {
 			continue
 		}
-		if runningCount > 1 && crashedCount < p.config.MaxCrashed {
+		if runningCount > 1 && crashedCount < p.config.MaxCrashed && p.crashAllowed() {
 			crashes = append(crashes, plan.PlanAction{Kind: plan.ActionCrash, Node: node.ID})
 		}
 		role, _ := node.Semantic["role"].(string)
@@ -226,6 +243,15 @@ func (p *Random) timeoutCoolingDown() bool {
 	return false
 }
 
+// crashAllowed 同时限制一条在线轨迹中的故障总量和相邻故障周期距离。
+// Restart 不受 cooldown 限制，避免已经停止的节点被策略长时间搁置。
+func (p *Random) crashAllowed() bool {
+	if p.crashEpisodes >= p.config.MaxCrashEpisodes {
+		return false
+	}
+	return p.lastLifecycleAction < 0 || len(p.generated)-p.lastLifecycleAction-1 >= p.config.LifecycleCooldown
+}
+
 func observedNodeRunning(observation core.Observation, id core.NodeID) bool {
 	for _, node := range observation.Nodes {
 		if node.ID == id {
@@ -275,7 +301,7 @@ func messagePlanAction(kind plan.ActionKind, message core.MessageObservation) pl
 }
 
 func validateRandomConfig(config RandomConfig) error {
-	if len(config.NodeIDs) == 0 || config.MaxValue <= 0 || config.MaxLogIndex == 0 || config.LargestTerm == 0 || config.MaxCrashed <= 0 || config.TimeoutCooldown < 0 {
+	if len(config.NodeIDs) == 0 || config.MaxValue <= 0 || config.MaxLogIndex == 0 || config.LargestTerm == 0 || config.MaxCrashed <= 0 || config.TimeoutCooldown < 0 || config.LifecycleCooldown < 0 || config.MaxCrashEpisodes <= 0 {
 		return fmt.Errorf("random policy bounds must be positive")
 	}
 	seen := make(map[core.NodeID]struct{}, len(config.NodeIDs))

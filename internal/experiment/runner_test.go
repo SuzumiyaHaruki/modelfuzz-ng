@@ -134,6 +134,68 @@ func TestFeedbackRunnerRetainsCoverageAndExecutesMutations(t *testing.T) {
 	}
 }
 
+func TestFeedbackRunnerReportsCorpusAdmissionAndNoveltyDensity(t *testing.T) {
+	runner, err := New(Config{
+		Runs: 3, BaseSeed: 15, Parallelism: 1, InitialPopulation: 3,
+		MinNewModelStates: 2, SemanticCoverage: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := make([]Run, 0, 3)
+	project := func(states []model.State, _ []model.Event) corpus.Projection {
+		switch states[0].Key {
+		case 1, 2:
+			return corpus.Projection{StateKeys: []int64{11}}
+		default:
+			return corpus.Projection{StateKeys: []int64{12}, TransitionKeys: []int64{21}}
+		}
+	}
+	report, _, err := runner.RunFeedback(context.Background(), FeedbackOptions{
+		Mutator: failingMutator{}, CoverageProjector: project,
+		Hooks: Hooks{OnRunComplete: func(completion Completion) error {
+			runs = append(runs, completion.Run)
+			return nil
+		}},
+	}, func(_ context.Context, index int, _ int64, _ Candidate) (FeedbackExecution, error) {
+		keys := [][]int64{{1}, {2, 3}, {4, 5}}[index]
+		states := make([]model.State, len(keys))
+		for stateIndex, key := range keys {
+			states[stateIndex] = model.State{Key: key}
+		}
+		return FeedbackExecution{Plan: plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}}, Result: engine.Result{
+			Status:      engine.StatusCompleted,
+			Actions:     core.ActionSequence{Actions: []core.Action{{Kind: core.ActionTimeout}, {Kind: core.ActionAdvanceTime}}},
+			ModelStates: states,
+			Trace:       core.Trace{Version: core.CurrentTraceVersion, ExecutionID: core.ExecutionID(fmt.Sprintf("admission-%d", index))},
+		}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 3 || runs[0].CorpusAdmission != string(corpus.AdmissionRejectedRawThreshold) ||
+		runs[1].CorpusAdmission != string(corpus.AdmissionRejectedNoSemanticNovelty) ||
+		runs[2].CorpusAdmission != string(corpus.AdmissionRetainedSemanticStateAndTransition) {
+		t.Fatalf("run admissions = %+v", runs)
+	}
+	if runs[0].NewRawStates != 1 || runs[2].NewSemanticStates != 1 || runs[2].NewSemanticTransitions != 1 ||
+		runs[2].SemanticNoveltyPer100Actions != 100 {
+		t.Fatalf("per-run novelty = %+v", runs)
+	}
+	if report.RejectedRawThreshold != 1 || report.RejectedNoSemanticNovelty != 1 ||
+		report.RetainedBySemanticState != 1 || report.RetainedBySemanticTransition != 1 || report.CorpusEntries != 1 {
+		t.Fatalf("corpus admission report = %+v", report)
+	}
+	if report.UniqueSemanticStates != 2 || report.UniqueSemanticTransitions != 1 || report.SemanticNoveltyPer100Actions != 50 {
+		t.Fatalf("semantic novelty report = %+v", report)
+	}
+	statistics := report.Statistics()
+	if statistics.CorpusAdmissionCounts[string(corpus.AdmissionRejectedRawThreshold)] != 1 ||
+		statistics.SemanticNoveltyPer100Actions != 50 {
+		t.Fatalf("statistics = %+v", statistics)
+	}
+}
+
 func TestFeedbackRunnerCountsUniquePlansTracesAndModelStatePaths(t *testing.T) {
 	runner, err := New(Config{
 		Runs: 4, BaseSeed: 20, Parallelism: 1, InitialPopulation: 1,

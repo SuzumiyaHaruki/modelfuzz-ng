@@ -13,8 +13,16 @@ type Statistics struct {
 	TotalEffects                 int                       `json:"total_effects"`
 	TotalModelEvents             int                       `json:"total_model_events"`
 	UniqueModelStates            int                       `json:"unique_model_states"`
+	UniqueSemanticStates         int                       `json:"unique_semantic_states"`
+	UniqueSemanticTransitions    int                       `json:"unique_semantic_transitions"`
+	SemanticNoveltyPer100Actions float64                   `json:"semantic_novelty_per_100_actions"`
 	CorpusEntries                int                       `json:"corpus_entries"`
 	RetainedRuns                 int                       `json:"retained_runs"`
+	RejectedRawThreshold         int                       `json:"rejected_raw_threshold"`
+	RejectedNoSemanticNovelty    int                       `json:"rejected_no_semantic_novelty"`
+	RetainedBySemanticState      int                       `json:"retained_by_semantic_state"`
+	RetainedBySemanticTransition int                       `json:"retained_by_semantic_transition"`
+	CorpusAdmissionCounts        map[string]int            `json:"corpus_admission_counts"`
 	InitialExecutions            int                       `json:"initial_executions"`
 	GeneratedMutations           int                       `json:"generated_mutations"`
 	AdmittedMutations            int                       `json:"admitted_mutations"`
@@ -65,8 +73,13 @@ func (r Report) Statistics() Statistics {
 		CompletedRuns: r.CompletedRuns, Succeeded: r.Succeeded, Failed: r.Failed,
 		StatusCounts: r.StatusCounts, TotalActions: r.TotalActions, TotalEffects: r.TotalEffects,
 		TotalModelEvents: r.TotalModelEvents, UniqueModelStates: r.UniqueModelStates,
-		CorpusEntries: r.CorpusEntries, RetainedRuns: r.RetainedRuns,
-		InitialExecutions: r.InitialExecutions, GeneratedMutations: r.GeneratedMutations,
+		UniqueSemanticStates: r.UniqueSemanticStates, UniqueSemanticTransitions: r.UniqueSemanticTransitions,
+		SemanticNoveltyPer100Actions: r.SemanticNoveltyPer100Actions,
+		CorpusEntries:                r.CorpusEntries, RetainedRuns: r.RetainedRuns,
+		RejectedRawThreshold: r.RejectedRawThreshold, RejectedNoSemanticNovelty: r.RejectedNoSemanticNovelty,
+		RetainedBySemanticState: r.RetainedBySemanticState, RetainedBySemanticTransition: r.RetainedBySemanticTransition,
+		CorpusAdmissionCounts: copyCounts(r.CorpusAdmissionCounts),
+		InitialExecutions:     r.InitialExecutions, GeneratedMutations: r.GeneratedMutations,
 		AdmittedMutations: r.AdmittedMutations, DiscardedMutations: r.DiscardedMutations,
 		ExecutedMutations:      r.ExecutedMutations,
 		PeriodicSeedExecutions: r.PeriodicSeedExecutions,
@@ -92,6 +105,14 @@ func (r Report) Statistics() Statistics {
 		SnapshotsRejectedOrStale: r.SnapshotsRejectedOrStale, LogsCompacted: r.LogsCompacted,
 		CompactedEntries: r.CompactedEntries, SnapshotBytes: r.SnapshotBytes,
 	}
+}
+
+func copyCounts(source map[string]int) map[string]int {
+	result := make(map[string]int, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
 
 func copySourceNovelty(source map[string]SourceNovelty) map[string]SourceNovelty {

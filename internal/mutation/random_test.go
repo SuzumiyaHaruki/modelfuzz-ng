@@ -112,3 +112,30 @@ func TestRandomMutationPairRespectsExistingCrashWindow(t *testing.T) {
 		t.Fatalf("插入后超过停止上限或生命周期冲突: %v\nactions=%+v", err, sequence.Actions)
 	}
 }
+
+func TestRandomMutationUsesConfiguredCrashPairRate(t *testing.T) {
+	mutator, err := NewRandom(RandomConfig{
+		NodeIDs: []core.NodeID{1, 2, 3}, MaxValue: 2, MaxTicks: 2, MaxActions: 20,
+		MaxCrashed: 1, MaxCrashEpisodes: 4, CrashRestartPairPercent: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := corpus.Entry{ID: "corpus-0", Plan: plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+		{Kind: plan.ActionRequest, Node: 1, Request: "1"},
+	}}}
+	pairs := 0
+	for seed := int64(0); seed < 1000; seed++ {
+		plans, mutateErr := mutator.Mutate(context.Background(), Request{Entry: entry, Count: 1, Seed: seed})
+		if mutateErr != nil {
+			t.Fatal(mutateErr)
+		}
+		if plans[0].Metadata["mutation_operation"] == "crash_restart_pair" {
+			pairs++
+		}
+	}
+	if pairs < 25 || pairs > 75 {
+		t.Fatalf("crash/restart pair selections=%d/1000, want approximately 5%%", pairs)
+	}
+}

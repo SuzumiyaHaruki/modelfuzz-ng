@@ -14,6 +14,7 @@
 | crash/restart 与 timer | `crash-restart-20260721.md`、`nonleader-timer-reasons-20260721.md` |
 | 反馈闭环与新颖性 | `feedback-loop-20260721.md`、`novelty-reseed-20260721.md` |
 | 持久化与 checkpoint 演进 | `persistence-metrics-20260721.md`、`failure-checkpoint-v3-20260721.md`、`checkpoint-v5-tlc-metrics-20260721.md`、`checkpoint-v6-feedback-20260721.md` |
+| 反馈准入与动作分布 | `feedback-tuning-v7-20260722.md` |
 | 严格/按需 TLC | `strict-tlc-migration-20260721.md`、`lazy-tlc-actions-20260721.md` |
 | Snapshot 与日志压缩 | `snapshot-compaction-20260721.md` |
 | n/3+1 quorum mutant | `quorum-one-third-mutant-20260721.md` |

@@ -126,6 +126,53 @@ func TestRandomPolicyChoosesOnlyExecutableCrashOrRestart(t *testing.T) {
 	}
 }
 
+func TestRandomPolicyCapsAndSpacesCrashEpisodes(t *testing.T) {
+	config := DefaultRandomConfig()
+	config.MaxCrashEpisodes = 2
+	config.LifecycleCooldown = 3
+	config.Weights = RandomWeights{Crash: 1, Restart: 1, AdvanceTicks: 1}
+	policy, err := NewRandom(17, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := randomObservation()
+	if err := policy.Reset(observation); err != nil {
+		t.Fatal(err)
+	}
+	crashes := 0
+	lastRestart := -1
+	for index := 0; index < 100; index++ {
+		action, more, nextErr := policy.Next(observation)
+		if nextErr != nil || !more {
+			t.Fatalf("draw %d = %+v/%v/%v", index, action, more, nextErr)
+		}
+		switch action.Kind {
+		case plan.ActionCrash:
+			if lastRestart >= 0 && index-lastRestart-1 < config.LifecycleCooldown {
+				t.Fatalf("crash at %d follows restart at %d", index, lastRestart)
+			}
+			crashes++
+			for nodeIndex := range observation.Nodes {
+				if observation.Nodes[nodeIndex].ID == action.Node {
+					observation.Nodes[nodeIndex].Status = core.NodeCrashed
+					observation.Nodes[nodeIndex].Semantic["role"] = "crashed"
+				}
+			}
+		case plan.ActionRestart:
+			lastRestart = index
+			for nodeIndex := range observation.Nodes {
+				if observation.Nodes[nodeIndex].ID == action.Node {
+					observation.Nodes[nodeIndex].Status = core.NodeRunning
+					observation.Nodes[nodeIndex].Semantic["role"] = "follower"
+				}
+			}
+		}
+	}
+	if crashes != config.MaxCrashEpisodes {
+		t.Fatalf("crashes=%d, want %d", crashes, config.MaxCrashEpisodes)
+	}
+}
+
 func TestRandomPolicyDoesNotCrashLastRunningNode(t *testing.T) {
 	config := DefaultRandomConfig()
 	config.MaxCrashed = 2

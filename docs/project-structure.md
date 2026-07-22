@@ -47,6 +47,7 @@ modelfuzz-ng/
 │   │   ├── basic-raft-20260720.md
 │   │   ├── checkpoint-v5-tlc-metrics-20260721.md
 │   │   ├── checkpoint-v6-feedback-20260721.md
+│   │   ├── feedback-tuning-v7-20260722.md
 │   │   ├── lazy-tlc-actions-20260721.md
 │   │   ├── quorum-one-third-mutant-20260721.md
 │   │   └── snapshot-compaction-20260721.md
@@ -92,6 +93,8 @@ modelfuzz-ng/
 │   │   ├── mapper.go
 │   │   ├── transition.go
 │   │   ├── raft/
+│   │   │   ├── coverage.go
+│   │   │   ├── coverage_test.go
 │   │   │   ├── mapper.go
 │   │   │   └── mapper_test.go
 │   │   └── tlc/
@@ -254,7 +257,7 @@ modelfuzz-ng/
 │   │   ├── event.go                  # 模型事件及Reset协议
 │   │   ├── transition.go             # 动作前后Observation和StepRecord
 │   │   ├── mapper.go                 # 通用Mapper接口
-│   │   ├── raft/                     # Raft协议语义映射
+│   │   ├── raft/                     # Raft协议映射及相对term/日志/提交/复制关系覆盖投影
 │   │   └── tlc/                      # Controlled TLC HTTP客户端
 │   │
 │   ├── plan/                         # 已有：生成来源无关的高层计划
@@ -500,7 +503,10 @@ Runtime；初始化采用思考模式，变异采用非思考模式。
 `internal/mutation` 异步产生后代。无 TLC 时仍可并行运行随机种子，但没有可用于
 保留和反馈的模型状态。生命周期事件同时驱动统计和持久化；完整 Run/Corpus Entry
 分别追加到 `runs.jsonl`/`corpus.jsonl`，checkpoint 只保存两者水位、ready、in-flight、
-紧凑 pending mutation 引用和聚合统计，恢复时不会从第一条 seed 重跑。
+紧凑 pending mutation 引用和聚合统计，恢复时不会从第一条 seed 重跑。Corpus 的每次
+判定保留稳定原因码，区分原始状态门槛、语义 novelty 门槛，以及由语义状态或转移保留；
+逐运行和聚合统计同时记录三类新覆盖及每100 Action的语义 novelty，checkpoint 会校验
+这些计数与 Corpus 水位一致。
 
 ### 5.9 `internal/oracle`
 

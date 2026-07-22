@@ -323,6 +323,18 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effec
 			return nil, fmt.Errorf("%w: MsgApp entries exceed MaxLogIndex %d", ErrUnsupportedSemantics, m.config.MaxLogIndex)
 		}
 		normalized["type"] = messageType
+		// etcd-raft 对 prev index 已落在 committed 前面的 MsgApp 直接回复当前
+		// commit index，不检查也不追加其中的 entries。把这种消息展开会让 TLC
+		// 凭空追加 SUT 实际忽略的日志。用一个保证日志不变的 nil append 只抽象
+		// 该消息可能造成的 term/role 更新，并保持 commit 不变。
+		beforeCommit := commitIndexOf(before, core.NodeID(normalized["to"].(uint64)))
+		if baseIndex < beforeCommit {
+			normalized["index"] = uint64(0)
+			normalized["log_term"] = uint64(0)
+			normalized["commit"] = beforeCommit
+			normalized["entries"] = []map[string]any{}
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
 		if len(entries) <= 1 {
 			normalized["entries"] = entries
 			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
@@ -603,6 +615,16 @@ func lastIndexOf(observation core.Observation, id core.NodeID) uint64 {
 	for _, node := range observation.Nodes {
 		if node.ID == id {
 			value, _ := unsignedParam(node.Semantic["last_index"])
+			return value
+		}
+	}
+	return 0
+}
+
+func commitIndexOf(observation core.Observation, id core.NodeID) uint64 {
+	for _, node := range observation.Nodes {
+		if node.ID == id {
+			value, _ := unsignedParam(node.Semantic["commit"])
 			return value
 		}
 	}

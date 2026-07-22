@@ -15,11 +15,14 @@ import (
 )
 
 type RandomConfig struct {
-	NodeIDs    []core.NodeID `json:"node_ids"`
-	MaxValue   int           `json:"max_value"`
-	MaxTicks   uint64        `json:"max_ticks"`
-	MaxActions int           `json:"max_actions"`
-	MaxCrashed int           `json:"max_crashed"`
+	NodeIDs                 []core.NodeID `json:"node_ids"`
+	MaxValue                int           `json:"max_value"`
+	MaxTicks                uint64        `json:"max_ticks"`
+	MaxActions              int           `json:"max_actions"`
+	MaxCrashed              int           `json:"max_crashed"`
+	LifecycleCooldown       int           `json:"lifecycle_cooldown"`
+	MaxCrashEpisodes        int           `json:"max_crash_episodes"`
+	CrashRestartPairPercent int           `json:"crash_restart_pair_percent"`
 }
 
 // Random 对已经执行过的 Plan 做小范围结构变异。交换动作是对原 ModelFuzz
@@ -48,8 +51,14 @@ func NewRandom(config RandomConfig) (*Random, error) {
 	if config.MaxCrashed == 0 {
 		config.MaxCrashed = 1
 	}
+	if config.MaxCrashEpisodes == 0 {
+		config.MaxCrashEpisodes = 4
+	}
 	if config.MaxCrashed < 0 || config.MaxCrashed >= len(config.NodeIDs) {
 		return nil, fmt.Errorf("random mutation MaxCrashed must be in 1..%d", len(config.NodeIDs)-1)
+	}
+	if config.LifecycleCooldown < 0 || config.MaxCrashEpisodes <= 0 || config.CrashRestartPairPercent < 0 || config.CrashRestartPairPercent > 100 {
+		return nil, fmt.Errorf("random mutation lifecycle bounds are invalid")
 	}
 	config.NodeIDs = append([]core.NodeID(nil), config.NodeIDs...)
 	return &Random{config: config}, nil
@@ -78,7 +87,10 @@ func (m *Random) Mutate(ctx context.Context, request Request) ([]plan.PlanSequen
 			return result, err
 		}
 		candidate := request.Entry.Plan.Copy()
-		operation := random.Intn(6)
+		operation := random.Intn(5)
+		if random.Intn(100) < m.config.CrashRestartPairPercent {
+			operation = 5
+		}
 		operationName := ""
 		switch operation {
 		case 0:
@@ -254,6 +266,8 @@ func (m *Random) validateLifecycle(sequence plan.PlanSequence) error {
 		running[node] = true
 	}
 	crashed := 0
+	crashEpisodes := 0
+	lastRestart := -1
 	for index, action := range sequence.Actions {
 		switch action.Kind {
 		case plan.ActionCrash:
@@ -266,8 +280,15 @@ func (m *Random) validateLifecycle(sequence plan.PlanSequence) error {
 			if crashed >= m.config.MaxCrashed {
 				return fmt.Errorf("action %d exceeds MaxCrashed %d", index, m.config.MaxCrashed)
 			}
+			if crashEpisodes >= m.config.MaxCrashEpisodes {
+				return fmt.Errorf("action %d exceeds MaxCrashEpisodes %d", index, m.config.MaxCrashEpisodes)
+			}
+			if lastRestart >= 0 && index-lastRestart-1 < m.config.LifecycleCooldown {
+				return fmt.Errorf("action %d violates lifecycle cooldown %d", index, m.config.LifecycleCooldown)
+			}
 			running[action.Node] = false
 			crashed++
+			crashEpisodes++
 		case plan.ActionRestart:
 			if _, exists := running[action.Node]; !exists {
 				return fmt.Errorf("action %d restarts unknown node %d", index, action.Node)
@@ -277,6 +298,7 @@ func (m *Random) validateLifecycle(sequence plan.PlanSequence) error {
 			}
 			running[action.Node] = true
 			crashed--
+			lastRestart = index
 		}
 	}
 	return nil

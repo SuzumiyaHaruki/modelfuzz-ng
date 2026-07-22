@@ -91,6 +91,13 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	mutationsPerState := flags.Int("mutations-per-state", 1, "每个全局新模型状态生成的变异数")
 	maxMutationsPerCorpus := flags.Int("max-mutations-per-corpus", 2, "单个 Corpus 条目的最大变异数")
 	maxReadyCandidates := flags.Int("max-ready-candidates", 4096, "Ready 候选队列上限；满时淘汰最旧候选")
+	minNewModelStates := flags.Int("min-new-model-states", 25, "进入 Corpus 至少需要的全局新 TLC 原始状态数")
+	semanticCoverage := flags.Bool("semantic-coverage", true, "要求 Corpus 候选增加归一化语义状态或语义转移覆盖")
+	lifecycleCooldown := flags.Int("lifecycle-cooldown", 48, "两次 crash 周期之间至少间隔的 Action 数")
+	maxCrashEpisodes := flags.Int("max-crash-episodes", 4, "单条轨迹允许的最大 crash/restart 周期数")
+	crashRestartPairPercent := flags.Int("crash-restart-pair-percent", 5, "随机变异插入 crash/restart 对的百分比")
+	crashWeight := flags.Int("crash-weight", 1, "在线 balanced 随机策略的 crash 权重")
+	restartWeight := flags.Int("restart-weight", 10, "在线 balanced 随机策略的 restart 权重")
 	randomSeedInterval := flags.Int("random-seed-interval", 0, "每完成多少次执行优先注入在线随机种子；0 表示关闭")
 	randomSeedsPerInterval := flags.Int("random-seeds-per-interval", 1, "每次周期注入的在线随机种子数")
 	llmProvider := flags.String("llm-provider", string(llm.DefaultProvider), "LLM provider: deepseek、glm、qwen 或 kimi")
@@ -162,17 +169,26 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 		resumeValues := map[string][2]int{
 			"runs": {*runs, resumeCheckpoint.Config.Runs}, "parallelism": {*parallelism, resumeCheckpoint.Config.Parallelism},
-			"initial-population":        {*initialPopulation, resumeCheckpoint.Config.InitialPopulation},
-			"mutations-per-state":       {*mutationsPerState, resumeCheckpoint.Config.MutationsPerNewState},
-			"max-mutations-per-corpus":  {*maxMutationsPerCorpus, resumeCheckpoint.Config.MaxMutationsPerCorpus},
-			"max-ready-candidates":      {*maxReadyCandidates, resumeCheckpoint.Config.MaxReadyCandidates},
-			"random-seed-interval":      {*randomSeedInterval, resumeCheckpoint.Config.RandomSeedInterval},
-			"random-seeds-per-interval": {*randomSeedsPerInterval, resumeCheckpoint.Config.RandomSeedsPerInterval},
+			"initial-population":         {*initialPopulation, resumeCheckpoint.Config.InitialPopulation},
+			"mutations-per-state":        {*mutationsPerState, resumeCheckpoint.Config.MutationsPerNewState},
+			"max-mutations-per-corpus":   {*maxMutationsPerCorpus, resumeCheckpoint.Config.MaxMutationsPerCorpus},
+			"max-ready-candidates":       {*maxReadyCandidates, resumeCheckpoint.Config.MaxReadyCandidates},
+			"min-new-model-states":       {*minNewModelStates, resumeCheckpoint.Config.MinNewModelStates},
+			"lifecycle-cooldown":         {*lifecycleCooldown, resumeCheckpoint.Config.LifecycleCooldown},
+			"max-crash-episodes":         {*maxCrashEpisodes, resumeCheckpoint.Config.MaxCrashEpisodes},
+			"crash-restart-pair-percent": {*crashRestartPairPercent, resumeCheckpoint.Config.CrashRestartPairPercent},
+			"crash-weight":               {*crashWeight, resumeCheckpoint.Config.CrashWeight},
+			"restart-weight":             {*restartWeight, resumeCheckpoint.Config.RestartWeight},
+			"random-seed-interval":       {*randomSeedInterval, resumeCheckpoint.Config.RandomSeedInterval},
+			"random-seeds-per-interval":  {*randomSeedsPerInterval, resumeCheckpoint.Config.RandomSeedsPerInterval},
 		}
 		for name, values := range resumeValues {
 			if setFlags[name] && values[0] != values[1] {
 				return fmt.Errorf("恢复时 -%s=%d 与 checkpoint 中的 %d 不一致", name, values[0], values[1])
 			}
+		}
+		if setFlags["semantic-coverage"] && *semanticCoverage != resumeCheckpoint.Config.SemanticCoverage {
+			return fmt.Errorf("恢复时 -semantic-coverage=%v 与 checkpoint 中的 %v 不一致", *semanticCoverage, resumeCheckpoint.Config.SemanticCoverage)
 		}
 		*runs = resumeCheckpoint.Config.Runs
 		*parallelism = resumeCheckpoint.Config.Parallelism
@@ -180,6 +196,13 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		*mutationsPerState = resumeCheckpoint.Config.MutationsPerNewState
 		*maxMutationsPerCorpus = resumeCheckpoint.Config.MaxMutationsPerCorpus
 		*maxReadyCandidates = resumeCheckpoint.Config.MaxReadyCandidates
+		*minNewModelStates = resumeCheckpoint.Config.MinNewModelStates
+		*lifecycleCooldown = resumeCheckpoint.Config.LifecycleCooldown
+		*maxCrashEpisodes = resumeCheckpoint.Config.MaxCrashEpisodes
+		*crashRestartPairPercent = resumeCheckpoint.Config.CrashRestartPairPercent
+		*crashWeight = resumeCheckpoint.Config.CrashWeight
+		*restartWeight = resumeCheckpoint.Config.RestartWeight
+		*semanticCoverage = resumeCheckpoint.Config.SemanticCoverage
 		*randomSeedInterval = resumeCheckpoint.Config.RandomSeedInterval
 		*randomSeedsPerInterval = resumeCheckpoint.Config.RandomSeedsPerInterval
 	}
@@ -260,6 +283,9 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		InitialPopulation: *initialPopulation, MutationsPerNewState: *mutationsPerState,
 		MaxMutationsPerCorpus: *maxMutationsPerCorpus, RandomSeedInterval: *randomSeedInterval,
 		RandomSeedsPerInterval: *randomSeedsPerInterval, MaxReadyCandidates: *maxReadyCandidates,
+		MinNewModelStates: *minNewModelStates, SemanticCoverage: *semanticCoverage,
+		LifecycleCooldown: *lifecycleCooldown, MaxCrashEpisodes: *maxCrashEpisodes,
+		CrashRestartPairPercent: *crashRestartPairPercent, CrashWeight: *crashWeight, RestartWeight: *restartWeight,
 	}
 	runner, err := experiment.New(experimentConfig)
 	if err != nil {
@@ -271,9 +297,15 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	policyConfig.MaxValue = config.Model.MaxValue
 	policyConfig.MaxLogIndex = config.Model.MaxLogIndex
 	policyConfig.LargestTerm = config.Model.LargestTerm
+	policyConfig.LifecycleCooldown = experimentConfig.LifecycleCooldown
+	policyConfig.MaxCrashEpisodes = experimentConfig.MaxCrashEpisodes
+	policyConfig.Weights.Crash = experimentConfig.CrashWeight
+	policyConfig.Weights.Restart = experimentConfig.RestartWeight
 	mutationConfig := mutation.RandomConfig{
 		NodeIDs: append([]core.NodeID(nil), config.Raft.NodeIDs...), MaxValue: config.Model.MaxValue,
 		MaxTicks: 5, MaxActions: *maxPlanActions, MaxCrashed: policyConfig.MaxCrashed,
+		LifecycleCooldown: experimentConfig.LifecycleCooldown, MaxCrashEpisodes: experimentConfig.MaxCrashEpisodes,
+		CrashRestartPairPercent: experimentConfig.CrashRestartPairPercent,
 	}
 	localMutator, err := mutation.NewRandom(mutationConfig)
 	if err != nil {
@@ -339,6 +371,10 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 	}
 	feedbackOptions.Mutator = selectedMutator
+	feedbackOptions.CoverageProjector = func(states []model.State, events []model.Event) corpus.Projection {
+		projection := raftmodel.ProjectCoverage(states, events)
+		return corpus.Projection{StateKeys: projection.StateKeys, TransitionKeys: projection.TransitionKeys}
+	}
 	feedbackOptions.Resume = resumeCheckpoint
 	feedbackOptions.CheckpointEvery = *checkpointEvery
 	if resumeCheckpoint == nil {

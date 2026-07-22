@@ -362,6 +362,7 @@ func TestExperimentCLISupportsGenericLLMProviderConfiguration(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := runCLI(context.Background(), []string{
 		"experiment", "-output", output, "-runs", "2", "-max-plan-actions", "3",
+		"-min-new-model-states", "1",
 		"-initial-population", "1", "-llm-init", "-llm-mutate",
 		"-llm-provider", "deepseek", "-llm-base-url", server.URL, "-tlc", server.URL,
 	}, &stdout, &stderr); err != nil {

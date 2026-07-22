@@ -212,8 +212,12 @@ go run ./cmd/modelfuzz-ng experiment \
 
 `-runs` 现在表示闭环中的总执行次数，不再表示彼此独立的随机实验。默认配置下，
 初始种子仍由在线随机策略逐步读取最新 Observation 产生，因此不会缓存容易失效的
-MessageID；某次成功执行只有在 controlled TLC 返回至少一个全局未见的 `State.Key`
-时，才会携带 Plan 和增量状态键进入 Corpus。完整 Trace 由逐运行
+MessageID。原始 TLC fingerprint 继续完整计入覆盖统计；默认只有一次成功执行至少
+增加25个全局未见的 `State.Key`，并且同时增加归一化 Raft 语义状态或语义转移时，
+才会携带 Plan 和增量覆盖键进入 Corpus。可用 `-min-new-model-states` 调整原始门槛，
+`-semantic-coverage=false` 仅用于对照实验。语义投影保留活动节点、角色、相对 term、
+日志形状、提交/复制滞后和投票关系，同时忽略绝对 term 与 nextIndex 内部记账差异。
+完整 Trace 由逐运行
 产物策略单独保存，不再重复写入 Corpus 和 checkpoint。候选按 FIFO 继续执行。
 当前默认每个新状态生成1个本地随机变异、每条 Corpus 最多2个；Ready
 队列默认上限为4096，可用 `-max-ready-candidates` 调整。队列满时确定性淘汰最旧候选，
@@ -221,11 +225,15 @@ MessageID；某次成功执行只有在 controlled TLC 返回至少一个全局�
 每条新实验轨迹默认最多生成1000个 PlanAction；在线随机动作通常一对一解析为
 Concrete Action，消息批量选择可能一对多展开，最终仍受 `runtime_limits.max_actions`
 约束。短烟雾实验可显式传入较小的 `-max-plan-actions`。
-离线随机 Mutation 还会主动用 `crash(node) ... restart(node)` 包围一段已有动作。
+离线随机 Mutation 还会主动用 `crash(node) ... restart(node)` 包围一段已有动作，
+默认选择概率为5%，可用 `-crash-restart-pair-percent` 调整。
 候选入队前会检查节点生命周期和同时停止节点上限，不会生成重复 crash 或未 crash
 就 restart 的配对。
-在线随机策略会根据最新节点状态生成 crash/restart，默认同时最多停止1个节点且不会
-停止最后一个运行节点；发往停止节点的在途消息可在恢复后继续参与调度。
+在线 balanced 随机策略会根据最新节点状态生成 crash/restart，默认 crash 权重为1，
+同时最多停止1个节点且不会停止最后一个运行节点；每条轨迹最多4个 crash 周期，
+相邻周期至少间隔48个 Action，Restart 不受 cooldown 限制。对应参数为
+`-crash-weight`、`-restart-weight`、`-max-crash-episodes` 和 `-lifecycle-cooldown`。
+发往停止节点的在途消息可在恢复后继续参与调度。
 它也会向已知当前 Leader 的 Follower 生成客户端请求，并把产生的 `MsgProp` 作为
 普通受控消息调度；Candidate 或尚不知道 Leader 的 Follower 不进入随机请求候选集，
 避免把预算浪费在确定会被丢弃的 proposal 上。
@@ -250,7 +258,7 @@ Concrete Action，消息批量选择可能一对多展开，最终仍受 `runtim
 `-parallelism 1`，避免创建不能提升模型吞吐的并发请求。
 实验根目录新增：
 
-- `corpus.json`：最终紧凑 Corpus 摘要，只含覆盖键和条目数；
+- `corpus.json`：最终紧凑 Corpus 摘要，只含原始/语义状态/语义转移覆盖键和条目数；
 - `corpus.jsonl`：完整 Corpus Entry 的 fsync 追加日志；恢复时与 `runs.jsonl` 一样按
   checkpoint 水位修复并截断孤儿尾记录；
 - `experiment-settings.json`：初始化、变异和 LLM provider 的非敏感配置；
@@ -259,13 +267,17 @@ Concrete Action，消息批量选择可能一对多展开，最终仍受 `runtim
   更新，恢复后继续累计而不是覆盖；
 - `experiment-report.json`：不含逐运行明细的闭环汇总；
 - `runs.jsonl`：每条完成运行的候选关系、覆盖增量、稳定摘要和局部 Metrics；每次
-  append 都会 flush 和 fsync，恢复时按 checkpoint 的已提交条数截去孤儿尾记录；
+  append 都会 flush 和 fsync，恢复时按 checkpoint 的已提交条数截去孤儿尾记录；每条
+  记录包含 `new_raw_states`、`new_semantic_states`、`new_semantic_transitions`、
+  `corpus_admission` 和 `semantic_novelty_per_100_actions`；
 - `experiment-metrics.json`：Action、Effect、出站消息类型、解析结果及稳定原因码、模型事件、Oracle、失败、
-  timer、终止原因、耗时分位数、吞吐、队列峰值和覆盖增长曲线；同时统计唯一 Plan、
+  timer、终止原因、耗时分位数、吞吐、队列峰值和原始/语义覆盖增长曲线；同时统计唯一 Plan、
   唯一 Concrete Trace、唯一模型状态路径、重复率、唯一性增长曲线及各候选来源的首次发现贡献；
   `admitted_mutations`、`discarded_mutations` 和 `peak_ready_candidates` 用于观察反馈背压；
+  `rejected_raw_threshold`、`rejected_no_semantic_novelty`、
+  `retained_by_semantic_state`/`transition` 和 `corpus_admission_counts` 用于解释 Corpus 准入；
 - `progress.jsonl`：完成执行的索引、完成变异和实验状态切换等轻量 fsync 生命周期日志；
-- `checkpoint.json`：只保存 Corpus 覆盖键/条目水位、增量聚合统计、唯一状态/Plan/Trace/路径集合、
+- `checkpoint.json`：只保存 Corpus 原始/语义覆盖键与条目水位、增量聚合统计、唯一状态/Plan/Trace/路径集合、
   有界候选队列、运行中候选、紧凑待处理变异引用和随机编号；不保存完整 Run 或 Corpus Entry；
 - `tlc-server-metrics.json`：严格 TLC 服务在每段启动/恢复执行前后的累计计数，包含
   Action 查询、后继计算、invariant 校验和状态序列化耗时；
@@ -287,7 +299,7 @@ go run ./cmd/modelfuzz-ng experiment -resume runs/random-local \
 
 恢复会继续使用原来的 run index、seed、Corpus 和候选队列；中断时尚未完成的候选
 允许确定性重跑。`runs.jsonl` 或 `corpus.jsonl` 已写但未进入 checkpoint 的记录会先被
-截去再重跑，不会形成重复 run index 或 Corpus ID。当前 checkpoint 格式版本为 v6；检查点包含实验配置指纹，修改
+截去再重跑，不会形成重复 run index 或 Corpus ID。当前 checkpoint 格式版本为 v7；检查点包含实验配置指纹，修改
 SUT、Engine、Policy 或 Mutator 配置后不能误接着旧实验运行。JSONL 最后一条若因
 进程崩溃只写入了一部分，重新打开时只截去该不完整尾记录。
 
@@ -362,6 +374,8 @@ go run ./cmd/modelfuzz-ng experiment \
 [`docs/experiments/checkpoint-v5-tlc-metrics-20260721.md`](docs/experiments/checkpoint-v5-tlc-metrics-20260721.md)。
 有界反馈队列、checkpoint v6、proposal-drop 修复、动作分布和确定性恢复实验见
 [`docs/experiments/checkpoint-v6-feedback-20260721.md`](docs/experiments/checkpoint-v6-feedback-20260721.md)。
+balanced lifecycle、严格 Corpus 准入、Raft 语义覆盖和 checkpoint v7 的逐项对照见
+[`docs/experiments/feedback-tuning-v7-20260722.md`](docs/experiments/feedback-tuning-v7-20260722.md)。
 按需 TLC Action、10/10 JVM 内存与等价性验证见
 [`docs/experiments/lazy-tlc-actions-20260721.md`](docs/experiments/lazy-tlc-actions-20260721.md)。
 Snapshot/日志压缩、MsgSnap 受控投递、Oracle 前缀恢复和 checkpoint 确定性实验见

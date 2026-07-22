@@ -118,3 +118,36 @@ func TestRollbackLastRemovesUncommittedCoverage(t *testing.T) {
 		t.Fatalf("corpus after rollback = %+v", collection.Snapshot())
 	}
 }
+
+func TestCorpusRequiresRawThresholdAndSemanticNovelty(t *testing.T) {
+	collection := NewWithConfig(Config{MinNewModelStates: 2, RequireSemanticNovelty: true})
+	base := Input{
+		Source: "test", Plan: plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
+	}
+	base.States = []model.State{{Key: 1}}
+	base.SemanticStateKeys = []int64{101}
+	entry, retained, err := collection.Consider(base)
+	if err != nil || retained || len(entry.NewStateKeys) != 1 || entry.AdmissionReason != AdmissionRejectedRawThreshold {
+		t.Fatalf("below threshold: entry=%+v retained=%v err=%v", entry, retained, err)
+	}
+	base.RunIndex = 1
+	base.States = []model.State{{Key: 2}, {Key: 3}}
+	base.SemanticStateKeys = []int64{101}
+	if entry, retained, err = collection.Consider(base); err != nil || retained || entry.AdmissionReason != AdmissionRejectedNoSemanticNovelty {
+		t.Fatalf("no semantic novelty retained=%v err=%v", retained, err)
+	}
+	base.RunIndex = 2
+	base.States = []model.State{{Key: 4}, {Key: 5}}
+	base.SemanticStateKeys = []int64{102}
+	base.SemanticTransitionKeys = []int64{201}
+	entry, retained, err = collection.Consider(base)
+	if err != nil || !retained || len(entry.NewSemanticStateKeys) != 1 || len(entry.NewSemanticTransitionKeys) != 1 {
+		t.Fatalf("semantic novelty entry=%+v retained=%v err=%v", entry, retained, err)
+	}
+	if entry.AdmissionReason != AdmissionRetainedSemanticStateAndTransition {
+		t.Fatalf("admission reason=%q", entry.AdmissionReason)
+	}
+	if collection.CoverageLen() != 5 {
+		t.Fatalf("raw coverage=%d, want rejected observations included", collection.CoverageLen())
+	}
+}
