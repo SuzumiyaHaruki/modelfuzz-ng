@@ -166,8 +166,20 @@ func (n *network) observations() []core.MessageObservation {
 				EnqueuedAt:    queued.enqueuedAt,
 				TypeHint:      message.TypeHint,
 				PayloadDigest: message.PayloadDigest,
+				Metadata:      cloneMetadata(message.Metadata),
 			})
 		}
+	}
+	return result
+}
+
+func cloneMetadata(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
 	}
 	return result
 }

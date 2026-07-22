@@ -1,0 +1,25 @@
+{
+  "actions": [
+    {
+      "kind": "timeout",
+      "node": 1
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 1, "to": 2},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 1},
+        "count": 1
+      }
+    }
+  ],
+  "metadata": {
+    "description": "五节点候选仅凭自身票和节点2的赞成票提前成为leader；正确quorum模型应拒绝"
+  }
+}

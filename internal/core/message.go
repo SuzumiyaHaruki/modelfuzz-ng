@@ -100,6 +100,8 @@ func cloneAnyValue(value any) any {
 	switch value := value.(type) {
 	case map[string]any:
 		return cloneAnyMap(value)
+	case map[string]string:
+		return cloneStringMap(value)
 	case []any:
 		result := make([]any, len(value))
 		for i := range value {

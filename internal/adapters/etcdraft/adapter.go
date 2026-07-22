@@ -3,12 +3,17 @@ package etcdraft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/sut"
 	raft "go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 )
+
+const proposalDroppedEvent = "raft.proposal_dropped"
+const voteQuorumFaultEvent = "raft.vote_quorum_fault_activated"
 
 // Adapter 驱动一组内存中的 etcd-raft RawNode。逻辑时钟、网络队列和
 // MessageID 均由上层 Runtime 管理。
@@ -90,16 +95,38 @@ func (a *Adapter) Deliver(ctx context.Context, at core.LogicalTime, message core
 	if err != nil {
 		return nil, err
 	}
+	deliveryEffects := []core.Effect{deliveredMessageEffect(at, payload)}
+	if payload.GetType() == raftpb.MsgSnap {
+		snapshot := payload.GetSnapshot()
+		deliveryEffects = append(deliveryEffects, snapshotEvent(at, "raft.snapshot_delivered", n.id, snapshot, nil))
+		if snapshot.GetMetadata().GetIndex() <= n.applied {
+			deliveryEffects = append(deliveryEffects,
+				snapshotEvent(at, "raft.snapshot_rejected_or_stale", n.id, snapshot, nil))
+		}
+	}
+	before := n.raw.BasicStatus()
 	if err := n.raw.Step(payload); err != nil {
+		if errors.Is(err, raft.ErrProposalDropped) && payload.GetType() == raftpb.MsgProp {
+			// follower 转发 proposal 后，目标节点可能已经失去 leader 身份，甚至
+			// 当前集群暂时没有 leader。etcd-raft 把这种时序结果表示为
+			// ErrProposalDropped；它不是 SUT 崩溃，也不应终止整条 fuzz 轨迹。
+			status := n.raw.BasicStatus()
+			return append(deliveryEffects, proposalDropEffect(at, n.id, status, "forwarded")), nil
+		}
 		return nil, fmt.Errorf("step node %s with %s: %w", n.id, message.TypeHint, err)
 	}
-	effects, err := a.drainReady(n, at, true)
+	faultEffects, err := a.maybeActivateVoteQuorumFault(n, at, before, payload)
+	if err != nil {
+		return nil, err
+	}
+	effects, err := a.drainReadyForwarded(n, at, true, &message)
 	if err != nil {
 		return nil, err
 	}
 	// Action 中只有稳定的 MessageID。把实际交给 Raft 的消息语义记录下来，
 	// 后续模型映射即使只读取序列化后的 StepRecord，也不需要依赖 Payload。
-	return append([]core.Effect{deliveredMessageEffect(at, payload)}, effects...), nil
+	deliveryEffects = append(deliveryEffects, faultEffects...)
+	return append(deliveryEffects, effects...), nil
 }
 
 func (a *Adapter) ForceTimeout(ctx context.Context, at core.LogicalTime, id core.NodeID) ([]core.Effect, error) {
@@ -173,9 +200,19 @@ func (a *Adapter) Request(ctx context.Context, at core.LogicalTime, id core.Node
 		return nil, fmt.Errorf("request must not be empty")
 	}
 	if err := n.raw.Propose(append([]byte(nil), request...)); err != nil {
+		if errors.Is(err, raft.ErrProposalDropped) {
+			status := n.raw.BasicStatus()
+			return []core.Effect{proposalDropEffect(at, id, status, "direct")}, nil
+		}
 		return nil, fmt.Errorf("propose on node %s: %w", id, err)
 	}
 	return a.drainReady(n, at, true)
+}
+
+func proposalDropEffect(at core.LogicalTime, id core.NodeID, status raft.BasicStatus, source string) core.Effect {
+	return modelEffect(at, proposalDroppedEvent, id, map[string]any{
+		"role": roleName(status.RaftState), "leader": status.Lead, "source": source,
+	})
 }
 
 func (a *Adapter) Observe(ctx context.Context, at core.LogicalTime) (core.Observation, error) {

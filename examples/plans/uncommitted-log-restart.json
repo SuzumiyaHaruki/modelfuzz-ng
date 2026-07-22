@@ -1,0 +1,23 @@
+{
+  "actions": [
+    {"kind": "timeout", "node": 1},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "request", "node": 1, "request": "1"},
+    {"kind": "crash", "node": 1},
+    {"kind": "restart", "node": 1},
+    {"kind": "drop", "messages": {"link": {"from": 1, "to": 2}, "count": 10}},
+    {"kind": "drop", "messages": {"link": {"from": 1, "to": 3}, "count": 10}},
+    {"kind": "timeout", "node": 1},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}}
+  ],
+  "metadata": {
+    "description": "leader携带未提交日志崩溃，恢复后保留日志并在新term重新当选和提交"
+  }
+}

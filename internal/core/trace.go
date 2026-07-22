@@ -1,6 +1,9 @@
 package core
 
-const CurrentTraceVersion uint32 = 2
+// v3 将消息 Metadata 纳入 ObservationDigest；v4 将 Raft committed-prefix
+// 摘要纳入节点语义观测。旧版 Trace 仍可重放，但 Replay 不比较旧版
+// ObservationDigest，因为旧摘要无法表达新增字段。
+const CurrentTraceVersion uint32 = 4
 
 // StepRecord 表示具体 Trace 中一次已经解析并执行的状态转换。
 type StepRecord struct {

@@ -1,0 +1,16 @@
+{
+  "actions": [
+    {"kind": "timeout", "node": 1},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "request", "node": 1, "request": "1"},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 2}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 2}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 2}}
+  ],
+  "metadata": {
+    "description": "node1选举、提交no-op和请求，阈值2触发snapshot并压缩"
+  }
+}

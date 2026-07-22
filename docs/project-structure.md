@@ -33,7 +33,24 @@ replace go.etcd.io/raft/v3 => ../raft
 
 ```text
 modelfuzz-ng/
+├── cmd/
+│   └── modelfuzz-ng/
+│       ├── config.go
+│       ├── experiment_store.go
+│       ├── experiment_store_test.go
+│       ├── main.go
+│       ├── main_test.go
+│       └── output.go
 ├── docs/
+│   ├── experiments/
+│   │   ├── README.md
+│   │   ├── basic-raft-20260720.md
+│   │   ├── checkpoint-v5-tlc-metrics-20260721.md
+│   │   ├── checkpoint-v6-feedback-20260721.md
+│   │   ├── feedback-tuning-v7-20260722.md
+│   │   ├── lazy-tlc-actions-20260721.md
+│   │   ├── quorum-one-third-mutant-20260721.md
+│   │   └── snapshot-compaction-20260721.md
 │   ├── project-structure.md
 │   └── timer-design.md
 ├── internal/
@@ -43,8 +60,11 @@ modelfuzz-ng/
 │   │       ├── adapter_test.go
 │   │       ├── cluster.go
 │   │       ├── config.go
+│   │       ├── fault.go
 │   │       ├── message.go
 │   │       ├── node.go
+│   │       ├── snapshot.go
+│   │       ├── snapshot_test.go
 │   │       ├── observation.go
 │   │       ├── random.go
 │   │       ├── ready.go
@@ -69,9 +89,12 @@ modelfuzz-ng/
 │   ├── model/
 │   │   ├── event.go
 │   │   ├── event_test.go
+│   │   ├── executor.go
 │   │   ├── mapper.go
 │   │   ├── transition.go
 │   │   ├── raft/
+│   │   │   ├── coverage.go
+│   │   │   ├── coverage_test.go
 │   │   │   ├── mapper.go
 │   │   │   └── mapper_test.go
 │   │   └── tlc/
@@ -86,6 +109,12 @@ modelfuzz-ng/
 │   │   ├── result.go
 │   │   ├── selector.go
 │   │   └── sequence.go
+│   ├── engine/
+│   │   ├── doc.go
+│   │   ├── engine.go
+│   │   ├── engine_test.go
+│   │   ├── error.go
+│   │   └── result.go
 │   ├── runtime/
 │   │   ├── action.go
 │   │   ├── clock.go
@@ -94,13 +123,64 @@ modelfuzz-ng/
 │   │   ├── recorder.go
 │   │   ├── runtime.go
 │   │   └── runtime_test.go
+│   ├── corpus/
+│   │   ├── corpus.go
+│   │   └── corpus_test.go
+│   ├── experiment/
+│   │   ├── digest.go
+│   │   ├── lifecycle.go
+│   │   ├── runner.go
+│   │   ├── aggregation.go
+│   │   ├── statistics.go
+│   │   └── *_test.go
+│   ├── metrics/
+│   │   ├── metrics.go
+│   │   └── metrics_test.go
+│   ├── persistence/
+│   │   ├── files.go
+│   │   └── files_test.go
+│   ├── llm/
+│   │   ├── client.go
+│   │   ├── provider.go
+│   │   └── provider_test.go
+│   ├── mutation/
+│   │   ├── mutation.go
+│   │   ├── random.go
+│   │   ├── llm.go
+│   │   └── random_test.go
+│   ├── policy/
+│   │   ├── random.go
+│   │   ├── random_test.go
+│   │   ├── llm.go
+│   │   └── llm_test.go
 │   └── sut/
 │       └── adapter.go
+├── examples/
+│   ├── config.json
+│   ├── config-quorum-mutant.json
+│   ├── config-soak-10.json
+│   ├── config-snapshot.json
+│   └── plans/
+│       ├── client-request-commit.json
+│       ├── election-commit-node1.json
+│       ├── election-commit-node2.json
+│       ├── election.json
+│       └── quorum-one-third-mutant.json
 ├── models/
 │   └── raft/
 │       ├── README.md
 │       ├── raft.cfg
+│       ├── raft-5.cfg
+│       ├── raft-10.cfg
+│       ├── raft-5nodes-10.cfg
 │       └── raft.tla
+├── tools/
+│   └── tlc-server/                  # NG自有严格controlled TLC服务
+│       ├── src/main/java/           # HTTP协议、Raft事件映射和TLC驱动
+│       ├── src/test/resources/      # invariant和多后继错误模型
+│       ├── build.sh
+│       ├── run.sh
+│       └── test.sh
 ├── .gitignore
 ├── go.mod
 └── go.sum
@@ -109,7 +189,9 @@ modelfuzz-ng/
 当前阶段已经完成协议无关的 core 数据模型、最小 SUT 接口、基础 Runtime、
 可通过 Runtime 端到端运行的 `internal/adapters/etcdraft` 最小适配器，以及
 Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
-不依赖 LLM 的首版 Plan 数据结构和 Resolver。
+Plan 数据结构和 Resolver。当前也已经具备 Engine、反馈式 Experiment 和 CLI，
+可以把 JSON Plan、真实 Raft、模型事件映射和 NG 自有严格 controlled TLC 串成一次
+完整执行，并持久化全部中间产物；LLM 初始化与变异是默认关闭的可选策略。
 
 ## 4. 建议的目标目录
 
@@ -117,9 +199,11 @@ Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
 
 ```text
 modelfuzz-ng/
-├── cmd/                              # 近期：可执行程序入口
+├── cmd/                              # 已有：可执行程序入口
 │   └── modelfuzz-ng/
-│       └── main.go
+│       ├── main.go                   # run子命令和依赖组装
+│       ├── config.go                 # JSON配置及Raft/模型对齐检查
+│       └── output.go                 # 运行产物安全写入
 │
 ├── configs/                          # 近期：可复用运行配置
 │   ├── etcdraft-basic.yaml
@@ -136,6 +220,7 @@ modelfuzz-ng/
 │   │   ├── action.go
 │   │   ├── effect.go
 │   │   ├── error.go
+│   │   ├── failure.go                 # 结构化失败边界、panic值和堆栈
 │   │   ├── id.go
 │   │   ├── message.go
 │   │   ├── observation.go
@@ -164,6 +249,7 @@ modelfuzz-ng/
 │   │   ├── action.go                 # Concrete Action执行
 │   │   ├── clock.go                  # LogicalTime和AdvanceTime
 │   │   ├── network.go                # 按Link维护确定性消息队列
+│   │   ├── panic.go                  # Adapter/SUT同步调用的panic边界
 │   │   ├── recorder.go               # Action、Effect和Trace记录
 │   │   └── *_test.go
 │   │
@@ -171,7 +257,7 @@ modelfuzz-ng/
 │   │   ├── event.go                  # 模型事件及Reset协议
 │   │   ├── transition.go             # 动作前后Observation和StepRecord
 │   │   ├── mapper.go                 # 通用Mapper接口
-│   │   ├── raft/                     # Raft协议语义映射
+│   │   ├── raft/                     # Raft协议映射及相对term/日志/提交/复制关系覆盖投影
 │   │   └── tlc/                      # Controlled TLC HTTP客户端
 │   │
 │   ├── plan/                         # 已有：生成来源无关的高层计划
@@ -182,27 +268,43 @@ modelfuzz-ng/
 │   │   ├── resolver.go               # PlanStep在线解析为Concrete Action
 │   │   └── *_test.go
 │   │
-│   ├── engine/                       # 近期：多次测试执行和反馈循环
-│   │   ├── engine.go                 # 主循环
-│   │   ├── execution.go              # 单次执行编排
-│   │   ├── budget.go                 # Action、tick、消息和时间预算
+│   ├── engine/                       # 已有：单条Plan完整执行编排
+│   │   ├── engine.go                 # Plan到模型执行的主循环
+│   │   ├── result.go                 # 状态和可持久化执行结果
+│   │   ├── error.go                  # 分层错误分类
 │   │   └── *_test.go
 │   │
-│   ├── policy/                       # 计划生成和调度策略
-│   │   ├── policy.go                 # 统一接口
-│   │   ├── random.go                 # 近期：基础随机策略
+│   ├── experiment/                   # 模型覆盖反馈闭环
+│   │   ├── runner.go                 # 已有：反馈队列、并发执行、周期种子和异步变异
+│   │   ├── digest.go                 # 已有：Plan、Trace和模型状态路径唯一性摘要
+│   │   ├── lifecycle.go              # 已有：事件、checkpoint和恢复校验
+│   │   ├── aggregation.go            # 已有：无完整Run历史的增量汇总及恢复快照
+│   │   ├── statistics.go             # 已有：稳定实验汇总结构
+│   │   └── *_test.go
+│   │
+│   ├── policy/                       # 在线计划生成和调度策略
+│   │   ├── random.go                 # 已有：确定性基础随机策略
+│   │   ├── random_test.go
+│   │   ├── llm.go                    # 已有：LLM prompt、解析和边界校验
+│   │   ├── llm_test.go
 │   │   ├── fair.go                   # 后续：有限公平/消息年龄策略
-│   │   └── llm/                      # 后续：LLM Plan生成
-│   │       ├── planner.go
-│   │       ├── prompt.go
-│   │       ├── schema.go
-│   │       └── client.go
+│   │
+│   ├── llm/                          # 已有：可替换的LLM传输层
+│   │   ├── client.go                 # 厂商无关JSON补全接口
+│   │   ├── provider.go               # DeepSeek/GLM/Qwen/Kimi兼容客户端与预设
+│   │   └── provider_test.go
+│   │
+│   ├── mutation/                     # 已有：Corpus Plan变异
+│   │   ├── mutation.go               # Mutator接口
+│   │   ├── random.go                 # 本地结构变异，含成对crash/restart插入
+│   │   ├── llm.go                    # LLM Mutator适配
+│   │   └── *_test.go
 │   │
 │   ├── oracle/                       # 系统正确性和模型检查
 │   │   ├── oracle.go                 # Oracle统一接口
-│   │   ├── invariant.go              # 通用不变量组合
-│   │   ├── model.go                  # 使用model包结果进行判定
-│   │   └── raft.go                   # Raft专用Oracle，可选后移到Adapter
+│   │   └── raft/                     # Raft在线安全性检查
+│   │       ├── checker.go
+│   │       └── checker_test.go
 │   │
 │   ├── trace/                        # Trace的算法和持久化，不放数据定义
 │   │   ├── io.go                     # JSON读写
@@ -211,15 +313,17 @@ modelfuzz-ng/
 │   │   ├── minimize.go               # 后续：失败轨迹缩减
 │   │   └── *_test.go
 │   │
-│   ├── corpus/                       # 后续：有价值Plan/Trace集合
+│   ├── corpus/                       # 已有：有价值Plan、增量覆盖键及紧凑checkpoint水位
 │   │   ├── corpus.go
-│   │   ├── select.go
-│   │   ├── mutate.go
-│   │   └── *_test.go
+│   │   └── corpus_test.go
 │   │
-│   ├── metrics/                      # 后续：覆盖率和性能统计
+│   ├── metrics/                      # 已有：协议无关的执行、覆盖和性能统计
 │   │   ├── metrics.go
-│   │   └── reporter.go
+│   │   └── metrics_test.go
+│   │
+│   ├── persistence/                  # 已有：原子JSON与追加式JSONL
+│   │   ├── files.go
+│   │   └── files_test.go
 │   │
 │   └── coordinator/                  # 可选：并行worker和任务协调
 │       ├── coordinator.go
@@ -229,7 +333,18 @@ modelfuzz-ng/
 │   └── raft/
 │       ├── README.md
 │       ├── raft.tla
-│       └── raft.cfg
+│       ├── raft.cfg                  # 兼容的5/5配置
+│       ├── raft-5.cfg                # 明确的烟雾边界
+│       ├── raft-10.cfg               # 原ModelFuzz主实验边界
+│       └── raft-5nodes-10.cfg        # 五节点10/10 quorum mutant实验
+│
+├── tools/                            # 非Go的构建与运行工具
+│   └── tlc-server/                   # 已有：严格controlled TLC服务
+│       ├── src/main/java/            # HTTP服务和Raft事件Mapper
+│       ├── src/test/resources/       # 服务端错误语义测试模型
+│       ├── build.sh                  # 固定版本并校验官方TLA+ Tools
+│       ├── run.sh
+│       └── test.sh
 │
 ├── scripts/                          # 构建、运行和实验辅助脚本
 │   ├── test.sh
@@ -302,6 +417,10 @@ modelfuzz-ng/
 - 记录自然/强制 timeout；
 - PreVote、CheckQuorum 和 AsyncStorageWrites 暂时关闭；
 - 每节点随机性必须可重复。
+- 可选的应用层 `SnapshotPolicy`，按 applied entry 数确定性调用
+  `CreateSnapshot`/`Compact`；策略默认关闭；
+- Snapshot Data 保存确定性 committed-prefix 摘要，日志压缩后 Oracle 仍可比较逻辑前缀；
+- `MsgSnap` 不设置专用 Action，仍从 Ready.Messages 进入 Runtime 统一网络队列。
 
 ### 5.4 `internal/runtime`
 
@@ -313,7 +432,8 @@ modelfuzz-ng/
 - 使用最新 Observation 检查节点运行状态；
 - Action前置条件校验；
 - Effect时间校验；
-- Trace追加。
+- Trace追加；
+- 捕获同步 Adapter/SUT panic，保留已完成 Trace 前缀和结构化失败记录。
 
 当前 Runtime 已实现逐 Tick 时间推进、出站消息注册、Deliver/Drop/Duplicate、
 Adapter 能力与前置条件检查、Observation 合并和 Concrete Trace 记录。网络队列
@@ -351,31 +471,50 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 - `model/raft` 识别选举超时、实际投递的 Raft 消息、leader 变化和提交；
 - `model/tlc` 发送事件序列，并接收 TLC 状态文本与 fingerprint key。
 
+`tools/tlc-server` 是模型执行服务端边界。它从唯一初始状态严格重放每个请求，要求
+外部事件唯一映射到一个 enabled TLA+ Action，并在每个后继状态检查 model constraint
+和 cfg 中的 invariant。协议或模型错误返回稳定的结构化原因码，由 `model/tlc`
+保留为 `ExecutionError`，不再像旧服务一样把 disabled action 静默处理成 stutter。
+服务启动时只保留操作符定义，收到事件后才按形参构造具体 `Action`，并使用
+有界 LRU 缓存。`raft-5.cfg`/`raft-10.cfg` 通过 `ControlledNext` 阻止 TLC Tool
+在启动期展开完整 `Next`；`raft.cfg` 保留完整 Spec 供普通 TLC 使用。
+
 模型映射以实际 Effect 为准。例如 `ActionDeliver` 只有在 Adapter 成功接收消息并
 记录 `raft.message_delivered` 后才会变成 `DeliverMessage`。Drop 和 Duplicate
 只改变 Runtime 网络队列，因此可以映射为零条模型事件。
 
 ### 5.7 `internal/engine`
 
-负责更高层的 fuzzing 生命周期：
-
-- 创建和重置 Runtime；
-- 请求 Policy 生成 Plan；
-- 执行 Plan；
-- 调用 Oracle；
-- 收集 Coverage/Metrics；
-- 将有价值的 Plan/Trace 放入 Corpus；
-- 控制 iteration 和总体预算。
+负责一条 Plan 的单次执行闭环：解析 Plan、驱动 Runtime、映射模型事件、调用
+模型执行器和 Oracle，并返回可持久化 Result。跨执行的覆盖、Corpus 和调度由
+`internal/experiment` 管理，Engine 不保存全局搜索状态。
 
 ### 5.8 `internal/policy`
 
-负责生成 Plan，而不是直接修改 Runtime。
+负责读取最新 Observation 并生成下一条 PlanAction，而不是直接修改 Runtime。
+基础 Random 策略按 seed 确定性选择动作类别，再在当前可执行的节点或消息中选择
+具体对象；因此能够选择非 FIFO 位置，也不会用过期 MessageID。
 
-建议先实现简单随机策略，验证完整执行链路；LLM 策略在 Plan schema 和 Runtime 行为稳定后加入。这样可以区分基础框架问题和 LLM 生成问题。
+LLM Planner 与随机 Policy 共享 Plan schema。它只生成并校验 Plan，不直接访问
+Runtime；初始化采用思考模式，变异采用非思考模式。
+
+`internal/experiment` 为每次候选创建独立 Engine/Runtime，维护有上限的 FIFO 候选队列，
+把覆盖到全局新模型状态的 Plan 和增量覆盖键放入 `internal/corpus`，再通过
+`internal/mutation` 异步产生后代。无 TLC 时仍可并行运行随机种子，但没有可用于
+保留和反馈的模型状态。生命周期事件同时驱动统计和持久化；完整 Run/Corpus Entry
+分别追加到 `runs.jsonl`/`corpus.jsonl`，checkpoint 只保存两者水位、ready、in-flight、
+紧凑 pending mutation 引用和聚合统计，恢复时不会从第一条 seed 重跑。Corpus 的每次
+判定保留稳定原因码，区分原始状态门槛、语义 novelty 门槛，以及由语义状态或转移保留；
+逐运行和聚合统计同时记录三类新覆盖及每100 Action的语义 novelty，checkpoint 会校验
+这些计数与 Corpus 水位一致。
 
 ### 5.9 `internal/oracle`
 
-负责判断一次执行是否违反不变量、是否进入新模型状态。协议无关组合逻辑放在这里；强 Raft 语义的检查可以放在 `oracle/raft.go`，或在 Adapter 增长后移入 `internal/adapters/etcdraft`。
+负责逐条检查 Concrete Transition 是否违反不变量。统一接口和 Finding 数据放在
+`oracle.go`；Raft 的 term/commit/applied 单调性、唯一 leader 以及基于
+committed-prefix 摘要的日志一致性检查放在 `oracle/raft`。日志进度不同时比较
+`min(commitA, commitB)` 处的累积摘要，并覆盖 crashed 节点的持久状态。模型状态覆盖统计属于后续 metrics/corpus，
+不混入安全性 Oracle。
 
 ### 5.10 `internal/trace`
 
@@ -412,7 +551,9 @@ Timed Effects + New Observation
     +----> Trace Recorder
     +----> Model Mapper ----> TLC Client ----> Model States
     +----> Oracle
-    +----> Coverage / Corpus / Metrics
+    +----> Experiment Coverage ----> Corpus ----> Mutation --+
+             ^                                            |
+             +---------------- Candidate Queue <----------+
 ```
 
 自然 timer 触发不返回到 Policy 变成新的可选 Action，而是作为执行 `AdvanceTime` 时产生的 `EffectTimerFired` 记录。
@@ -423,8 +564,10 @@ Timed Effects + New Observation
 
 ```text
 cmd
+  -> experiment -> corpus / mutation / engine / plan
+  -> policy / llm
   -> engine
-      -> plan / policy / oracle / corpus / metrics
+      -> plan / oracle / model
       -> runtime
           -> internal/sut接口
           -> core
@@ -473,25 +616,28 @@ core
 3. 已完成 AdvanceTicks；
 4. 已完成 Link/Start/Count Selector解析；
 5. 已完成 resolved/partial/skipped/invalid/empty_queue解析结果；
-6. 待 Engine 执行已解析动作并生成Concrete ActionSequence。
+6. 已完成 Engine 执行已解析动作并生成Concrete ActionSequence；
+7. 已完成 CLI 读取JSON Plan并保存完整运行产物。
 
 ### 阶段三：形成基础fuzzer
 
-1. Engine循环；
-2. Random Policy；
-3. 基础 Oracle；
-4. Coverage和Metrics；
-5. Trace保存与重放；
-6. 简单Corpus和Mutation。
+1. 已完成单条Plan的Engine循环；
+2. 已完成基于实时Observation的Random Policy，包括消息调度、时间、请求和节点生命周期；
+3. 已完成基础Raft Oracle；
+4. 已完成基于模型状态覆盖的Corpus保留；
+5. 已完成Trace保存与重放；
+6. 已完成本地随机Mutation和反馈队列；
+7. 已完成独立 Metrics、增量 journal、原子 checkpoint、产物策略和恢复执行。
 
 ### 阶段四：加入高级能力
 
-1. LLM Plan生成；
+1. 已完成可选多 provider LLM 初始 Plan 和 Mutation 接入，待通过大规模对照实验优化 prompt；
 2. Partition/FairDeliver/RunUntilLeader等宏；
 3. 在已有TLA+执行链路上增加模型引导策略；
 4. 多worker并行执行；
 5. Trace minimization；
-6. PreVote、CheckQuorum、snapshot等Raft扩展。
+6. Snapshot/日志压缩已完成 Adapter、Runtime、Oracle 和基础模型 stutter 支持；
+   PreVote、CheckQuorum、动态 membership 以及完整 InstallSnapshot TLA+ 模型仍属后续扩展。
 
 ## 9. 维护规则
 

@@ -13,8 +13,8 @@
 - 保证实际执行可以记录、比较和严格重放；
 - 第一版 Raft Adapter 尽可能简单。
 
-本文描述的基础 Adapter、Plan 数据结构和 Resolver 已经实现；Engine、动态节点
-选择器和更高级的宏仍属于后续工作。
+本文描述的 Core、Runtime、Adapter、Plan/Resolver 和 Engine 基础闭环已经实现；
+动态节点选择器和更高级的宏仍属于后续工作。
 
 ## 2. Timer 设计的主要困难
 
@@ -51,10 +51,11 @@ TimerFired
 
 记录自然或强制 timer 事件。
 
-第一版不定义 `EffectSetTimer` 和 `EffectCancelTimer`。etcd-raft 只向外暴露
-`Tick()`，内部通过 elapsed 计数器重置超时，Adapter 无法在不修改 Raft 的
-情况下准确观测“设置”和“取消”行为。如果以后接入显式虚拟 timer 的系统，
-再根据实际需求增加这类 Effect。
+当前不定义 `EffectSetTimer` 和 `EffectCancelTimer`。本地 Raft fork 已通过
+`BasicStatus` 只读暴露 election/heartbeat 的 elapsed、timeout 和随机 election
+timeout；Adapter 在 Observation 中进一步给出剩余 tick。这足以准确判断自然
+timer 的下一次触发点，但 elapsed 被内部重置仍不等同于对外可观测的“设置/取消”
+事件。如果以后接入显式虚拟 timer 的系统，再根据实际需求增加这类 Effect。
 
 ### 3.2 强制超时是可选择Action
 
@@ -602,7 +603,8 @@ ActionSequence:
 
 以下问题仍需在后续 Engine、策略和扩展 Adapter 中决定：
 
-1. 当前通过状态变化和 Ready 消息推断 timer，何时需要增加更精确的 Raft hook；
+1. 当前已暴露 timer 计数器，但触发事件仍通过状态变化和 Ready 消息推断；何时需要
+   增加触发瞬间的专用 Raft hook；
 2. 总 tick budget 和 Election Storm 阈值应放在 Engine 的哪一层；
 3. 周期性 heartbeat 大量堆积时是否允许降权、合并或压缩；
 4. 是否需要在 Message 中持久化 `DeliveredAt`，还是从 Trace 推导；

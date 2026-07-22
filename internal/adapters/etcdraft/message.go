@@ -61,13 +61,23 @@ func messageDigest(message *raftpb.Message) (string, error) {
 
 // outboundMessage 将 Raft 消息复制成尚未注册 ID 的 core.Message。
 // Runtime 随后负责分配 MessageID、链路序号并加入确定性队列。
-func (a *Adapter) outboundMessage(message *raftpb.Message) (core.Message, error) {
+func (a *Adapter) outboundMessage(message *raftpb.Message, forwarded *core.Message) (core.Message, error) {
 	if message == nil || message.GetFrom() == 0 || message.GetTo() == 0 {
 		return core.Message{}, fmt.Errorf("%w: from and to must be non-zero", ErrInvalidMessage)
 	}
-	if raftNode, exists := a.nodes[core.NodeID(message.GetFrom())]; !exists {
+	sender, exists := a.nodes[core.NodeID(message.GetFrom())]
+	if !exists {
 		return core.Message{}, fmt.Errorf("%w: sender n%d is unknown", ErrInvalidMessage, message.GetFrom())
-	} else if !raftNode.running {
+	}
+	senderEpoch := sender.epoch
+	if forwarded != nil && message.GetType() == raftpb.MsgProp &&
+		forwarded.TypeHint == raftpb.MsgProp.String() && forwarded.From == core.NodeID(message.GetFrom()) {
+		// etcd-raft forwards a proposal without replacing its logical From. The
+		// original requester can crash or restart while that proposal is queued;
+		// preserve the epoch carried by the delivered envelope instead of
+		// attributing the forwarding to the requester's current incarnation.
+		senderEpoch = forwarded.SenderEpoch
+	} else if !sender.running {
 		return core.Message{}, fmt.Errorf("%w: sender n%d is crashed", ErrInvalidMessage, message.GetFrom())
 	}
 	if _, exists := a.nodes[core.NodeID(message.GetTo())]; !exists {
@@ -79,11 +89,10 @@ func (a *Adapter) outboundMessage(message *raftpb.Message) (core.Message, error)
 	if err != nil {
 		return core.Message{}, fmt.Errorf("digest raft message: %w", err)
 	}
-	sender := a.nodes[core.NodeID(message.GetFrom())]
 	result := core.Message{
 		From:          core.NodeID(message.GetFrom()),
 		To:            core.NodeID(message.GetTo()),
-		SenderEpoch:   sender.epoch,
+		SenderEpoch:   senderEpoch,
 		TypeHint:      message.GetType().String(),
 		PayloadDigest: digest,
 		Metadata: map[string]string{
@@ -95,6 +104,12 @@ func (a *Adapter) outboundMessage(message *raftpb.Message) (core.Message, error)
 			"entry_count": strconv.Itoa(len(message.GetEntries())),
 		},
 		Payload: cloned,
+	}
+	if message.GetType() == raftpb.MsgSnap {
+		snapshot := message.GetSnapshot()
+		result.Metadata["snapshot_index"] = strconv.FormatUint(snapshot.GetMetadata().GetIndex(), 10)
+		result.Metadata["snapshot_term"] = strconv.FormatUint(snapshot.GetMetadata().GetTerm(), 10)
+		result.Metadata["snapshot_bytes"] = strconv.Itoa(len(snapshot.GetData()))
 	}
 	if err := result.ValidateOutbound(); err != nil {
 		return core.Message{}, fmt.Errorf("%w: %v", ErrInvalidMessage, err)

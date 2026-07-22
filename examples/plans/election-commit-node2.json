@@ -1,0 +1,46 @@
+{
+  "actions": [
+    {
+      "kind": "timeout",
+      "node": 2
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 3},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 3, "to": 2},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 3},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 3, "to": 2},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 3},
+        "count": 1
+      }
+    }
+  ],
+  "metadata": {
+    "description": "节点2经节点3投票成为leader，并把term 1的no-op复制到节点3后提交"
+  }
+}

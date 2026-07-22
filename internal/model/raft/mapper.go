@@ -12,17 +12,19 @@ import (
 )
 
 const deliveredMessageEvent = "raft.message_delivered"
+const proposalDroppedEvent = "raft.proposal_dropped"
+const voteQuorumFaultEvent = "raft.vote_quorum_fault_activated"
 
 var ErrUnsupportedSemantics = errors.New("transition is not represented by the raft model")
 
 // Config 与 models/raft/raft.cfg 的有界常量对应。Engine 创建 Adapter 和
 // Mapper 时应从同一份运行配置填充这些值，避免模型和 SUT 静默漂移。
 type Config struct {
-	NodeIDs        []core.NodeID
-	MaxValue       int
-	MaxLogIndex    uint64
-	LargestTerm    uint64
-	EmitLeaderNoOp bool
+	NodeIDs        []core.NodeID `json:"node_ids"`
+	MaxValue       int           `json:"max_value"`
+	MaxLogIndex    uint64        `json:"max_log_index"`
+	LargestTerm    uint64        `json:"largest_term"`
+	EmitLeaderNoOp bool          `json:"emit_leader_no_op"`
 }
 
 func DefaultConfig() Config {
@@ -108,22 +110,34 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 	action := transition.Record.Action
 	switch action.Kind {
 	case core.ActionRequest:
-		if roleOf(transition.Before, action.Node) != "leader" {
-			return nil, fmt.Errorf("%w: client request targets non-leader %s", ErrUnsupportedSemantics, action.Node)
-		}
-		if lastIndexOf(transition.Before, action.Node) >= m.config.MaxLogIndex {
-			return nil, fmt.Errorf("%w: client request exceeds MaxLogIndex %d", ErrUnsupportedSemantics, m.config.MaxLogIndex)
-		}
 		request, err := numericRequest(action.Request, m.config.MaxValue)
 		if err != nil {
 			return nil, err
 		}
-		events = append(events, model.NewEvent("ClientRequest", map[string]any{
-			"request": request,
-			"leader":  uint64(action.Node),
-		}))
-	case core.ActionCrash, core.ActionRestart:
-		return nil, fmt.Errorf("%w: %s is not enabled in the first raft model", ErrUnsupportedSemantics, action.Kind)
+		if roleOf(transition.Before, action.Node) == "leader" {
+			if lastIndexOf(transition.Before, action.Node) >= m.config.MaxLogIndex {
+				return nil, fmt.Errorf("%w: client request exceeds MaxLogIndex %d", ErrUnsupportedSemantics, m.config.MaxLogIndex)
+			}
+			events = append(events, model.NewEvent("ClientRequest", map[string]any{
+				"request": request,
+				"leader":  uint64(action.Node),
+			}))
+		}
+	case core.ActionCrash:
+		if statusOf(transition.Before, action.Node) != core.NodeRunning ||
+			statusOf(transition.After, action.Node) != core.NodeCrashed {
+			return nil, fmt.Errorf("%w: crash node %s has inconsistent before/after status", ErrUnsupportedSemantics, action.Node)
+		}
+		// 保持与原 controlled TLC RaftActionMapper 的事件协议兼容：Remove
+		// 会选择 TLA+ 中对应节点的 RemoveFromActive 动作。
+		events = append(events, model.NewEvent("Remove", map[string]any{"i": uint64(action.Node)}))
+	case core.ActionRestart:
+		if statusOf(transition.Before, action.Node) != core.NodeCrashed ||
+			statusOf(transition.After, action.Node) != core.NodeRunning {
+			return nil, fmt.Errorf("%w: restart node %s has inconsistent before/after status", ErrUnsupportedSemantics, action.Node)
+		}
+		// AddToActive 同时恢复活动成员并重置该节点的 Raft 易失状态。
+		events = append(events, model.NewEvent("Add", map[string]any{"i": uint64(action.Node)}))
 	}
 
 	commitNodes := make([]core.NodeID, 0)
@@ -132,8 +146,21 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 		switch effect.Kind {
 		case core.EffectTimerFired:
 			if effect.TimerFired.TypeHint == "election" {
-				if termOf(transition.Before, effect.TimerFired.Node) >= m.config.LargestTerm {
+				beforeTerm, afterTerm, err := electionTimerTerms(effect.TimerFired, transition)
+				if err != nil {
+					return nil, err
+				}
+				// 对 Leader 调用 Campaign 时 etcd-raft 会保持状态不变。Adapter
+				// 仍记录这次强制 timer 尝试，但模型必须明确 stutter，不能生成
+				// 在当前 TLA+ 状态下 disabled 的 Timeout。
+				if afterTerm == beforeTerm {
+					continue
+				}
+				if beforeTerm >= m.config.LargestTerm {
 					return nil, fmt.Errorf("%w: timeout exceeds LargestTerm %d", ErrUnsupportedSemantics, m.config.LargestTerm)
+				}
+				if afterTerm != beforeTerm+1 {
+					return nil, fmt.Errorf("%w: election timer changed term from %d to %d", ErrUnsupportedSemantics, beforeTerm, afterTerm)
 				}
 				events = append(events, model.NewEvent("Timeout", map[string]any{
 					"node": uint64(effect.TimerFired.Node),
@@ -143,14 +170,22 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 			event := effect.ModelEvent
 			switch event.Name {
 			case deliveredMessageEvent:
-				mapped, err := m.mapDeliveredMessage(event.Params)
+				mapped, err := m.mapDeliveredMessage(event.Params, transition.Record.Effects, transition.Before)
 				if err != nil {
 					return nil, err
 				}
-				if mapped != nil {
-					events = append(events, *mapped)
-				}
-			case "raft.snapshot_applied", "raft.config_changed":
+				events = append(events, mapped...)
+			case proposalDroppedEvent, voteQuorumFaultEvent:
+				// Candidate、无已知 leader 的 follower 或关闭转发时，etcd-raft
+				// 明确丢弃 proposal；fault activation 只是 SUT 插桩记录。
+				// 两者都不直接改变轻量模型状态；异常的 BecomeLeader 会由
+				// 后续正确 quorum 前置条件拒绝。
+				continue
+			case "raft.snapshot_created", "raft.snapshot_sent", "raft.snapshot_delivered",
+				"raft.snapshot_applied", "raft.snapshot_rejected_or_stale", "raft.log_compacted":
+				// 基础 raft.tla 没有 snapshot 变量；这些应用/存储层事件稳定地映射为 stutter。
+				continue
+			case "raft.config_changed":
 				return nil, fmt.Errorf("%w: model event %s", ErrUnsupportedSemantics, event.Name)
 			case "raft.entry_committed":
 				if roleOf(transition.After, event.Node) == "leader" {
@@ -181,14 +216,37 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 	return events, nil
 }
 
-func (m *Mapper) mapDeliveredMessage(params map[string]any) (*model.Event, error) {
+// electionTimerTerms 优先读取 Effect 记录的单次 timeout 边界。一次 AdvanceTime
+// 可以包含同一节点的多次自然超时，此时 Transition 的总 before/after term 无法表示
+// 每一次跳变。旧 Trace 没有该 metadata 时，退回到全局 Observation 以保持兼容。
+func electionTimerTerms(fired *core.TimerFired, transition model.Transition) (uint64, uint64, error) {
+	beforeText, hasBefore := fired.Metadata["term_before"]
+	afterText, hasAfter := fired.Metadata["term_after"]
+	if !hasBefore && !hasAfter {
+		return termOf(transition.Before, fired.Node), termOf(transition.After, fired.Node), nil
+	}
+	if !hasBefore || !hasAfter {
+		return 0, 0, fmt.Errorf("%w: election timer metadata must contain term_before and term_after", ErrUnsupportedSemantics)
+	}
+	before, beforeErr := strconv.ParseUint(beforeText, 10, 64)
+	after, afterErr := strconv.ParseUint(afterText, 10, 64)
+	if beforeErr != nil || afterErr != nil {
+		return 0, 0, fmt.Errorf(
+			"%w: election timer has invalid term metadata %q -> %q",
+			ErrUnsupportedSemantics, beforeText, afterText,
+		)
+	}
+	return before, after, nil
+}
+
+func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effect, before core.Observation) ([]model.Event, error) {
 	messageType, ok := params["type"].(string)
 	if !ok || messageType == "" {
 		return nil, fmt.Errorf("%w: delivered message has no type", ErrUnsupportedSemantics)
 	}
 
 	switch messageType {
-	case "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp":
+	case "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp", "MsgSnap":
 		// 当前配置关闭 CheckQuorum，且轻量模型不包含只读请求状态；这些消息
 		// 对模型变量是明确的 stutter，而不是泛化的“未知消息忽略”。
 		return nil, nil
@@ -203,24 +261,54 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any) (*model.Event, error
 		normalized["index"] = uint64(0)
 		normalized["log_term"] = uint64(0)
 		normalized["entries"] = []map[string]any{}
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+	case "MsgProp":
+		to, ok := unsignedParam(params["to"])
+		if !ok {
+			return nil, fmt.Errorf("%w: MsgProp to must be an unsigned integer", ErrUnsupportedSemantics)
+		}
+		if roleOf(before, core.NodeID(to)) != "leader" {
+			// Follower 可能继续转发，Candidate 会明确丢弃；两者在模型中
+			// 都尚未发生 ClientRequest 状态转换。
+			return nil, nil
+		}
+		entries, err := normalizeEntries(params["entries"], m.config.MaxValue, m.config.LargestTerm)
+		if err != nil {
+			return nil, fmt.Errorf("%w: MsgProp: %v", ErrUnsupportedSemantics, err)
+		}
+		if len(entries) == 0 || uint64(len(entries)) > m.config.MaxLogIndex-lastIndexOf(before, core.NodeID(to)) {
+			return nil, fmt.Errorf("%w: MsgProp entries exceed MaxLogIndex %d", ErrUnsupportedSemantics, m.config.MaxLogIndex)
+		}
+		result := make([]model.Event, len(entries))
+		for index, entry := range entries {
+			value, exists := entry["Data"].(string)
+			if !exists {
+				return nil, fmt.Errorf("%w: MsgProp entry %d has no client value", ErrUnsupportedSemantics, index)
+			}
+			request, err := numericRequest([]byte(value), m.config.MaxValue)
+			if err != nil {
+				return nil, err
+			}
+			result[index] = model.NewEvent("ClientRequest", map[string]any{
+				"request": request,
+				"leader":  to,
+			})
+		}
+		return result, nil
 	case "MsgVote":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "log_term", "index")
 		if err != nil {
 			return nil, err
 		}
 		normalized["type"] = messageType
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	case "MsgVoteResp":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "reject")
 		if err != nil {
 			return nil, err
 		}
 		normalized["type"] = messageType
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	case "MsgApp":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "commit", "log_term", "index")
 		if err != nil {
@@ -230,24 +318,88 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any) (*model.Event, error
 		if err != nil {
 			return nil, fmt.Errorf("%w: MsgApp: %v", ErrUnsupportedSemantics, err)
 		}
-		if len(entries) > 1 {
-			return nil, fmt.Errorf("%w: MsgApp contains %d entries; model supports at most one", ErrUnsupportedSemantics, len(entries))
+		baseIndex := normalized["index"].(uint64)
+		if uint64(len(entries)) > m.config.MaxLogIndex-baseIndex {
+			return nil, fmt.Errorf("%w: MsgApp entries exceed MaxLogIndex %d", ErrUnsupportedSemantics, m.config.MaxLogIndex)
 		}
 		normalized["type"] = messageType
-		normalized["entries"] = entries
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		// etcd-raft 对 prev index 已落在 committed 前面的 MsgApp 直接回复当前
+		// commit index，不检查也不追加其中的 entries。把这种消息展开会让 TLC
+		// 凭空追加 SUT 实际忽略的日志。用一个保证日志不变的 nil append 只抽象
+		// 该消息可能造成的 term/role 更新，并保持 commit 不变。
+		beforeCommit := commitIndexOf(before, core.NodeID(normalized["to"].(uint64)))
+		if baseIndex < beforeCommit {
+			normalized["index"] = uint64(0)
+			normalized["log_term"] = uint64(0)
+			normalized["commit"] = beforeCommit
+			normalized["entries"] = []map[string]any{}
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
+		if len(entries) <= 1 {
+			normalized["entries"] = entries
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
+
+		rejected, found, err := appendResponse(effects, normalized["to"].(uint64), normalized["from"].(uint64))
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			// etcd-raft 对旧任期 MsgApp 会直接忽略且不发送响应。轻量模型中
+			// 第一条 entry 已足以执行同一个拒绝/stutter 分支；继续展开不会
+			// 增加语义，只会制造不存在的中间状态。
+			normalized["entries"] = entries[:1]
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
+		if rejected {
+			// 原子批次被拒绝时，第一条单 entry 动作已足以表达日志不匹配；继续
+			// 展开可能让后续 entry 在错误前缀上被模型单独接受。
+			normalized["entries"] = entries[:1]
+			return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
+		}
+
+		// 当前 controlled TLC 的 RaftActionMapper 只接受单 entry。成功批次按
+		// 日志顺序展开为一组模型事件，保持最终日志和 commit 与原子处理一致。
+		// 这些中间模型状态只属于映射实现，不对应额外的 SUT Action。
+		result := make([]model.Event, len(entries))
+		previousTerm := normalized["log_term"].(uint64)
+		for index, entry := range entries {
+			projected := make(map[string]any, len(normalized)+1)
+			for key, value := range normalized {
+				projected[key] = value
+			}
+			projected["index"] = baseIndex + uint64(index)
+			projected["log_term"] = previousTerm
+			projected["entries"] = []map[string]any{entry}
+			result[index] = model.NewEvent("DeliverMessage", projected)
+			previousTerm = entry["Term"].(uint64)
+		}
+		return result, nil
 	case "MsgAppResp":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "reject", "index")
 		if err != nil {
 			return nil, err
 		}
 		normalized["type"] = messageType
-		event := model.NewEvent("DeliverMessage", normalized)
-		return &event, nil
+		return []model.Event{model.NewEvent("DeliverMessage", normalized)}, nil
 	default:
 		return nil, fmt.Errorf("%w: delivered message type %s", ErrUnsupportedSemantics, messageType)
 	}
+}
+
+func appendResponse(effects []core.Effect, from, to uint64) (rejected, found bool, err error) {
+	for _, effect := range effects {
+		if effect.Kind != core.EffectSendMessage || effect.Message == nil ||
+			effect.Message.TypeHint != "MsgAppResp" || uint64(effect.Message.From) != from || uint64(effect.Message.To) != to {
+			continue
+		}
+		value, parseErr := strconv.ParseBool(effect.Message.Metadata["reject"])
+		if parseErr != nil {
+			return false, false, fmt.Errorf("%w: MsgAppResp has invalid reject metadata", ErrUnsupportedSemantics)
+		}
+		return value, true, nil
+	}
+	return false, false, nil
 }
 
 func (m *Mapper) normalizeMessage(params map[string]any, names ...string) (map[string]any, error) {
@@ -440,6 +592,15 @@ func roleOf(observation core.Observation, id core.NodeID) string {
 	return ""
 }
 
+func statusOf(observation core.Observation, id core.NodeID) core.NodeStatus {
+	for _, node := range observation.Nodes {
+		if node.ID == id {
+			return node.Status
+		}
+	}
+	return ""
+}
+
 func termOf(observation core.Observation, id core.NodeID) uint64 {
 	for _, node := range observation.Nodes {
 		if node.ID == id {
@@ -454,6 +615,16 @@ func lastIndexOf(observation core.Observation, id core.NodeID) uint64 {
 	for _, node := range observation.Nodes {
 		if node.ID == id {
 			value, _ := unsignedParam(node.Semantic["last_index"])
+			return value
+		}
+	}
+	return 0
+}
+
+func commitIndexOf(observation core.Observation, id core.NodeID) uint64 {
+	for _, node := range observation.Nodes {
+		if node.ID == id {
+			value, _ := unsignedParam(node.Semantic["commit"])
 			return value
 		}
 	}

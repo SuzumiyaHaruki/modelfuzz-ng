@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
@@ -448,4 +449,72 @@ func TestRuntimeRejectsIncorrectTimeoutSource(t *testing.T) {
 			t.Fatalf("missing forced timeout effect error = %v, want ErrAdapterContract", err)
 		}
 	})
+}
+
+func TestRuntimeCapturesSUTPanicWithStackAndFailedAction(t *testing.T) {
+	adapter := newFakeAdapter()
+	adapter.tickEffects = func(core.LogicalTime) []core.Effect {
+		panic("tick exploded")
+	}
+	runtime := newTestRuntime(t, adapter)
+	action := core.Action{Kind: core.ActionAdvanceTime, TargetTime: 1}
+
+	_, err := runtime.Execute(context.Background(), action)
+	if !errors.Is(err, ErrSUTPanic) {
+		t.Fatalf("execute error = %v, want ErrSUTPanic", err)
+	}
+	failure := runtime.Failure()
+	if failure == nil {
+		t.Fatal("panic failure was not recorded")
+	}
+	if failure.Kind != core.FailureSUTPanic || failure.Operation != "tick" ||
+		failure.PanicValue != "tick exploded" || failure.Action == nil || failure.Action.Kind != core.ActionAdvanceTime {
+		t.Fatalf("failure = %+v", failure)
+	}
+	if failure.Time != 1 || failure.ObservationBefore.Time != 0 || len(failure.ObservationBefore.Nodes) != 3 {
+		t.Fatalf("failure boundary = %+v", failure)
+	}
+	if !strings.Contains(failure.Stack, "TestRuntimeCapturesSUTPanicWithStackAndFailedAction") {
+		t.Fatalf("panic stack does not identify fault site:\n%s", failure.Stack)
+	}
+	if err := failure.Validate(); err != nil {
+		t.Fatalf("failure validation: %v", err)
+	}
+	trace, traceErr := runtime.Trace()
+	if traceErr != nil || len(trace.Steps) != 0 {
+		t.Fatalf("partial failed action entered trace: steps=%d err=%v", len(trace.Steps), traceErr)
+	}
+	if _, err := runtime.CurrentObservation(); !errors.Is(err, ErrTerminated) {
+		t.Fatalf("runtime after panic = %v, want ErrTerminated", err)
+	}
+}
+
+type resetPanicAdapter struct {
+	*fakeAdapter
+}
+
+func (a *resetPanicAdapter) Reset(context.Context, sut.ResetOptions) error {
+	panic("reset exploded")
+}
+
+func TestRuntimeCapturesResetPanicBeforeInitialObservation(t *testing.T) {
+	runtime, err := New(&resetPanicAdapter{fakeAdapter: newFakeAdapter()}, Config{
+		ExecutionID: "reset-panic", Seed: 42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.Reset(context.Background())
+	if !errors.Is(err, ErrSUTPanic) {
+		t.Fatalf("reset error = %v, want ErrSUTPanic", err)
+	}
+	failure := runtime.Failure()
+	if failure == nil || failure.Kind != core.FailureSUTPanic || failure.Operation != "reset" ||
+		failure.Action != nil || failure.PanicValue != "reset exploded" {
+		t.Fatalf("reset failure = %+v", failure)
+	}
+	trace, traceErr := runtime.Trace()
+	if traceErr != nil || trace.ExecutionID != "reset-panic" || len(trace.Steps) != 0 {
+		t.Fatalf("reset failure trace = %+v, err=%v", trace, traceErr)
+	}
 }

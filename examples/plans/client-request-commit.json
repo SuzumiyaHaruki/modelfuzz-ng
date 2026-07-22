@@ -1,0 +1,65 @@
+{
+  "actions": [
+    {
+      "kind": "timeout",
+      "node": 1
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 1, "to": 2},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 1},
+        "count": 1
+      }
+    },
+    {
+      "kind": "request",
+      "node": 1,
+      "request": "1"
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 1, "to": 2},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 1},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 1, "to": 2},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 2, "to": 1},
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {"from": 1, "to": 2},
+        "count": 1
+      }
+    }
+  ],
+  "metadata": {
+    "description": "节点1当选后追加请求值1，把no-op和请求日志复制到节点2并提交"
+  }
+}

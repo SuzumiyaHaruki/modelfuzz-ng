@@ -2,9 +2,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/sut"
 )
 
 // Execute 执行一条已经具体化的 Action，并将实际 Effect 和最终 Observation
@@ -27,6 +29,10 @@ func (r *Runtime) Execute(ctx context.Context, action core.Action) (StepResult, 
 		return StepResult{}, err
 	}
 	if err := r.validatePreconditions(action); err != nil {
+		if errors.Is(err, ErrSUTPanic) {
+			r.terminated = true
+			r.recordFailure("capabilities", &action, r.observation, err)
+		}
 		return StepResult{}, err
 	}
 
@@ -35,6 +41,7 @@ func (r *Runtime) Execute(ctx context.Context, action core.Action) (StepResult, 
 	effects, err := r.applyAction(ctx, action)
 	if err != nil {
 		r.terminated = true
+		r.recordFailure("execute", &action, beforeObservation, err)
 		return StepResult{}, err
 	}
 
@@ -43,6 +50,7 @@ func (r *Runtime) Execute(ctx context.Context, action core.Action) (StepResult, 
 	observation, err := r.collectObservation(ctx)
 	if err != nil {
 		r.terminated = true
+		r.recordFailure("observe", &action, beforeObservation, err)
 		return StepResult{}, err
 	}
 	digest, err := observationDigest(observation)
@@ -100,7 +108,12 @@ func copyNodes(nodes []core.NodeObservation) []core.NodeObservation {
 
 // validatePreconditions 检查 Action 是否满足执行前置条件。若不满足，返回 ErrInvalidAction。
 func (r *Runtime) validatePreconditions(action core.Action) error {
-	capabilities := r.adapter.Capabilities()
+	capabilities, err := callSUT("capabilities", func() (sut.Capabilities, error) {
+		return r.adapter.Capabilities(), nil
+	})
+	if err != nil {
+		return fmt.Errorf("%w: capabilities: %w", ErrAdapter, err)
+	}
 	switch action.Kind {
 	case core.ActionTimeout:
 		if !capabilities.ForceTimeout {
@@ -164,9 +177,11 @@ func (r *Runtime) applyAction(ctx context.Context, action core.Action) ([]core.E
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidAction, err)
 		}
-		effects, err := r.adapter.Deliver(ctx, r.time, selected.message.Copy())
+		effects, err := callSUT("deliver", func() ([]core.Effect, error) {
+			return r.adapter.Deliver(ctx, r.time, selected.message.Copy())
+		})
 		if err != nil {
-			return nil, fmt.Errorf("%w: deliver %s: %v", ErrAdapter, action.Message, err)
+			return nil, fmt.Errorf("%w: deliver %s: %w", ErrAdapter, action.Message, err)
 		}
 		if _, err := r.network.remove(action.Message, *action.Selector); err != nil {
 			return nil, fmt.Errorf("%w: remove delivered message: %v", ErrAdapterContract, err)
@@ -189,9 +204,11 @@ func (r *Runtime) applyAction(ctx context.Context, action core.Action) ([]core.E
 		return r.advanceTime(ctx, action.TargetTime)
 
 	case core.ActionTimeout:
-		effects, err := r.adapter.ForceTimeout(ctx, r.time, action.Node)
+		effects, err := callSUT("force_timeout", func() ([]core.Effect, error) {
+			return r.adapter.ForceTimeout(ctx, r.time, action.Node)
+		})
 		if err != nil {
-			return nil, fmt.Errorf("%w: timeout node %s: %v", ErrAdapter, action.Node, err)
+			return nil, fmt.Errorf("%w: timeout node %s: %w", ErrAdapter, action.Node, err)
 		}
 		concrete, err := r.processAdapterEffects(effects, r.time)
 		if err != nil {
@@ -203,23 +220,29 @@ func (r *Runtime) applyAction(ctx context.Context, action core.Action) ([]core.E
 		return concrete, nil
 
 	case core.ActionCrash:
-		effects, err := r.adapter.Crash(ctx, r.time, action.Node)
+		effects, err := callSUT("crash", func() ([]core.Effect, error) {
+			return r.adapter.Crash(ctx, r.time, action.Node)
+		})
 		if err != nil {
-			return nil, fmt.Errorf("%w: crash node %s: %v", ErrAdapter, action.Node, err)
+			return nil, fmt.Errorf("%w: crash node %s: %w", ErrAdapter, action.Node, err)
 		}
 		return r.processAdapterEffects(effects, r.time)
 
 	case core.ActionRestart:
-		effects, err := r.adapter.Restart(ctx, r.time, action.Node)
+		effects, err := callSUT("restart", func() ([]core.Effect, error) {
+			return r.adapter.Restart(ctx, r.time, action.Node)
+		})
 		if err != nil {
-			return nil, fmt.Errorf("%w: restart node %s: %v", ErrAdapter, action.Node, err)
+			return nil, fmt.Errorf("%w: restart node %s: %w", ErrAdapter, action.Node, err)
 		}
 		return r.processAdapterEffects(effects, r.time)
 
 	case core.ActionRequest:
-		effects, err := r.adapter.Request(ctx, r.time, action.Node, append([]byte(nil), action.Request...))
+		effects, err := callSUT("request", func() ([]core.Effect, error) {
+			return r.adapter.Request(ctx, r.time, action.Node, append([]byte(nil), action.Request...))
+		})
 		if err != nil {
-			return nil, fmt.Errorf("%w: request node %s: %v", ErrAdapter, action.Node, err)
+			return nil, fmt.Errorf("%w: request node %s: %w", ErrAdapter, action.Node, err)
 		}
 		return r.processAdapterEffects(effects, r.time)
 
