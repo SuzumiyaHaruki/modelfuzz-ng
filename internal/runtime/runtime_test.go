@@ -390,6 +390,59 @@ func TestRuntimeDuplicateAndDropUseCurrentQueuePosition(t *testing.T) {
 	}
 }
 
+func TestRuntimePartitionBlocksDeliveryUntilHealWithoutDroppingMessage(t *testing.T) {
+	adapter := newFakeAdapter()
+	adapter.tickEffects = func(at core.LogicalTime) []core.Effect {
+		if at != 1 {
+			return nil
+		}
+		message := outbound(1, 2, "partitioned")
+		return []core.Effect{{At: at, Kind: core.EffectSendMessage, Message: &message}}
+	}
+	runtime := newTestRuntime(t, adapter)
+	ctx := context.Background()
+	advanced, err := runtime.Execute(ctx, core.Action{Kind: core.ActionAdvanceTime, TargetTime: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := advanced.Observation.Messages[0]
+	partition := core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}
+	partitioned, err := runtime.Execute(ctx, core.Action{Kind: core.ActionPartition, Partition: &partition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partitioned.Observation.NetworkPartition == nil || !partitioned.Observation.Messages[0].Blocked {
+		t.Fatalf("partition is not observable: %+v", partitioned.Observation)
+	}
+	_, err = runtime.Execute(ctx, core.Action{
+		Kind: core.ActionDeliver, Message: message.ID,
+		Selector: &core.MessageSelector{Link: core.LinkID{From: 1, To: 2}, Position: 0},
+	})
+	if !errors.Is(err, ErrInvalidAction) || !errors.Is(err, ErrNetworkPartitioned) {
+		t.Fatalf("blocked delivery error = %v", err)
+	}
+	current, err := runtime.CurrentObservation()
+	if err != nil || len(current.Messages) != 1 || current.Messages[0].ID != message.ID {
+		t.Fatalf("blocked delivery changed queue: observation=%+v error=%v", current, err)
+	}
+	healed, err := runtime.Execute(ctx, core.Action{Kind: core.ActionHeal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healed.Observation.NetworkPartition != nil || healed.Observation.Messages[0].Blocked {
+		t.Fatalf("heal did not restore link: %+v", healed.Observation)
+	}
+	if _, err := runtime.Execute(ctx, core.Action{
+		Kind: core.ActionDeliver, Message: message.ID,
+		Selector: &core.MessageSelector{Link: core.LinkID{From: 1, To: 2}, Position: 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(adapter.delivered) != 1 || adapter.delivered[0].ID != message.ID {
+		t.Fatalf("delivered messages = %+v", adapter.delivered)
+	}
+}
+
 func TestRuntimeRejectsUnsupportedOptionalAction(t *testing.T) {
 	adapter := newFakeAdapter()
 	adapter.capabilities.ForceTimeout = false

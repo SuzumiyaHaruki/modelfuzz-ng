@@ -64,16 +64,17 @@ func (v *generatedRequestValue) UnmarshalJSON(data []byte) error {
 }
 
 type generatedPlanAction struct {
-	Kind     plan.ActionKind            `json:"kind"`
-	Node     core.NodeID                `json:"node,omitempty"`
-	Messages *plan.MessageRangeSelector `json:"messages,omitempty"`
-	Ticks    uint64                     `json:"ticks,omitempty"`
-	Request  generatedRequestValue      `json:"request,omitempty"`
+	Kind      plan.ActionKind            `json:"kind"`
+	Node      core.NodeID                `json:"node,omitempty"`
+	Messages  *plan.MessageRangeSelector `json:"messages,omitempty"`
+	Ticks     uint64                     `json:"ticks,omitempty"`
+	Request   generatedRequestValue      `json:"request,omitempty"`
+	Partition *core.NetworkPartition     `json:"partition,omitempty"`
 }
 
 func (a generatedPlanAction) planAction() plan.PlanAction {
 	return plan.PlanAction{
-		Kind: a.Kind, Node: a.Node, Messages: a.Messages, Ticks: a.Ticks, Request: string(a.Request),
+		Kind: a.Kind, Node: a.Node, Messages: a.Messages, Ticks: a.Ticks, Request: string(a.Request), Partition: a.Partition,
 	}
 }
 
@@ -231,6 +232,8 @@ Generate %d diverse, meaningful plans. Nodes are %s. Allowed action kinds:
 - {"kind":"request","node":N,"request":"V"}, 1 <= V <= %d; request SHOULD be a JSON string (integer JSON numbers are also accepted)
 - {"kind":"crash","node":N}; N must currently be running
 - {"kind":"restart","node":N}; N must previously have been crashed
+- {"kind":"partition","partition":{"groups":[[...],[...]]}}; groups must cover every configured node exactly once
+- {"kind":"heal"}; only after partition; queued cross-group messages become deliverable again
 - {"kind":"deliver|drop|duplicate","messages":{"link":{"from":A,"to":B},"start":S,"count":C}}
 Links must connect two distinct configured nodes; S >= 0 and C > 0. A selector position is relative to the current queue when that action executes. Delivery may be truncated when fewer messages exist. At most %d node may be crashed simultaneously. Normally pair a crash with a later restart of the same node, unless the plan intentionally tests a terminal node failure. Each plan must contain 1..%d actions. Aim for elections, delayed or reordered messages, leader failure, recovery with delayed messages, log replication and commit.
 The bounded model permits terms up to %d and log indices up to %d. Each timeout can advance a term and each successful election or accepted request can grow the log, so keep these actions within the bounds. A leader accepts a request directly. A follower that has learned the current leader forwards the request as MsgProp, which must later be delivered to that leader. A candidate or follower without a known leader drops the request as a model stutter. JSON object output is mandatory.`,
@@ -264,6 +267,7 @@ func (p *LLMPlanner) validateSequence(sequence plan.PlanSequence) error {
 	crashed := 0
 	timeouts := uint64(0)
 	potentialLogGrowth := uint64(0)
+	partitioned := false
 	for _, action := range sequence.Actions {
 		switch action.Kind {
 		case plan.ActionCrash:
@@ -313,6 +317,19 @@ func (p *LLMPlanner) validateSequence(sequence plan.PlanSequence) error {
 			if _, exists := configured[action.Messages.Link.To]; !exists || action.Messages.Link.From == action.Messages.Link.To {
 				return fmt.Errorf("LLM link uses invalid destination")
 			}
+		case plan.ActionPartition:
+			if partitioned {
+				return fmt.Errorf("LLM plan starts a nested network partition")
+			}
+			if action.Partition == nil || !action.Partition.Covers(p.config.NodeIDs) {
+				return fmt.Errorf("LLM partition must cover every configured node exactly once")
+			}
+			partitioned = true
+		case plan.ActionHeal:
+			if !partitioned {
+				return fmt.Errorf("LLM plan heals without an active partition")
+			}
+			partitioned = false
 		}
 	}
 	if timeouts > p.config.LargestTerm {

@@ -35,9 +35,12 @@ func (c *Checker) Check(transition model.Transition) []oracle.Finding {
 	before := nodesByID(transition.Before)
 	for _, after := range transition.After.Nodes {
 		previous, exists := before[after.ID]
-		if !exists || previous.Epoch != after.Epoch {
+		if !exists {
 			continue
 		}
+		// term、commit、applied、snapshot 和日志压缩边界都保存在稳定存储或
+		// Adapter 的持久应用状态中。节点重启会增加 Epoch，但这些值仍不得
+		// 回退；因此重启边界也必须执行单调性检查。
 		findings = append(findings, monotonicFindings(previous, after)...)
 	}
 	findings = append(findings, c.checkObservation(transition.After)...)
@@ -70,6 +73,7 @@ func (c *Checker) checkObservation(observation core.Observation) []oracle.Findin
 			findings = append(findings, finding("commit_exceeds_log", node.ID, term,
 				fmt.Sprintf("node %s commit=%d exceeds last_index=%d", node.ID, commit, lastIndex)))
 		}
+		findings = append(findings, snapshotFindings(node, term)...)
 		if node.Status != core.NodeRunning {
 			continue
 		}
@@ -156,6 +160,8 @@ func monotonicFindings(before, after core.NodeObservation) []oracle.Finding {
 	}{
 		{name: "commit", code: "commit_regressed"},
 		{name: "applied", code: "applied_regressed"},
+		{name: "snapshot_index", code: "snapshot_index_regressed"},
+		{name: "first_index", code: "first_index_regressed"},
 	} {
 		previous, previousOK := unsigned(before.Semantic[field.name])
 		current, currentOK := unsigned(after.Semantic[field.name])
@@ -163,6 +169,57 @@ func monotonicFindings(before, after core.NodeObservation) []oracle.Finding {
 			findings = append(findings, finding(field.code, after.ID, afterTerm,
 				fmt.Sprintf("node %s %s regressed from %d to %d", after.ID, field.name, previous, current)))
 		}
+	}
+	return findings
+}
+
+// snapshotFindings 检查应用维护的 snapshot 与 MemoryStorage 日志窗口是否
+// 构成一个可恢复的连续状态。字段不存在表示 snapshot policy 未开启，此时
+// 保持与原有不启用 snapshot 的执行兼容。
+func snapshotFindings(node core.NodeObservation, term uint64) []oracle.Finding {
+	snapshotIndex, snapshotOK := unsigned(node.Semantic["snapshot_index"])
+	firstIndex, firstOK := unsigned(node.Semantic["first_index"])
+	if !snapshotOK && !firstOK {
+		return nil
+	}
+	findings := make([]oracle.Finding, 0)
+	if !snapshotOK || !firstOK {
+		return append(findings, finding("snapshot_state_incomplete", node.ID, term,
+			fmt.Sprintf("node %s exposes only part of its snapshot/log boundary", node.ID)))
+	}
+
+	commit, commitOK := unsigned(node.Semantic["commit"])
+	applied, appliedOK := unsigned(node.Semantic["applied"])
+	lastIndex, lastOK := unsigned(node.Semantic["last_index"])
+	snapshotTerm, snapshotTermOK := unsigned(node.Semantic["snapshot_term"])
+
+	if appliedOK && snapshotIndex > applied {
+		findings = append(findings, finding("snapshot_exceeds_applied", node.ID, term,
+			fmt.Sprintf("node %s snapshot_index=%d exceeds applied=%d", node.ID, snapshotIndex, applied)))
+	}
+	if commitOK && snapshotIndex > commit {
+		findings = append(findings, finding("snapshot_exceeds_commit", node.ID, term,
+			fmt.Sprintf("node %s snapshot_index=%d exceeds commit=%d", node.ID, snapshotIndex, commit)))
+	}
+	if lastOK && snapshotIndex > lastIndex {
+		findings = append(findings, finding("snapshot_exceeds_log", node.ID, term,
+			fmt.Sprintf("node %s snapshot_index=%d exceeds last_index=%d", node.ID, snapshotIndex, lastIndex)))
+	}
+	if lastOK && firstIndex > lastIndex && firstIndex-lastIndex > 1 {
+		findings = append(findings, finding("log_window_discontinuous", node.ID, term,
+			fmt.Sprintf("node %s first_index=%d leaves a gap after last_index=%d", node.ID, firstIndex, lastIndex)))
+	}
+	if firstIndex > snapshotIndex && firstIndex-snapshotIndex > 1 {
+		findings = append(findings, finding("compacted_without_covering_snapshot", node.ID, term,
+			fmt.Sprintf("node %s first_index=%d is not covered by snapshot_index=%d", node.ID, firstIndex, snapshotIndex)))
+	}
+	if snapshotIndex > 0 && (!snapshotTermOK || snapshotTerm == 0) {
+		findings = append(findings, finding("snapshot_term_missing", node.ID, term,
+			fmt.Sprintf("node %s snapshot at index %d has no term", node.ID, snapshotIndex)))
+	}
+	if snapshotTermOK && snapshotTerm > term {
+		findings = append(findings, finding("snapshot_term_exceeds_term", node.ID, term,
+			fmt.Sprintf("node %s snapshot_term=%d exceeds current term=%d", node.ID, snapshotTerm, term)))
 	}
 	return findings
 }

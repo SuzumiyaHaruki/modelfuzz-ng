@@ -25,6 +25,7 @@ const (
 	CodeMessageLogBound         model.DecisionCode = "message_log_bound"
 	CodeLeaderNoopLogBound      model.DecisionCode = "leader_noop_log_bound"
 	CodeMessageTypeNotModeled   model.DecisionCode = "message_type_not_modeled"
+	CodeLinkPartitioned         model.DecisionCode = "link_partitioned"
 )
 
 // ValidateAction 实现基础 Raft Profile 的执行前预检。Drop/Duplicate 只改变
@@ -87,6 +88,9 @@ func (m *Mapper) ValidateAction(action core.Action, observation core.Observation
 		if !ok {
 			return model.InapplicableCode(action, CodeMessageMissing, fmt.Sprintf("message %s is absent from observation", action.Message))
 		}
+		if message.Blocked {
+			return model.InapplicableCode(action, CodeLinkPartitioned, fmt.Sprintf("message %s crosses an active network partition", action.Message))
+		}
 		if err := m.validateMessageMetadataBounds(action, message); err != nil {
 			return err
 		}
@@ -136,6 +140,10 @@ func (m *Mapper) ValidateAction(action core.Action, observation core.Observation
 		default:
 			return model.UnsupportedCode(action, CodeMessageTypeNotModeled, "message type "+message.TypeHint+" is not represented")
 		}
+	case core.ActionPartition, core.ActionHeal:
+		// 网络拓扑由 Runtime 管理；基础 Raft TLA+ 模型没有网络变量，因而
+		// partition/heal 本身是 stutter，后续实际投递仍按消息事件映射。
+		return nil
 	}
 	return nil
 }

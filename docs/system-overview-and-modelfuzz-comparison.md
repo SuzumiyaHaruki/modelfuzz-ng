@@ -47,7 +47,7 @@ Adapter 完整消费每次操作产生的 `Ready`，并按 etcd-raft 契约维�
 | HardState | 调用 `SetHardState` | 持久化 term、vote 和 commit |
 | Entries | 追加到 `MemoryStorage` | 保留日志并支持 restart |
 | CommittedEntries | 更新 applied、前缀摘要和 ConfState | 支持 commit 与一致性 Oracle |
-| Messages | 转交 Runtime 受控网络 | 支持延迟、投递、复制和丢弃 |
+| Messages | 转交 Runtime 受控网络 | 支持延迟、投递、复制、丢弃以及分区/合并 |
 | Advance | 排空本次操作产生的 Ready | 完成 Raft Ready 契约 |
 
 节点 crash 后保留稳定存储和在途消息；restart 从稳定存储重建易失状态并增加 epoch。Raft 选举随机数由实验 seed 派生，因此不依赖 wall clock 或进程全局随机源。
@@ -58,6 +58,7 @@ Adapter 完整消费每次操作产生的 `Ready`，并按 etcd-raft 契约维�
 | --- | --- | --- |
 | `Deliver` | 按最终 MessageID 投递受控消息 | 根据消息语义映射 |
 | `Drop` | 从 Runtime 网络移除消息 | stutter |
+| `Partition` / `Heal` | 阻断跨组投递但保留队列 / 恢复跨组投递 | stutter；后续协议事件照常映射 |
 | `Duplicate` | 复制消息并分配新 MessageID | stutter；副本投递时再映射 |
 | `Request` | 对目标节点调用 `Propose` | 只有 Leader 实际接受时映射 `ClientRequest` |
 | `Timeout` | 对节点调用 `Campaign` | term 实际增加时映射 `Timeout`；Leader 无变化时 stutter |
@@ -81,6 +82,8 @@ Adapter 完整消费每次操作产生的 `Ready`，并按 etcd-raft 契约维�
 | `MsgSnap` | Concrete 层受控发送、丢弃、复制和应用；基础 TLA+ 模型中显式 stutter |
 | `MsgTimeoutNow`、`MsgPreVote` 等 | 当前 Profile 不支持，明确报错而非静默忽略 |
 | `MsgHup` / `MsgBeat` | Raft 本地消息，不进入 Runtime 网络 |
+
+定向 `snapshot-partition` 策略也是在线状态机：它不会预先构造 MessageID，而是在每次动作后从最新 Observation 选择实际消息。heal 的判定使用 Leader 的真实日志窗口 `first_index > lagger.last_index+1`，因此 retain_entries 较大时会继续在多数派提交并等待后续 snapshot/compaction；当前完成条件只保证目标 lagger 通过 snapshot 追赶 Leader，不代表五节点中的其他 Follower 已全部排空。
 
 ### 2.4 角色、提交、snapshot 和 proposal drop
 
@@ -127,7 +130,8 @@ Follower 转发的 proposal 可能因为 Leader 已变化或集群暂时没有 L
 | Ready 队列 | 默认上限 4096；满时确定性淘汰最旧候选 |
 | Corpus | 紧凑覆盖摘要写入 `corpus.json`；完整 entry 追加到 `corpus.jsonl` |
 | Run 记录 | 逐条追加到 `runs.jsonl` |
-| checkpoint v7 | 保存覆盖键、水位、聚合统计、有界 Ready 和待处理引用，不保存完整 Trace |
+| checkpoint v8 | 保存覆盖键、水位、聚合统计、有界 Ready 和待处理引用，并锁定网络故障策略参数；不保存完整 Trace |
+| minimization checkpoint | 保存当前失败 Plan、尝试数、已接受缩减和候选 digest/签名缓存；支持 `minimize -resume` |
 | resume | 按 checkpoint 水位修复 JSONL 尾部并截断孤儿记录 |
 | 配置指纹 | 禁止改变节点、模型边界、策略或 mutator 后错误续跑 |
 
@@ -184,7 +188,7 @@ Follower 转发的 proposal 可能因为 Leader 已变化或集群暂时没有 L
 | 能力 | 原始 ModelFuzz | NG | 对比结论 |
 | --- | --- | --- | --- |
 | 本地内存 etcd-raft | 支持 | 支持 | 双方都有 |
-| 受控网络 | `from→to` FIFO 队列，批量投递队头消息 | MessageID/Link/Position，支持 Drop/Duplicate | NG 粒度更细 |
+| 受控网络 | `from→to` FIFO 队列，批量投递队头消息 | MessageID/Link/Position，支持 Drop/Duplicate 和持久分区/合并 | NG 粒度更细 |
 | 输入结构 | 固定 step 模板 | 任意 PlanAction 序列 | NG 动作顺序更自由 |
 | 初始轨迹 | 预先生成方向、crash/restart 和请求点 | 每步读取最新 Observation 在线生成 | NG 更具状态感知性 |
 | 逻辑时间 | 每 step 固定 Tick | 显式 `AdvanceTime` 和 `Timeout` | NG 可单独控制时间推进 |

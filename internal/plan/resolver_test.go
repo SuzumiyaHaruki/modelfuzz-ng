@@ -54,6 +54,42 @@ func TestResolveSkipsDeliveryToCrashedNodeButAllowsQueueControl(t *testing.T) {
 	}
 }
 
+func TestResolvePartitionBlocksDeliveryAndHeal(t *testing.T) {
+	resolver := newTestResolver(t)
+	partition := core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}
+	initial := testObservation()
+	resolved := resolver.Resolve(PlanAction{Kind: ActionPartition, Partition: &partition}, initial)
+	if resolved.Status != ResolutionResolved || len(resolved.Actions) != 1 ||
+		resolved.Actions[0].Kind != core.ActionPartition {
+		t.Fatalf("partition resolution = %+v", resolved)
+	}
+
+	partitioned := testObservation()
+	partitioned.NetworkPartition = &partition
+	for index := range partitioned.Messages {
+		message := &partitioned.Messages[index]
+		message.Blocked = partition.Blocks(core.LinkID{From: message.From, To: message.To})
+	}
+	delivery := resolver.Resolve(PlanAction{Kind: ActionDeliver, Messages: &MessageRangeSelector{
+		Link: core.LinkID{From: 1, To: 2}, Count: 1,
+	}}, partitioned)
+	if delivery.Status != ResolutionSkipped || delivery.ReasonCode != ReasonLinkPartitioned {
+		t.Fatalf("partitioned delivery resolution = %+v", delivery)
+	}
+	repeated := resolver.Resolve(PlanAction{Kind: ActionPartition, Partition: &partition}, partitioned)
+	if repeated.Status != ResolutionSkipped || repeated.ReasonCode != ReasonPartitionActive {
+		t.Fatalf("repeated partition resolution = %+v", repeated)
+	}
+	healed := resolver.Resolve(PlanAction{Kind: ActionHeal}, partitioned)
+	if healed.Status != ResolutionResolved || len(healed.Actions) != 1 || healed.Actions[0].Kind != core.ActionHeal {
+		t.Fatalf("heal resolution = %+v", healed)
+	}
+	noPartition := resolver.Resolve(PlanAction{Kind: ActionHeal}, initial)
+	if noPartition.Status != ResolutionSkipped || noPartition.ReasonCode != ReasonPartitionInactive {
+		t.Fatalf("inactive heal resolution = %+v", noPartition)
+	}
+}
+
 func TestResolveMessageRangeAndDuplicatePositions(t *testing.T) {
 	resolver := newTestResolver(t)
 	link := core.LinkID{From: 1, To: 2}

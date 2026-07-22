@@ -7,9 +7,9 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 )
 
-// Version 7 在 v6 的紧凑 Corpus 水位上增加语义状态与语义转移覆盖，确保
-// 中断恢复后 Corpus 准入决策与不中断执行一致。
-const CheckpointVersion uint32 = 7
+// Version 8 在 v7 语义覆盖 checkpoint 上加入 network partition/heal 的
+// Policy 与 Mutation 配置边界，避免恢复时静默改变网络故障分布。
+const CheckpointVersion uint32 = 8
 
 type EventKind string
 

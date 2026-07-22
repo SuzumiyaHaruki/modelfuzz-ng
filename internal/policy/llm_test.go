@@ -127,3 +127,29 @@ func TestLLMPlannerRejectsIncompleteInitialBatchWithReason(t *testing.T) {
 		t.Fatalf("initial batch error = %v", err)
 	}
 }
+
+func TestLLMPlannerAcceptsBoundedPartitionAndHeal(t *testing.T) {
+	client := &fakeJSONClient{content: `{"plans":[{"actions":[
+      {"kind":"partition","partition":{"groups":[[1],[2,3]]}},
+      {"kind":"advance_ticks","ticks":1},
+      {"kind":"heal"}
+    ]}]}`}
+	planner, err := NewLLMPlanner(client, LLMConfig{
+		NodeIDs: []core.NodeID{1, 2, 3}, MaxValue: 2, MaxTicks: 2, MaxActions: 4,
+		MaxLogIndex: 3, LargestTerm: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := planner.Generate(context.Background(), GenerationRequest{Mode: GenerationInitial, Count: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Actions[0].Kind != plan.ActionPartition ||
+		plans[0].Actions[0].Partition == nil || plans[0].Actions[2].Kind != plan.ActionHeal {
+		t.Fatalf("partition plan = %+v", plans)
+	}
+	if !strings.Contains(client.messages[0].Content, `"kind":"partition"`) {
+		t.Fatalf("partition schema absent from prompt: %s", client.messages[0].Content)
+	}
+}

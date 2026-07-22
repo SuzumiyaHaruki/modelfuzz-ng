@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +21,10 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/minimize"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/mutation"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/persistence"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	randompolicy "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/policy"
@@ -232,6 +237,382 @@ func TestExperimentCLIRunsRandomFeedbackSeedsWithoutTLC(t *testing.T) {
 	}
 }
 
+func TestExperimentCLIRunsDirectedSnapshotPartitionSeed(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "directed-snapshot-partition")
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-config", filepath.Join("..", "..", "examples", "config-5nodes-snapshot.json"),
+		"-output", output, "-runs", "1", "-initial-population", "1", "-max-plan-actions", "200",
+		"-initial-policy", "snapshot-partition", "-artifact-policy", "all", "-seed", "9201",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var report experiment.Report
+	if err := persistence.ReadJSON(filepath.Join(output, "experiment-report.json"), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Succeeded != 1 || report.Failed != 0 || report.SnapshotsCreated != 1 ||
+		report.SnapshotsSent != 1 || report.SnapshotsDelivered != 2 || report.SnapshotsApplied != 1 ||
+		report.SnapshotsRejectedOrStale != 1 || report.LogsCompacted != 1 ||
+		report.ActionCounts[string(core.ActionPartition)] != 1 || report.ActionCounts[string(core.ActionHeal)] != 1 {
+		t.Fatalf("directed report = %+v", report)
+	}
+	var sequence plan.PlanSequence
+	if err := persistence.ReadJSON(filepath.Join(output, "run-0000-seed-9201", "plan.json"), &sequence); err != nil {
+		t.Fatal(err)
+	}
+	if sequence.Metadata["source"] != "snapshot_partition" || sequence.Metadata["target_snapshot"] != "2" {
+		t.Fatalf("directed metadata = %+v", sequence.Metadata)
+	}
+	var result engine.Result
+	if err := persistence.ReadJSON(filepath.Join(output, "run-0000-seed-9201", "result.json"), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Final.NetworkPartition != nil || len(result.OracleFindings) != 0 {
+		t.Fatalf("directed final state = partition %+v, findings %+v", result.Final.NetworkPartition, result.OracleFindings)
+	}
+	lagger := observedNode(t, result.Final, 5)
+	if semanticUint64(t, lagger, "snapshot_index") != 2 || semanticUint64(t, lagger, "applied") != 2 {
+		t.Fatalf("lagger did not catch up through snapshot: %+v", lagger.Semantic)
+	}
+}
+
+func TestExperimentCLIDirectedSnapshotPartitionRetainEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		nodes  []core.NodeID
+		retain uint64
+	}{
+		{name: "three-retain-zero", nodes: []core.NodeID{1, 2, 3}, retain: 0},
+		{name: "three-retain-one", nodes: []core.NodeID{1, 2, 3}, retain: 1},
+		{name: "three-retain-threshold", nodes: []core.NodeID{1, 2, 3}, retain: 2},
+		{name: "five-retain-one", nodes: []core.NodeID{1, 2, 3, 4, 5}, retain: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			temporary := t.TempDir()
+			config := defaultCLIConfig()
+			config.Raft.NodeIDs = append([]core.NodeID(nil), test.nodes...)
+			config.Model.NodeIDs = append([]core.NodeID(nil), test.nodes...)
+			config.Model.MaxLogIndex = 10
+			config.Model.LargestTerm = 10
+			config.Raft.Snapshot.Threshold = 2
+			config.Raft.Snapshot.RetainEntries = test.retain
+			configPath := filepath.Join(temporary, "config.json")
+			if err := writeJSONFile(configPath, config); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(temporary, "output")
+			if err := runCLI(context.Background(), []string{
+				"experiment", "-config", configPath, "-output", output, "-runs", "1",
+				"-initial-population", "1", "-max-plan-actions", "300", "-initial-policy", "snapshot-partition",
+				"-artifact-policy", "all", "-seed", "9301",
+			}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			var report experiment.Report
+			if err := persistence.ReadJSON(filepath.Join(output, "experiment-report.json"), &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Succeeded != 1 || report.Failed != 0 || report.SnapshotsSent != 1 ||
+				report.SnapshotsApplied != 1 || report.LogsCompacted < 1 {
+				t.Fatalf("directed retain report = %+v", report)
+			}
+			if test.name == "three-retain-one" {
+				if err := runCLI(context.Background(), []string{"experiment", "-resume", output},
+					&bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+					t.Fatalf("resume directed policy: %v", err)
+				}
+				if err := runCLI(context.Background(), []string{
+					"experiment", "-resume", output, "-initial-policy", "random",
+				}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "initial-policy") {
+					t.Fatalf("directed policy override error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestDirectedSnapshotPartitionWithoutDuplicateUsesRealEtcdRaft(t *testing.T) {
+	config := defaultCLIConfig()
+	config.Raft.Snapshot.Threshold = 2
+	config.Raft.Snapshot.RetainEntries = 1
+	config.Model.MaxLogIndex = 10
+	config.Model.LargestTerm = 10
+	runner, err := buildEngine(config, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := randompolicy.NewSnapshotPartition(9401, randompolicy.SnapshotPartitionConfig{
+		NodeIDs: config.Raft.NodeIDs, MaxValue: config.Model.MaxValue, MaxLogIndex: config.Model.MaxLogIndex,
+		SnapshotThreshold: config.Raft.Snapshot.Threshold, RetainEntries: config.Raft.Snapshot.RetainEntries,
+		DuplicateSnapshot: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.RunSource(context.Background(), policy, 300)
+	if err != nil || result.Status != engine.StatusCompleted || result.Termination != engine.TerminationPolicyComplete {
+		t.Fatalf("directed no-duplicate result/error = %+v/%v", result, err)
+	}
+	collected := metrics.Collect(result)
+	if collected.SnapshotsCreated < 1 || collected.SnapshotsSent != 1 || collected.SnapshotsDelivered != 1 ||
+		collected.SnapshotsApplied != 1 || collected.SnapshotsRejectedOrStale != 0 || collected.LogsCompacted < 1 {
+		t.Fatalf("directed no-duplicate metrics = %+v", collected)
+	}
+}
+
+func TestDirectedSnapshotPartitionCheckpointResumeMatchesControl(t *testing.T) {
+	config := defaultCLIConfig()
+	config.Raft.Snapshot.Threshold = 2
+	config.Raft.Snapshot.RetainEntries = 1
+	config.Model.MaxLogIndex = 10
+	config.Model.LargestTerm = 10
+	experimentConfig := experiment.Config{
+		Runs: 2, BaseSeed: 9500, Parallelism: 1, InitialPopulation: 2,
+		MaxReadyCandidates: 8, MinNewModelStates: 1,
+	}
+	mutator, err := mutation.NewRandom(mutation.RandomConfig{
+		NodeIDs: config.Raft.NodeIDs, MaxValue: config.Model.MaxValue, MaxTicks: 5, MaxActions: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execute := func(ctx context.Context, index int, seed int64, candidate experiment.Candidate) (experiment.FeedbackExecution, error) {
+		if candidate.Plan != nil {
+			t.Fatalf("directed seed unexpectedly contained a static plan: %+v", candidate)
+		}
+		runConfig := config
+		runConfig.Seed = seed
+		runConfig.ExecutionID = core.ExecutionID(fmt.Sprintf("snapshot-resume-%d", index))
+		runner, buildErr := buildEngine(runConfig, &bytes.Buffer{})
+		if buildErr != nil {
+			return experiment.FeedbackExecution{}, buildErr
+		}
+		policy, buildErr := randompolicy.NewSnapshotPartition(seed, randompolicy.SnapshotPartitionConfig{
+			NodeIDs: runConfig.Raft.NodeIDs, MaxValue: runConfig.Model.MaxValue, MaxLogIndex: runConfig.Model.MaxLogIndex,
+			SnapshotThreshold: runConfig.Raft.Snapshot.Threshold, RetainEntries: runConfig.Raft.Snapshot.RetainEntries,
+			DuplicateSnapshot: true,
+		})
+		if buildErr != nil {
+			return experiment.FeedbackExecution{}, buildErr
+		}
+		result, runErr := runner.RunSource(ctx, policy, 300)
+		return experiment.FeedbackExecution{Plan: policy.Sequence(), Result: result}, runErr
+	}
+
+	controlRunner, err := experiment.New(experimentConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := make(map[int]experiment.FeedbackExecution)
+	controlOptions := experiment.FeedbackOptions{
+		InitializerName: "snapshot-partition_init", Mutator: mutator, CheckpointEvery: 1,
+		ConfigurationFingerprint: "snapshot-partition-determinism",
+		Hooks: experiment.Hooks{OnRunComplete: func(completion experiment.Completion) error {
+			control[completion.Run.Index] = completion.Execution
+			return nil
+		}},
+	}
+	if report, _, err := controlRunner.RunFeedback(context.Background(), controlOptions, execute); err != nil || report.Succeeded != 2 {
+		t.Fatalf("control report/error = %+v/%v", report, err)
+	}
+
+	partialRunner, _ := experiment.New(experimentConfig)
+	partialContext, cancel := context.WithCancel(context.Background())
+	var checkpoint experiment.Checkpoint
+	partialOptions := controlOptions
+	partialOptions.Hooks = experiment.Hooks{
+		OnRunComplete: func(completion experiment.Completion) error {
+			if completion.Run.Index == 0 {
+				cancel()
+			}
+			return nil
+		},
+		OnCheckpoint: func(current experiment.Checkpoint) error {
+			checkpoint = current
+			return nil
+		},
+	}
+	partialReport, _, err := partialRunner.RunFeedback(partialContext, partialOptions, execute)
+	if !errors.Is(err, context.Canceled) || partialReport.CompletedRuns != 1 || checkpoint.Completed != 1 {
+		t.Fatalf("partial report/checkpoint/error = %+v/%+v/%v", partialReport, checkpoint, err)
+	}
+
+	resumedRunner, _ := experiment.New(experimentConfig)
+	var resumed experiment.FeedbackExecution
+	resumeOptions := controlOptions
+	resumeOptions.Resume = &checkpoint
+	resumeOptions.Hooks = experiment.Hooks{OnRunComplete: func(completion experiment.Completion) error {
+		if completion.Run.Index == 1 {
+			resumed = completion.Execution
+		}
+		return nil
+	}}
+	if report, _, err := resumedRunner.RunFeedback(context.Background(), resumeOptions, execute); err != nil || report.Succeeded != 2 {
+		t.Fatalf("resumed report/error = %+v/%v", report, err)
+	}
+	want := control[1]
+	if !reflect.DeepEqual(resumed.Plan, want.Plan) ||
+		!reflect.DeepEqual(resumed.Result.Actions, want.Result.Actions) ||
+		!reflect.DeepEqual(resumed.Result.Trace, want.Result.Trace) {
+		t.Fatalf("resumed directed execution diverged from control")
+	}
+}
+
+func TestMinimizeCLIPersistsOneMinimalFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/health":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"largest_term": 5, "max_log_index": 5})
+		case "/execute":
+			var events []model.Event
+			if err := json.NewDecoder(request.Body).Decode(&events); err != nil {
+				t.Fatal(err)
+			}
+			for index, event := range events {
+				if event.Name == "Timeout" {
+					writer.WriteHeader(http.StatusUnprocessableEntity)
+					_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{
+						"code": "disabled_action", "event_index": index, "event_name": event.Name, "message": "disabled",
+					}})
+					return
+				}
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"States": []string{"s"}, "Keys": []int64{1}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	temporary := t.TempDir()
+	config := defaultCLIConfig()
+	config.TLC.Address = server.URL
+	configPath := filepath.Join(temporary, "config.json")
+	planPath := filepath.Join(temporary, "failing-plan.json")
+	if err := writeJSONFile(configPath, config); err != nil {
+		t.Fatal(err)
+	}
+	sequence := plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+		{Kind: plan.ActionTimeout, Node: 1},
+	}, Metadata: map[string]string{"source": "regression"}}
+	if err := writeJSONFile(planPath, sequence); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(temporary, "minimized")
+	var stdout bytes.Buffer
+	if err := runCLI(context.Background(), []string{
+		"minimize", "-plan", planPath, "-config", configPath, "-output", output,
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "actions=2->1") || !strings.Contains(stdout.String(), "one_minimal=true") {
+		t.Fatalf("minimize stdout = %q", stdout.String())
+	}
+	var report minimize.Report
+	if err := persistence.ReadJSON(filepath.Join(output, "minimization-report.json"), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Signature.Status != engine.StatusModelFailed || report.OriginalActions != 2 ||
+		report.MinimizedActions != 1 || !report.OneMinimal || report.AttemptLimitReached ||
+		report.Signature.ModelErrorCode != "disabled_action" || report.Signature.ModelAction != "Timeout" ||
+		report.StableReproductions != 3 || report.InputPlanSHA256 == "" || report.ConfigSHA256 == "" {
+		t.Fatalf("minimize report = %+v", report)
+	}
+	var minimized plan.PlanSequence
+	if err := persistence.ReadJSON(filepath.Join(output, "minimized-plan.json"), &minimized); err != nil {
+		t.Fatal(err)
+	}
+	if len(minimized.Actions) != 1 || minimized.Actions[0].Kind != plan.ActionTimeout ||
+		!reflect.DeepEqual(minimized.Metadata, sequence.Metadata) {
+		t.Fatalf("minimized plan = %+v", minimized)
+	}
+	for _, name := range []string{"original-plan.json", "baseline-result.json", "result.json", "failure.json"} {
+		if _, err := os.Stat(filepath.Join(output, name)); err != nil {
+			t.Fatalf("missing minimize artifact %s: %v", name, err)
+		}
+	}
+}
+
+func TestMinimizeCLIResumesInterruptedCheckpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/health":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"largest_term": 5, "max_log_index": 5})
+		case "/execute":
+			requests++
+			if requests == 3 {
+				cancel()
+			}
+			var events []model.Event
+			_ = json.NewDecoder(request.Body).Decode(&events)
+			for index, event := range events {
+				if event.Name == "Timeout" {
+					writer.WriteHeader(http.StatusUnprocessableEntity)
+					_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{
+						"code": "disabled_action", "event_index": index, "event_name": event.Name, "message": "disabled",
+					}})
+					return
+				}
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"States": []string{"s"}, "Keys": []int64{1}})
+		}
+	}))
+	defer server.Close()
+	temporary := t.TempDir()
+	config := defaultCLIConfig()
+	config.TLC.Address = server.URL
+	configPath := filepath.Join(temporary, "config.json")
+	planPath := filepath.Join(temporary, "plan.json")
+	output := filepath.Join(temporary, "minimized")
+	if err := writeJSONFile(configPath, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONFile(planPath, plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1}, {Kind: plan.ActionTimeout, Node: 1},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	err := runCLI(ctx, []string{"minimize", "-plan", planPath, "-config", configPath, "-output", output},
+		&bytes.Buffer{}, &bytes.Buffer{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted minimize error = %v", err)
+	}
+	var checkpoint minimize.Checkpoint
+	if err := persistence.ReadJSON(filepath.Join(output, "minimization-checkpoint.json"), &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Complete || checkpoint.Attempts < 2 {
+		t.Fatalf("interrupted checkpoint = %+v", checkpoint)
+	}
+	if err := runCLI(context.Background(), []string{"minimize", "-resume", output},
+		&bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistence.ReadJSON(filepath.Join(output, "minimization-checkpoint.json"), &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if !checkpoint.Complete || checkpoint.Attempts < 3 {
+		t.Fatalf("completed checkpoint = %+v", checkpoint)
+	}
+}
+
+func TestMinimizeCLIRequiresExplicitOrAdjacentConfig(t *testing.T) {
+	temporary := t.TempDir()
+	planPath := filepath.Join(temporary, "plan.json")
+	if err := writeJSONFile(planPath, plan.PlanSequence{}); err != nil {
+		t.Fatal(err)
+	}
+	err := runCLI(context.Background(), []string{
+		"minimize", "-plan", planPath, "-output", filepath.Join(temporary, "output"),
+	}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "要求显式 -config") {
+		t.Fatalf("missing config error = %v", err)
+	}
+}
+
 func TestExperimentCLIUsesConfiguredPlanActionBudgetWhenFlagIsOmitted(t *testing.T) {
 	temporary := t.TempDir()
 	configPath := filepath.Join(temporary, "config.json")
@@ -259,6 +640,7 @@ func TestExperimentCLIPersistsMetricsAndResumesCompletedCheckpoint(t *testing.T)
 	if err := runCLI(context.Background(), []string{
 		"experiment", "-output", output, "-runs", "3", "-max-plan-actions", "5",
 		"-artifact-policy", "summary", "-checkpoint-every", "1", "-seed", "810",
+		"-partition-heal-pair-percent", "8", "-partition-weight", "4", "-heal-weight", "12",
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
@@ -281,6 +663,10 @@ func TestExperimentCLIPersistsMetricsAndResumesCompletedCheckpoint(t *testing.T)
 	if checkpoint.Completed != 3 || checkpoint.RunSummaryCount != 3 || checkpoint.Aggregation.Report.CompletedRuns != 3 ||
 		len(checkpoint.Aggregation.Report.Runs) != 0 {
 		t.Fatalf("checkpoint = %+v", checkpoint)
+	}
+	if checkpoint.Version != experiment.CheckpointVersion || checkpoint.Config.PartitionHealPairPercent != 8 ||
+		checkpoint.Config.PartitionWeight != 4 || checkpoint.Config.HealWeight != 12 {
+		t.Fatalf("checkpoint network policy = version %d, config %+v", checkpoint.Version, checkpoint.Config)
 	}
 	var metrics experiment.Statistics
 	data, err = os.ReadFile(filepath.Join(output, "experiment-metrics.json"))
@@ -309,6 +695,71 @@ func TestExperimentCLIPersistsMetricsAndResumesCompletedCheckpoint(t *testing.T)
 	}
 	if !bytes.Contains(journal, []byte(`"kind":"experiment_resumed"`)) {
 		t.Fatalf("journal does not contain resume event: %s", journal)
+	}
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-resume", output, "-partition-weight", "5",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "-partition-weight=5") {
+		t.Fatalf("resume with changed partition weight error = %v", err)
+	}
+}
+
+func TestExperimentCLIResumesAndMigratesLegacyV8WithoutOnlinePolicy(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "legacy-v8")
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-output", output, "-runs", "1", "-initial-population", "1",
+		"-max-plan-actions", "3", "-artifact-policy", "summary", "-seed", "812",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var config cliConfig
+	var checkpoint experiment.Checkpoint
+	var policyConfig randompolicy.RandomConfig
+	var settings experimentSettings
+	for name, target := range map[string]any{
+		"config.json": &config, "checkpoint.json": &checkpoint,
+		"policy-config.json": &policyConfig, "experiment-settings.json": &settings,
+	} {
+		if err := persistence.ReadJSON(filepath.Join(output, name), target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fingerprintSettings := settings
+	fingerprintSettings.ArtifactPolicy = ""
+	fingerprintSettings.CheckpointEvery = 0
+	legacyFingerprint, err := configurationFingerprint(config, checkpoint.Config, policyConfig, legacyV8Settings(fingerprintSettings))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.ConfigurationFingerprint = legacyFingerprint
+	if err := writeJSONFile(filepath.Join(output, "checkpoint.json"), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONFile(filepath.Join(output, "experiment-settings.json"), legacyV8Settings(settings)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCLI(context.Background(), []string{
+		"experiment", "-resume", output, "-initial-policy", "snapshot-partition",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "initial-policy") {
+		t.Fatalf("legacy policy override error = %v", err)
+	}
+	if err := runCLI(context.Background(), []string{"experiment", "-resume", output},
+		&bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, "experiment-settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"online_policy": "random"`)) {
+		t.Fatalf("legacy settings were not migrated: %s", data)
+	}
+	var migrated experiment.Checkpoint
+	if err := persistence.ReadJSON(filepath.Join(output, "checkpoint.json"), &migrated); err != nil {
+		t.Fatal(err)
+	}
+	currentFingerprint, err := configurationFingerprint(config, migrated.Config, policyConfig, fingerprintSettings)
+	if err != nil || migrated.ConfigurationFingerprint != currentFingerprint {
+		t.Fatalf("migrated fingerprint = %s, want %s, err=%v", migrated.ConfigurationFingerprint, currentFingerprint, err)
 	}
 }
 
@@ -635,6 +1086,53 @@ func TestValidateTLCModelBoundsRejectsMismatch(t *testing.T) {
 	err := validateTLCModelBounds(context.Background(), config, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "TLC/Go 模型边界不一致") {
 		t.Fatalf("boundary mismatch error = %v", err)
+	}
+}
+
+func TestValidateTLCModelBoundsChecksServerSetAndMaxValue(t *testing.T) {
+	tests := []struct {
+		name      string
+		health    map[string]any
+		nodes     []core.NodeID
+		maxValue  int
+		wantError bool
+	}{
+		{name: "three nodes", health: map[string]any{"server_ids": []int{1, 2, 3}, "max_value": 5, "nil_value": 0}, nodes: []core.NodeID{1, 2, 3}, maxValue: 5},
+		{name: "five nodes", health: map[string]any{"server_ids": []int{1, 2, 3, 4, 5}, "max_value": 5, "nil_value": 0}, nodes: []core.NodeID{1, 2, 3, 4, 5}, maxValue: 5},
+		{name: "five connected to three", health: map[string]any{"server_ids": []int{1, 2, 3}, "max_value": 5}, nodes: []core.NodeID{1, 2, 3, 4, 5}, maxValue: 5, wantError: true},
+		{name: "max value mismatch", health: map[string]any{"server_ids": []int{1, 2, 3}, "max_value": 9}, nodes: []core.NodeID{1, 2, 3}, maxValue: 5, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				test.health["largest_term"] = 5
+				test.health["max_log_index"] = 5
+				_ = json.NewEncoder(writer).Encode(test.health)
+			}))
+			defer server.Close()
+			config := defaultCLIConfig()
+			config.TLC.Address = server.URL
+			config.Model.NodeIDs = test.nodes
+			config.Model.MaxValue = test.maxValue
+			err := validateTLCModelBounds(context.Background(), config, &bytes.Buffer{})
+			if (err != nil) != test.wantError {
+				t.Fatalf("validation error = %v, wantError=%v", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateTLCModelBoundsWarnsForLegacyHealthSchema(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"largest_term": 5, "max_log_index": 5})
+	}))
+	defer server.Close()
+	config := defaultCLIConfig()
+	config.TLC.Address = server.URL
+	var warnings bytes.Buffer
+	if err := validateTLCModelBounds(context.Background(), config, &warnings); err != nil ||
+		!strings.Contains(warnings.String(), "Server/MaxValue") {
+		t.Fatalf("legacy validation = %v, warnings=%q", err, warnings.String())
 	}
 }
 

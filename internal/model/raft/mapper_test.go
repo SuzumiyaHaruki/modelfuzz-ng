@@ -188,6 +188,28 @@ func TestMapperMapsCrashAndRestartToControlledTLCEvents(t *testing.T) {
 	assertEventNames(t, offlineEvents, "Add")
 }
 
+func TestMapperTreatsPartitionAndHealAsStutter(t *testing.T) {
+	config := etcdraft.DefaultConfig()
+	config.Logger = &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)}
+	adapter, err := etcdraft.New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimepkg.New(adapter, runtimepkg.Config{ExecutionID: "model-partition-heal", Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Reset(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mapper := raftmodel.NewMapper()
+	partition := core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}
+	partitioned := execute(t, runtime, core.Action{Kind: core.ActionPartition, Partition: &partition})
+	assertEventNames(t, mapResult(t, mapper, partitioned))
+	healed := execute(t, runtime, core.Action{Kind: core.ActionHeal})
+	assertEventNames(t, mapResult(t, mapper, healed))
+}
+
 func TestMapperMapsFollowerProposalOnlyWhenLeaderReceivesIt(t *testing.T) {
 	config := etcdraft.DefaultConfig()
 	config.ElectionTick = 100

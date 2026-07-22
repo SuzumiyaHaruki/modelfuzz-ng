@@ -21,6 +21,8 @@ func TestProfileClassifiesBasicActions(t *testing.T) {
 		{name: "deliver vote", action: messageAction(core.ActionDeliver)},
 		{name: "crash", action: core.Action{Kind: core.ActionCrash, Node: 1}},
 		{name: "restart", action: core.Action{Kind: core.ActionRestart, Node: 1}, wantError: true},
+		{name: "partition", action: core.Action{Kind: core.ActionPartition, Partition: &core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}}},
+		{name: "heal", action: core.Action{Kind: core.ActionHeal}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -29,6 +31,18 @@ func TestProfileClassifiesBasicActions(t *testing.T) {
 				t.Fatalf("error = %v, want inapplicable=%v", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestProfileRejectsDeliveryAcrossActivePartition(t *testing.T) {
+	mapper := NewMapper()
+	observation := profileObservation("MsgVote", "0", "0")
+	partition := core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}
+	observation.NetworkPartition = &partition
+	observation.Messages[0].Blocked = true
+	err := mapper.ValidateAction(messageAction(core.ActionDeliver), observation)
+	if !errors.Is(err, model.ErrActionInapplicable) || model.CodeOf(err) != CodeLinkPartitioned {
+		t.Fatalf("partitioned delivery error = %v", err)
 	}
 }
 

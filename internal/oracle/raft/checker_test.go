@@ -98,6 +98,57 @@ func TestCheckerChecksPersistentIndexesOnCrashedNode(t *testing.T) {
 	assertFinding(t, findings, "commit_exceeds_log")
 }
 
+func TestCheckerChecksSnapshotAndCompactionBoundaries(t *testing.T) {
+	checker := New()
+	invalid := node(1, "follower", 3, 4, 4, 4, "same")
+	invalid.Semantic["snapshot_index"] = uint64(5)
+	invalid.Semantic["snapshot_term"] = uint64(4)
+	invalid.Semantic["first_index"] = uint64(7)
+	findings := checker.Reset(observation(invalid))
+	for _, code := range []string{
+		"snapshot_exceeds_applied", "snapshot_exceeds_commit", "snapshot_term_exceeds_term",
+		"snapshot_exceeds_log", "log_window_discontinuous", "compacted_without_covering_snapshot",
+	} {
+		assertFinding(t, findings, code)
+	}
+}
+
+func TestCheckerAcceptsRetainedEntriesAroundSnapshot(t *testing.T) {
+	checker := New()
+	valid := node(1, "follower", 3, 8, 8, 8, "same")
+	valid.Semantic["snapshot_index"] = uint64(8)
+	valid.Semantic["snapshot_term"] = uint64(3)
+	valid.Semantic["first_index"] = uint64(6)
+	if findings := checker.Reset(observation(valid)); len(findings) != 0 {
+		t.Fatalf("valid retained snapshot window findings = %+v", findings)
+	}
+}
+
+func TestCheckerDetectsPersistentStateRegressionAcrossRestart(t *testing.T) {
+	checker := New()
+	beforeNode := node(1, "follower", 3, 8, 8, 8, "same")
+	beforeNode.Semantic["snapshot_index"] = uint64(8)
+	beforeNode.Semantic["snapshot_term"] = uint64(3)
+	beforeNode.Semantic["first_index"] = uint64(7)
+	before := observation(beforeNode)
+	if findings := checker.Reset(before); len(findings) != 0 {
+		t.Fatalf("initial findings = %+v", findings)
+	}
+
+	afterNode := node(1, "follower", 2, 7, 7, 7, "same")
+	afterNode.Epoch = 2
+	afterNode.Semantic["snapshot_index"] = uint64(6)
+	afterNode.Semantic["snapshot_term"] = uint64(2)
+	afterNode.Semantic["first_index"] = uint64(5)
+	findings := checker.Check(model.Transition{Before: before, After: observation(afterNode)})
+	for _, code := range []string{
+		"term_regressed", "commit_regressed", "applied_regressed",
+		"snapshot_index_regressed", "first_index_regressed",
+	} {
+		assertFinding(t, findings, code)
+	}
+}
+
 func observation(nodes ...core.NodeObservation) core.Observation {
 	return core.Observation{Nodes: nodes}
 }

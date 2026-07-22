@@ -17,6 +17,8 @@
 | 反馈准入与动作分布 | `feedback-tuning-v7-20260722.md` |
 | 严格/按需 TLC | `strict-tlc-migration-20260721.md`、`lazy-tlc-actions-20260721.md` |
 | Snapshot 与日志压缩 | `snapshot-compaction-20260721.md` |
+| 网络分区、合并与五节点 smoke | `network-partition-20260722.md` |
+| 定向 partition/snapshot 与失败缩减 | `directed-snapshot-minimization-20260722.md` |
 | n/3+1 quorum mutant | `quorum-one-third-mutant-20260721.md` |
 | LLM 接入准备 | `deepseek-readiness-20260721.md` |
 

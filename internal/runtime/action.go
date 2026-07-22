@@ -142,6 +142,9 @@ func (r *Runtime) validatePreconditions(action core.Action) error {
 			return fmt.Errorf("%w: %v", ErrInvalidAction, err)
 		}
 		if action.Kind == core.ActionDeliver {
+			if r.network.isBlocked(selected.message.Link()) {
+				return fmt.Errorf("%w: %w: %s", ErrInvalidAction, ErrNetworkPartitioned, selected.message.Link())
+			}
 			status, ok := r.nodeStatus(selected.message.To)
 			if !ok {
 				return fmt.Errorf("%w: target node %s is not observable", ErrInvalidAction, selected.message.To)
@@ -165,6 +168,21 @@ func (r *Runtime) validatePreconditions(action core.Action) error {
 		}
 		if status != core.NodeCrashed {
 			return fmt.Errorf("%w: node %s is not crashed", ErrInvalidAction, action.Node)
+		}
+	case core.ActionPartition:
+		if r.network.partition != nil {
+			return fmt.Errorf("%w: %w: a partition is already active", ErrInvalidAction, ErrPartitionState)
+		}
+		nodes := make([]core.NodeID, len(r.observation.Nodes))
+		for index, node := range r.observation.Nodes {
+			nodes[index] = node.ID
+		}
+		if action.Partition == nil || !action.Partition.Covers(nodes) {
+			return fmt.Errorf("%w: %w: partition must cover every observed node", ErrInvalidAction, ErrPartitionState)
+		}
+	case core.ActionHeal:
+		if r.network.partition == nil {
+			return fmt.Errorf("%w: %w: no partition is active", ErrInvalidAction, ErrPartitionState)
 		}
 	}
 	return nil
@@ -245,6 +263,22 @@ func (r *Runtime) applyAction(ctx context.Context, action core.Action) ([]core.E
 			return nil, fmt.Errorf("%w: request node %s: %w", ErrAdapter, action.Node, err)
 		}
 		return r.processAdapterEffects(effects, r.time)
+
+	case core.ActionPartition:
+		nodes := make([]core.NodeID, len(r.observation.Nodes))
+		for index, node := range r.observation.Nodes {
+			nodes[index] = node.ID
+		}
+		if err := r.network.activatePartition(*action.Partition, nodes); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidAction, err)
+		}
+		return nil, nil
+
+	case core.ActionHeal:
+		if err := r.network.heal(); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidAction, err)
+		}
+		return nil, nil
 
 	default:
 		return nil, fmt.Errorf("%w: unknown action kind %q", ErrInvalidAction, action.Kind)

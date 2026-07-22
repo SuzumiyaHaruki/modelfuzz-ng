@@ -158,6 +158,7 @@ modelfuzz-ng/
 ├── examples/
 │   ├── config.json
 │   ├── config-quorum-mutant.json
+│   ├── config-5nodes-snapshot.json
 │   ├── config-soak-10.json
 │   ├── config-snapshot.json
 │   └── plans/
@@ -165,6 +166,7 @@ modelfuzz-ng/
 │       ├── election-commit-node1.json
 │       ├── election-commit-node2.json
 │       ├── election.json
+│       ├── network-partition-merge.json
 │       └── quorum-one-third-mutant.json
 ├── models/
 │   └── raft/
@@ -285,6 +287,8 @@ modelfuzz-ng/
 │   ├── policy/                       # 在线计划生成和调度策略
 │   │   ├── random.go                 # 已有：确定性基础随机策略
 │   │   ├── random_test.go
+│   │   ├── snapshot_partition.go     # 已有：观察驱动的partition/compaction/MsgSnap定向策略
+│   │   ├── snapshot_partition_test.go
 │   │   ├── llm.go                    # 已有：LLM prompt、解析和边界校验
 │   │   ├── llm_test.go
 │   │   ├── fair.go                   # 后续：有限公平/消息年龄策略
@@ -310,8 +314,11 @@ modelfuzz-ng/
 │   │   ├── io.go                     # JSON读写
 │   │   ├── replay.go                 # Concrete replay
 │   │   ├── compare.go                # Effect/状态差异比较
-│   │   ├── minimize.go               # 后续：失败轨迹缩减
 │   │   └── *_test.go
+│   │
+│   ├── minimize/                     # 已有：保持失败签名的Plan缩减
+│   │   ├── minimize.go               # ddmin、单Action固定点、缓存和checkpoint/resume
+│   │   └── minimize_test.go
 │   │
 │   ├── corpus/                       # 已有：有价值Plan、增量覆盖键及紧凑checkpoint水位
 │   │   ├── corpus.go
@@ -371,6 +378,7 @@ modelfuzz-ng/
 | 文件               | 职责                                             |
 | ------------------ | ------------------------------------------------ |
 | `action.go`      | Concrete Action、MessageSelector和ActionSequence |
+| `partition.go`   | 通用多组网络分区、覆盖校验和跨组链路判定       |
 | `effect.go`      | Action产生的消息、timeout和模型事件Effect        |
 | `id.go`          | Node、Message、Execution和Link等稳定ID           |
 | `message.go`     | 协议无关消息信封                                 |
@@ -420,6 +428,7 @@ modelfuzz-ng/
 - 可选的应用层 `SnapshotPolicy`，按 applied entry 数确定性调用
   `CreateSnapshot`/`Compact`；策略默认关闭；
 - Snapshot Data 保存确定性 committed-prefix 摘要，日志压缩后 Oracle 仍可比较逻辑前缀；
+- Raft Oracle 检查 snapshot/applied/commit/log 边界、压缩覆盖关系，以及稳定状态跨重启不回退；
 - `MsgSnap` 不设置专用 Action，仍从 Ready.Messages 进入 Runtime 统一网络队列。
 
 ### 5.4 `internal/runtime`
@@ -431,6 +440,7 @@ modelfuzz-ng/
 - MessageID和LinkSequence分配；
 - 使用最新 Observation 检查节点运行状态；
 - Action前置条件校验；
+- 单个活动网络分区；跨组消息继续排队并标记 blocked，heal 后恢复投递；
 - Effect时间校验；
 - Trace追加；
 - 捕获同步 Adapter/SUT panic，保留已完成 Trace 前缀和结构化失败记录。
@@ -523,7 +533,8 @@ committed-prefix 摘要的日志一致性检查放在 `oracle/raft`。日志进�
 - 保存和加载；
 - 严格重放；
 - Effect和状态比较；
-- 失败轨迹缩减。
+
+失败 Plan 缩减由独立的 `internal/minimize` 实现，避免把多次 Engine 执行和 checkpoint 状态混入 Trace 比较包。
 
 ## 6. 主要数据流
 
@@ -635,7 +646,7 @@ core
 2. Partition/FairDeliver/RunUntilLeader等宏；
 3. 在已有TLA+执行链路上增加模型引导策略；
 4. 多worker并行执行；
-5. Trace minimization；
+5. 已完成 Plan minimization、稳定失败签名、候选缓存和中断恢复；
 6. Snapshot/日志压缩已完成 Adapter、Runtime、Oracle 和基础模型 stutter 支持；
    PreVote、CheckQuorum、动态 membership 以及完整 InstallSnapshot TLA+ 模型仍属后续扩展。
 

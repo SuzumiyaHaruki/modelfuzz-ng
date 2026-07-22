@@ -37,7 +37,8 @@ done
 curl --fail --silent "http://127.0.0.1:$port/health" |
   jq -e '.status == "ok" and .strict == true and .action_mode == "lazy" and
     .action_definitions > 0 and .cached_actions == 0 and .action_cache_limit == 16384 and
-    .largest_term == 5 and .max_log_index == 5' >/dev/null
+    .largest_term == 5 and .max_log_index == 5 and .server_ids == [1,2,3] and
+    .max_value == 5 and .nil_value == 0' >/dev/null
 
 curl --fail --silent "http://127.0.0.1:$port/metrics" |
   jq -e '.requests == 0 and .model_events == 0 and .timing.successor_nanos == 0' >/dev/null

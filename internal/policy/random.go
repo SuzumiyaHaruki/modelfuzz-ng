@@ -22,6 +22,8 @@ type RandomWeights struct {
 	AdvanceTicks int `json:"advance_ticks"`
 	Crash        int `json:"crash"`
 	Restart      int `json:"restart"`
+	Partition    int `json:"partition"`
+	Heal         int `json:"heal"`
 }
 
 // RandomConfig 把随机基线限制在当前有界 Raft Profile 内。
@@ -44,7 +46,7 @@ func DefaultRandomConfig() RandomConfig {
 		LifecycleCooldown: 48, MaxCrashEpisodes: 4,
 		Weights: RandomWeights{
 			Deliver: 60, Drop: 5, Duplicate: 5, Timeout: 5, Request: 15,
-			AdvanceTicks: 5, Crash: 1, Restart: 10,
+			AdvanceTicks: 5, Crash: 1, Restart: 10, Partition: 2, Heal: 8,
 		},
 	}
 }
@@ -165,6 +167,13 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 	requests := make([]plan.PlanAction, 0, len(nodes)*p.config.MaxValue)
 	crashes := make([]plan.PlanAction, 0, len(nodes))
 	restarts := make([]plan.PlanAction, 0, len(nodes))
+	partitions := make([]plan.PlanAction, 0)
+	heals := make([]plan.PlanAction, 0, 1)
+	if observation.NetworkPartition == nil {
+		partitions = partitionCandidates(nodes)
+	} else {
+		heals = append(heals, plan.PlanAction{Kind: plan.ActionHeal})
+	}
 	runningCount := 0
 	crashedCount := 0
 	hasLeader := false
@@ -227,7 +236,38 @@ func (p *Random) candidates(observation core.Observation) []actionGroup {
 		{weight: p.config.Weights.AdvanceTicks, actions: advance},
 		{weight: p.config.Weights.Crash, actions: crashes},
 		{weight: p.config.Weights.Restart, actions: restarts},
+		{weight: p.config.Weights.Partition, actions: partitions},
+		{weight: p.config.Weights.Heal, actions: heals},
 	}
+}
+
+// partitionCandidates 枚举不重复的二分组。固定把最小节点放在第一组，
+// 消除 A|B 与 B|A 的对称重复；五节点只有15种候选，适合在线枚举。
+func partitionCandidates(nodes []core.NodeObservation) []plan.PlanAction {
+	if len(nodes) < 2 || len(nodes) > 16 {
+		return nil
+	}
+	ids := make([]core.NodeID, len(nodes))
+	for index, node := range nodes {
+		ids[index] = node.ID
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	maximum := 1 << (len(ids) - 1)
+	result := make([]plan.PlanAction, 0, maximum-1)
+	for mask := 0; mask < maximum-1; mask++ {
+		left := []core.NodeID{ids[0]}
+		right := make([]core.NodeID, 0, len(ids)-1)
+		for offset, node := range ids[1:] {
+			if mask&(1<<offset) != 0 {
+				left = append(left, node)
+			} else {
+				right = append(right, node)
+			}
+		}
+		partition := core.NetworkPartition{Groups: [][]core.NodeID{left, right}}
+		result = append(result, plan.PlanAction{Kind: plan.ActionPartition, Partition: &partition})
+	}
+	return result
 }
 
 func (p *Random) timeoutCoolingDown() bool {
@@ -316,7 +356,7 @@ func validateRandomConfig(config RandomConfig) error {
 	}
 	weights := []int{config.Weights.Deliver, config.Weights.Drop, config.Weights.Duplicate,
 		config.Weights.Timeout, config.Weights.Request, config.Weights.AdvanceTicks,
-		config.Weights.Crash, config.Weights.Restart}
+		config.Weights.Crash, config.Weights.Restart, config.Weights.Partition, config.Weights.Heal}
 	total := 0
 	for _, weight := range weights {
 		if weight < 0 {

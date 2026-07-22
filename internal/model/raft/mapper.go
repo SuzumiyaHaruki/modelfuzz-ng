@@ -138,6 +138,8 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 		}
 		// AddToActive 同时恢复活动成员并重置该节点的 Raft 易失状态。
 		events = append(events, model.NewEvent("Add", map[string]any{"i": uint64(action.Node)}))
+	case core.ActionPartition, core.ActionHeal:
+		// Runtime 拓扑变化不直接修改轻量 Raft 模型变量。
 	}
 
 	commitNodes := make([]core.NodeID, 0)

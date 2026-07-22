@@ -24,12 +24,14 @@ const (
 	ActionCrash        ActionKind = "crash"
 	ActionRestart      ActionKind = "restart"
 	ActionRequest      ActionKind = "request"
+	ActionPartition    ActionKind = "partition"
+	ActionHeal         ActionKind = "heal"
 )
 
 func (k ActionKind) Valid() bool {
 	switch k {
 	case ActionDeliver, ActionDrop, ActionDuplicate, ActionAdvanceTicks,
-		ActionTimeout, ActionCrash, ActionRestart, ActionRequest:
+		ActionTimeout, ActionCrash, ActionRestart, ActionRequest, ActionPartition, ActionHeal:
 		return true
 	default:
 		return false
@@ -41,10 +43,11 @@ func (k ActionKind) Valid() bool {
 type PlanAction struct {
 	Kind ActionKind `json:"kind"`
 
-	Node     core.NodeID           `json:"node,omitempty"`
-	Messages *MessageRangeSelector `json:"messages,omitempty"`
-	Ticks    uint64                `json:"ticks,omitempty"`
-	Request  string                `json:"request,omitempty"`
+	Node      core.NodeID            `json:"node,omitempty"`
+	Messages  *MessageRangeSelector  `json:"messages,omitempty"`
+	Ticks     uint64                 `json:"ticks,omitempty"`
+	Request   string                 `json:"request,omitempty"`
+	Partition *core.NetworkPartition `json:"partition,omitempty"`
 }
 
 func (a PlanAction) Validate() error {
@@ -60,21 +63,21 @@ func (a PlanAction) Validate() error {
 		if err := a.Messages.Validate(); err != nil {
 			return err
 		}
-		if a.Node.Valid() || a.Ticks != 0 || a.Request != "" {
+		if a.Node.Valid() || a.Ticks != 0 || a.Request != "" || a.Partition != nil {
 			return fmt.Errorf("%w: %s contains unrelated fields", ErrInvalidPlan, a.Kind)
 		}
 	case ActionAdvanceTicks:
 		if a.Ticks == 0 {
 			return fmt.Errorf("%w: advance_ticks requires a positive ticks value", ErrInvalidPlan)
 		}
-		if a.Node.Valid() || a.Messages != nil || a.Request != "" {
+		if a.Node.Valid() || a.Messages != nil || a.Request != "" || a.Partition != nil {
 			return fmt.Errorf("%w: advance_ticks contains unrelated fields", ErrInvalidPlan)
 		}
 	case ActionTimeout, ActionCrash, ActionRestart:
 		if !a.Node.Valid() {
 			return fmt.Errorf("%w: %s requires a node", ErrInvalidPlan, a.Kind)
 		}
-		if a.Messages != nil || a.Ticks != 0 || a.Request != "" {
+		if a.Messages != nil || a.Ticks != 0 || a.Request != "" || a.Partition != nil {
 			return fmt.Errorf("%w: %s contains unrelated fields", ErrInvalidPlan, a.Kind)
 		}
 	case ActionRequest:
@@ -84,8 +87,22 @@ func (a PlanAction) Validate() error {
 		if a.Request == "" {
 			return fmt.Errorf("%w: request value must not be empty", ErrInvalidPlan)
 		}
-		if a.Messages != nil || a.Ticks != 0 {
+		if a.Messages != nil || a.Ticks != 0 || a.Partition != nil {
 			return fmt.Errorf("%w: request contains unrelated fields", ErrInvalidPlan)
+		}
+	case ActionPartition:
+		if a.Partition == nil {
+			return fmt.Errorf("%w: partition requires groups", ErrInvalidPlan)
+		}
+		if err := a.Partition.Validate(); err != nil {
+			return fmt.Errorf("%w: invalid partition: %v", ErrInvalidPlan, err)
+		}
+		if a.Node.Valid() || a.Messages != nil || a.Ticks != 0 || a.Request != "" {
+			return fmt.Errorf("%w: partition contains unrelated fields", ErrInvalidPlan)
+		}
+	case ActionHeal:
+		if a.Node.Valid() || a.Messages != nil || a.Ticks != 0 || a.Request != "" || a.Partition != nil {
+			return fmt.Errorf("%w: heal contains unrelated fields", ErrInvalidPlan)
 		}
 	}
 	return nil
@@ -96,6 +113,10 @@ func (a PlanAction) Copy() PlanAction {
 	if a.Messages != nil {
 		selector := *a.Messages
 		copy.Messages = &selector
+	}
+	if a.Partition != nil {
+		partition := a.Partition.Copy()
+		copy.Partition = &partition
 	}
 	return copy
 }

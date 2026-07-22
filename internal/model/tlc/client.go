@@ -70,8 +70,11 @@ func NewClientWithHTTPClient(address string, httpClient *http.Client) (*Client, 
 }
 
 type ServerBounds struct {
-	MaxLogIndex uint64 `json:"max_log_index"`
-	LargestTerm uint64 `json:"largest_term"`
+	MaxLogIndex uint64   `json:"max_log_index"`
+	LargestTerm uint64   `json:"largest_term"`
+	ServerIDs   []uint64 `json:"server_ids,omitempty"`
+	MaxValue    *uint64  `json:"max_value,omitempty"`
+	NilValue    *int64   `json:"nil_value,omitempty"`
 }
 
 // Bounds 读取严格 TLC 服务从实际 cfg 加载的模型边界。旧服务未暴露边界时

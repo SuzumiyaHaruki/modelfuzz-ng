@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +13,15 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 )
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("读取摘要输入 %s: %w", path, err)
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 func createOutputDirectory(path string) error {
 	if path == "" {

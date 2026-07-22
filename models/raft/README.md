@@ -45,7 +45,8 @@ Timeout
   错误，不会静默忽略。
 - 模型使用 `currentActive`、`RemoveFromActive` 和 `AddToActive` 表达
   crash/restart；崩溃保留稳定状态，恢复会重置节点的 Raft 易失状态。
-- snapshot、membership change 和 PreVote 尚未建模，Mapper 会明确拒绝对应语义。
+- membership change 和 PreVote 尚未建模，Mapper 会明确拒绝对应语义；snapshot 生命周期按下述规则明确 stutter。
+- `partition`/`heal` 由 Runtime 管理，在基础模型中明确映射为 stutter；分区造成的后续选举、消息投递、日志复制和提交仍按现有模型动作检查。
 - 更准确地说，当前基础模型不包含 snapshot 变量或 InstallSnapshot 状态转换；
   Adapter 产生的 snapshot 创建/发送/投递/应用/压缩 Effect 和 `MsgSnap` 被稳定归类为
   model stutter。这保持基础模型可用，但不等于形式化验证了 snapshot install。

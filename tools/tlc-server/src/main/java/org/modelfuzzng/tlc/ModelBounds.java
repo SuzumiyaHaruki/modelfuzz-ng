@@ -3,6 +3,7 @@ package org.modelfuzzng.tlc;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,6 +45,26 @@ final class ModelBounds {
                 || nil != null && value == nil;
             default -> true;
         };
+    }
+
+    List<Long> serverIDs() {
+        return servers.stream().sorted().toList();
+    }
+
+    Long largestTerm() {
+        return largestTerm;
+    }
+
+    Long maxLogIndex() {
+        return maxLogIndex;
+    }
+
+    Long maxValue() {
+        return maxValue;
+    }
+
+    Long nilValue() {
+        return nil;
     }
 
     private static Long integer(String config, String name) {

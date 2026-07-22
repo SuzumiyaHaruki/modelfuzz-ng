@@ -67,6 +67,8 @@ func (r *Resolver) Resolve(action PlanAction, observation core.Observation) Reso
 		return r.resolveTime(result, action, observation)
 	case ActionTimeout, ActionCrash, ActionRestart, ActionRequest:
 		return r.resolveNode(result, action, observation)
+	case ActionPartition, ActionHeal:
+		return r.resolvePartition(result, action, observation)
 	default:
 		return invalidResolution(result, ReasonUnknownActionKind, "unknown action kind")
 	}
@@ -77,6 +79,10 @@ func (r *Resolver) resolveMessages(result Resolution, action PlanAction, observa
 	result.Requested = selector.Count
 	if selector.Count > r.config.MaxBatch {
 		return invalidResolution(result, ReasonBatchLimit, fmt.Sprintf("message count %d exceeds MaxBatch %d", selector.Count, r.config.MaxBatch))
+	}
+	if action.Kind == ActionDeliver && observation.NetworkPartition != nil &&
+		observation.NetworkPartition.Blocks(selector.Link) {
+		return skippedResolution(result, ReasonLinkPartitioned, fmt.Sprintf("link %s is blocked by the active network partition", selector.Link))
 	}
 	if action.Kind == ActionDeliver {
 		target, found := observedNode(observation, selector.Link.To)
@@ -206,6 +212,37 @@ func (r *Resolver) resolveNode(result Resolution, action PlanAction, observation
 	result.Resolved = 1
 	result.Actions = []core.Action{concrete}
 	return result
+}
+
+func (r *Resolver) resolvePartition(result Resolution, action PlanAction, observation core.Observation) Resolution {
+	switch action.Kind {
+	case ActionPartition:
+		if observation.NetworkPartition != nil {
+			return skippedResolution(result, ReasonPartitionActive, "a network partition is already active")
+		}
+		nodes := make([]core.NodeID, len(observation.Nodes))
+		for index, node := range observation.Nodes {
+			nodes[index] = node.ID
+		}
+		if action.Partition == nil || !action.Partition.Covers(nodes) {
+			return invalidResolution(result, ReasonPartitionNodes, "partition must cover every observed node exactly once")
+		}
+		partition := action.Partition.Normalized()
+		result.Status = ResolutionResolved
+		result.Resolved = 1
+		result.Actions = []core.Action{{Kind: core.ActionPartition, Partition: &partition}}
+		return result
+	case ActionHeal:
+		if observation.NetworkPartition == nil {
+			return skippedResolution(result, ReasonPartitionInactive, "no network partition is active")
+		}
+		result.Status = ResolutionResolved
+		result.Resolved = 1
+		result.Actions = []core.Action{{Kind: core.ActionHeal}}
+		return result
+	default:
+		return invalidResolution(result, ReasonUnknownActionKind, "unknown network action kind")
+	}
 }
 
 func invalidResolution(result Resolution, code ResolutionReasonCode, reason string) Resolution {

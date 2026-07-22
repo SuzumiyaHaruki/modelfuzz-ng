@@ -20,6 +20,8 @@ type network struct {
 	queues           map[core.LinkID][]queuedMessage
 	nextMessageID    core.MessageID
 	lastLinkSequence map[core.LinkID]uint64
+	partition        *core.NetworkPartition
+	nodeGroups       map[core.NodeID]int
 }
 
 func (n *network) len() int {
@@ -40,6 +42,52 @@ func (n *network) reset() {
 	n.queues = make(map[core.LinkID][]queuedMessage)
 	n.nextMessageID = 1
 	n.lastLinkSequence = make(map[core.LinkID]uint64)
+	n.partition = nil
+	n.nodeGroups = nil
+}
+
+func (n *network) activatePartition(partition core.NetworkPartition, nodes []core.NodeID) error {
+	if n.partition != nil {
+		return fmt.Errorf("%w: a partition is already active", ErrPartitionState)
+	}
+	if !partition.Covers(nodes) {
+		return fmt.Errorf("%w: partition must cover every runtime node exactly once", ErrPartitionState)
+	}
+	copy := partition.Normalized()
+	n.partition = &copy
+	n.nodeGroups = make(map[core.NodeID]int, len(nodes))
+	for groupIndex, group := range copy.Groups {
+		for _, node := range group {
+			n.nodeGroups[node] = groupIndex
+		}
+	}
+	return nil
+}
+
+func (n *network) heal() error {
+	if n.partition == nil {
+		return fmt.Errorf("%w: no partition is active", ErrPartitionState)
+	}
+	n.partition = nil
+	n.nodeGroups = nil
+	return nil
+}
+
+func (n *network) isBlocked(link core.LinkID) bool {
+	if n.partition == nil {
+		return false
+	}
+	from, fromExists := n.nodeGroups[link.From]
+	to, toExists := n.nodeGroups[link.To]
+	return fromExists && toExists && from != to
+}
+
+func (n *network) partitionObservation() *core.NetworkPartition {
+	if n.partition == nil {
+		return nil
+	}
+	copy := n.partition.Copy()
+	return &copy
 }
 
 // registerOutbound 将 Adapter 新产生的无 ID 消息注册到确定性网络。
@@ -167,6 +215,7 @@ func (n *network) observations() []core.MessageObservation {
 				TypeHint:      message.TypeHint,
 				PayloadDigest: message.PayloadDigest,
 				Metadata:      cloneMetadata(message.Metadata),
+				Blocked:       n.isBlocked(message.Link()),
 			})
 		}
 	}

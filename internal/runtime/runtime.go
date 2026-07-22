@@ -23,6 +23,8 @@ var (
 	ErrSUTPanic           = errors.New("SUT adapter panicked")
 	ErrIDExhausted        = errors.New("runtime ID exhausted")
 	ErrBudgetExceeded     = errors.New("runtime budget exceeded")
+	ErrNetworkPartitioned = errors.New("network link is partitioned")
+	ErrPartitionState     = errors.New("invalid network partition state")
 )
 
 // Limits 是一次执行的硬安全边界。零表示该项不设上限。Plan Resolver 的
@@ -183,6 +185,7 @@ func (r *Runtime) collectObservation(ctx context.Context) (core.Observation, err
 	}
 
 	observation.Messages = r.network.observations()
+	observation.NetworkPartition = r.network.partitionObservation()
 	if r.lastAction != nil {
 		action := r.lastAction.Copy()
 		observation.LastAction = &action

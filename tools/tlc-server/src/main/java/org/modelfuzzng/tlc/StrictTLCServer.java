@@ -37,8 +37,7 @@ public final class StrictTLCServer {
     private final RaftEventMapper mapper;
     private final String model;
     private final String config;
-    private final Long maxLogIndex;
-    private final Long largestTerm;
+    private final ModelBounds bounds;
     private final TLCState initial;
     private final Action[] invariants;
     private final Map<Long, Boolean> validatedStates;
@@ -59,11 +58,8 @@ public final class StrictTLCServer {
         this.model = modelPath.toString();
         this.config = configPath.toString();
         String configText = Files.readString(configPath, StandardCharsets.UTF_8);
-        this.mapper = new RaftEventMapper(
-            fastTool, fastTool.getModule(modelName), ModelBounds.parse(configText), actionCacheSize
-        );
-        this.maxLogIndex = constant(configText, "MaxLogIndex");
-        this.largestTerm = constant(configText, "LargestTerm");
+        this.bounds = ModelBounds.parse(configText);
+        this.mapper = new RaftEventMapper(fastTool, fastTool.getModule(modelName), bounds, actionCacheSize);
         FP64.Init(0);
         this.invariants = tool.getInvariants();
         this.validatedStates = new LinkedHashMap<>(16, 0.75f, true) {
@@ -112,11 +108,20 @@ public final class StrictTLCServer {
         response.put("strict", true);
         response.put("model", model);
         response.put("config", config);
-        if (maxLogIndex != null) {
-            response.put("max_log_index", maxLogIndex);
+        if (bounds.maxLogIndex() != null) {
+            response.put("max_log_index", bounds.maxLogIndex());
         }
-        if (largestTerm != null) {
-            response.put("largest_term", largestTerm);
+        if (bounds.largestTerm() != null) {
+            response.put("largest_term", bounds.largestTerm());
+        }
+        if (!bounds.serverIDs().isEmpty()) {
+            response.put("server_ids", bounds.serverIDs());
+        }
+        if (bounds.maxValue() != null) {
+            response.put("max_value", bounds.maxValue());
+        }
+        if (bounds.nilValue() != null) {
+            response.put("nil_value", bounds.nilValue());
         }
         response.put("validated_state_cache_limit", VALIDATED_STATE_CACHE_SIZE);
         response.put("action_mode", "lazy");

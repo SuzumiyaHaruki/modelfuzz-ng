@@ -17,6 +17,7 @@ Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后�
 - `internal/llm`：厂商无关 JSON 补全接口及多 provider OpenAI-compatible 客户端。
 - `internal/experiment`：候选执行、覆盖反馈、Corpus 保留和异步变异闭环。
 - `internal/metrics`：协议无关的执行明细、耗时、吞吐和覆盖增长统计。
+- `internal/minimize`：保持稳定失败签名的 Plan ddmin、单 Action 固定点缩减、候选缓存和中断恢复。
 - `internal/persistence`：原子 JSON、追加式 JSONL 和崩溃尾记录修复。
 - `internal/adapters/etcdraft`：etcd-raft 3.7 的最小集群适配器。
 - `internal/model`：Concrete Transition 到模型事件的映射及 TLC 客户端。
@@ -72,8 +73,7 @@ CLI 增加：
 
 `raft-5.cfg` 对应 5/5 烟雾边界，`raft-10.cfg` 对应原 ModelFuzz 主实验使用的
 `LargestTerm=10`、`MaxLogIndex=10`。CLI 可用 `-largest-term` 和
-`-max-log-index` 覆盖 JSON 配置；严格 TLC 的 `/health` 会返回实际 cfg 边界，
-CLI 在执行前自动拒绝 TLC 与 Go Mapper/随机策略/LLM 配置不一致的组合。恢复实验
+`-max-log-index` 覆盖 JSON 配置；严格 TLC 的 `/health` 会返回实际 cfg 的 Server、LargestTerm、MaxLogIndex、MaxValue 和 Nil，CLI 在执行前自动拒绝节点集合或边界与 Go Mapper/随机策略/LLM 配置不一致的组合；连接旧 health schema 时会明确警告无法核对 Server/MaxValue。恢复实验
 禁止修改这两个边界。10/10 长跑配置见 `examples/config-soak-10.json`。
 服务不再在启动时枚举数百万个参数化 Action；它在收到事件后才绑定具体
 Action，并用有界 LRU 缓存复用热点组合，因此10/10不再需要依赖超大 JVM heap。
@@ -112,6 +112,7 @@ no-op；确定会越过有限模型 term/log 上界时以 `model_bound_reached` 
 | 强制选举超时 | 支持 | 支持 | 自然/强制来源都映射为 `Timeout` |
 | Client Request | 支持 | 支持 | Leader 直接接收；Follower 向已知 Leader 转发；无 Leader/Candidate 的拒绝记录为模型 stutter |
 | crash/restart | 支持 | 支持 | 崩溃保留稳定状态；恢复时增加 epoch 并重置 Raft 易失状态 |
+| network partition/heal | 支持 | 明确 stutter | 跨组消息保留在确定性队列并标记 blocked；合并后按原 MessageID/顺序恢复投递 |
 | snapshot/log compaction | 支持，默认关闭 | 明确 stutter | Adapter 模拟应用层维护；`MsgSnap` 仍走受控网络 |
 | dynamic membership change | 仅保留 etcd-raft 基础处理 | 不支持 | 固定 voter 实验之外尚未验证 ConfState snapshot |
 | PreVote/CheckQuorum | 当前关闭 | 不支持 | 启用 Raft 配置前必须先补模型 |
@@ -121,9 +122,7 @@ Raft Observation 额外暴露 `committed_prefix_available` 和
 commit 索引所需的检查点，避免长日志在每个 Observation 中全量展开。基础
 Raft Oracle 因此可以比较两节点 `min(commitA, commitB)` 处的共同已提交前缀，
 不再受未提交尾部影响，也会检查 crashed 节点保留的稳定日志。
-开启快照后，这些摘要由应用层的逻辑 committed prefix 继续维护，不再从
-index=1读取已压缩的 `MemoryStorage` 日志。Snapshot Data 是确定性 JSON，保存
-截至 snapshot index 的链式前缀摘要；Effect 和统计只保存 index/term/size，不重复载入 payload。
+开启快照后，这些摘要由应用层的逻辑 committed prefix 继续维护，不再从 index=1 读取已压缩的 `MemoryStorage` 日志。Snapshot Data 是确定性 JSON，保存截至 snapshot index 的链式前缀摘要；Effect 和统计只保存 index/term/size，不重复载入 payload。Oracle 还检查 `snapshotIndex <= applied <= commit <= lastIndex`、`firstIndex <= snapshotIndex+1`、snapshot term 合法性，以及 term、commit、applied、snapshot index、first index 在 crash/restart 前后不回退。
 
 ### Snapshot 策略
 
@@ -176,6 +175,25 @@ etcd-raft 不会为应用自动调用 `CreateSnapshot` 或 `Compact`。NG Adapte
 - `snapshot-normal.json`：提交 no-op 和请求后创建 snapshot 并压缩；
 - `snapshot-follower-catchup.json`：follower 离线时 Leader 压缩，恢复后通过 MsgSnap 追赶；
 - `snapshot-duplicate-delivery.json`：复制 MsgSnap，验证重复投递稳定归类为 stale。
+- `network-partition-merge.json`：隔离旧 Leader，连通组内重新选举和提交，合并后投递积压消息并收敛。
+
+端到端回归还覆盖：Follower 安装 index=2 的 snapshot 后保留旧副本，Leader 继续压缩并发送 index=4 的 snapshot；Follower 先安装新 snapshot、再收到旧副本时必须拒绝旧 snapshot，随后再次 crash/restart 仍保持 snapshot 边界和 committed prefix。
+
+网络分区使用 `{"kind":"partition","partition":{"groups":[[1],[2,3]]}}`，每个节点必须恰好属于一个组；`{"kind":"heal"}` 合并当前分区。分区期间跨组消息继续入队但不能 Deliver，Drop/Duplicate 仍可控制队列；Observation 为这些消息记录 `blocked=true`。在线随机策略和本地 Mutation 分别提供可配置的 partition/heal 权重及成对插入比例，checkpoint v8 将这些参数纳入恢复边界。
+
+定向在线策略可用 `experiment -initial-policy snapshot-partition` 启动。它根据每一步最新 Observation 选举 Leader、隔离一个固定 lagger、在多数派提交并压缩日志，然后仅在 `leader.first_index > lagger.last_index+1` 时 heal，确保增量复制窗口确实已消失，再驱动 `MsgSnap` 发送、可选复制、应用和 stale 投递。策略不预测 MessageID；当前默认隔离最大非 Leader 节点、只生成二分区、复制一份 snapshot、使用16个 recovery tick，并只保证目标 lagger 追赶 Leader，不宣称所有其他 Follower 已完全排空。历史 3/5 节点多 seed 结果使用 `retain_entries=0`；端到端回归另覆盖 retain=1 和 retain=threshold，若 MaxLogIndex 不足以压缩过 lagger 会在启动时明确失败。
+
+失败 Plan 可用以下命令缩减：
+
+```bash
+go run ./cmd/modelfuzz-ng minimize \
+  -plan runs/failure/plan.json \
+  -config runs/failure/config.json \
+  -output runs/failure-minimized \
+  -final-verify-runs 3
+```
+
+缩减器先重复确认原始失败签名，再执行 ddmin 和单 Action 固定点删除；TLC 签名比较稳定 error code 与模型动作名而忽略 event index，普通 runtime error 比较归一化根因类别，panic 精确比较 panic value，Oracle 比较排序去重后的 code 集合。输出保留用户原 Metadata，缩减信息单独写入 `minimization-report.json`；`one_minimal=true` 只表示任意单个 Action 都不能继续删除，不等于全局最短。长任务会原子保存 `minimization-checkpoint.json`，可用 `minimize -resume DIR` 继续；checkpoint 包含当前 Plan、尝试数和候选 digest 缓存，报告记录 Plan/config SHA-256 与最终稳定复现次数。未显式提供 `-config` 且 Plan 同目录没有 `config.json` 时命令会拒绝运行。
 
 上述完整 Plan 已使用真实 etcd-raft 和 controlled TLC 运行，结果见
 [`docs/experiments/basic-raft-20260720.md`](docs/experiments/basic-raft-20260720.md)。
@@ -228,6 +246,7 @@ Concrete Action，消息批量选择可能一对多展开，最终仍受 `runtim
 约束。短烟雾实验可显式传入较小的 `-max-plan-actions`。
 离线随机 Mutation 还会主动用 `crash(node) ... restart(node)` 包围一段已有动作，
 默认选择概率为5%，可用 `-crash-restart-pair-percent` 调整。
+它也会默认以5%概率插入覆盖至少一个已有动作的 `partition ... heal` 对，可用 `-partition-heal-pair-percent` 调整；在线策略对应 `-partition-weight` 和 `-heal-weight`，默认2/8。
 候选入队前会检查节点生命周期和同时停止节点上限，不会生成重复 crash 或未 crash
 就 restart 的配对。
 在线 balanced 随机策略会根据最新节点状态生成 crash/restart，默认 crash 权重为1，
@@ -300,7 +319,7 @@ go run ./cmd/modelfuzz-ng experiment -resume runs/random-local \
 
 恢复会继续使用原来的 run index、seed、Corpus 和候选队列；中断时尚未完成的候选
 允许确定性重跑。`runs.jsonl` 或 `corpus.jsonl` 已写但未进入 checkpoint 的记录会先被
-截去再重跑，不会形成重复 run index 或 Corpus ID。当前 checkpoint 格式版本为 v7；检查点包含实验配置指纹，修改
+截去再重跑，不会形成重复 run index 或 Corpus ID。当前 checkpoint 格式版本为 v8；检查点包含实验配置指纹，修改
 SUT、Engine、Policy 或 Mutator 配置后不能误接着旧实验运行。JSONL 最后一条若因
 进程崩溃只写入了一部分，重新打开时只截去该不完整尾记录。
 
@@ -381,6 +400,10 @@ balanced lifecycle、严格 Corpus 准入、Raft 语义覆盖和 checkpoint v7 �
 [`docs/experiments/lazy-tlc-actions-20260721.md`](docs/experiments/lazy-tlc-actions-20260721.md)。
 Snapshot/日志压缩、MsgSnap 受控投递、Oracle 前缀恢复和 checkpoint 确定性实验见
 [`docs/experiments/snapshot-compaction-20260721.md`](docs/experiments/snapshot-compaction-20260721.md)。
+网络分区/合并、三节点收敛、五节点随机 smoke 和确定性 Replay 见
+[`docs/experiments/network-partition-20260722.md`](docs/experiments/network-partition-20260722.md)。
+定向 partition/compaction/snapshot、retain 回归和失败 Plan 缩减见
+[`docs/experiments/directed-snapshot-minimization-20260722.md`](docs/experiments/directed-snapshot-minimization-20260722.md)。
 五节点 `n/3+1` 选举 quorum mutant 的最短反例、100-seed 对照、下游 snapshot panic
 和统计口径见
 [`docs/experiments/quorum-one-third-mutant-20260721.md`](docs/experiments/quorum-one-third-mutant-20260721.md)。

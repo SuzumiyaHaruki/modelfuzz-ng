@@ -204,6 +204,37 @@ func TestRandomPolicyDoesNotDeliverToCrashedNode(t *testing.T) {
 	}
 }
 
+func TestRandomPolicyPartitionsAndThenHeals(t *testing.T) {
+	config := DefaultRandomConfig()
+	config.Weights = RandomWeights{Partition: 1, Heal: 1}
+	policy, err := NewRandom(23, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := randomObservation()
+	if err := policy.Reset(observation); err != nil {
+		t.Fatal(err)
+	}
+	action, more, err := policy.Next(observation)
+	if err != nil || !more || action.Kind != plan.ActionPartition || action.Partition == nil {
+		t.Fatalf("partition action=%+v, more=%v, err=%v", action, more, err)
+	}
+	nodes := []core.NodeID{1, 2}
+	if !action.Partition.Covers(nodes) {
+		t.Fatalf("partition does not cover observation nodes: %+v", action.Partition)
+	}
+	partition := action.Partition.Copy()
+	observation.NetworkPartition = &partition
+	for index := range observation.Messages {
+		message := &observation.Messages[index]
+		message.Blocked = partition.Blocks(core.LinkID{From: message.From, To: message.To})
+	}
+	action, more, err = policy.Next(observation)
+	if err != nil || !more || action.Kind != plan.ActionHeal {
+		t.Fatalf("heal action=%+v, more=%v, err=%v", action, more, err)
+	}
+}
+
 func TestRandomPolicyOffersRequestsToFollowerWithUsableLeader(t *testing.T) {
 	config := DefaultRandomConfig()
 	config.Weights = RandomWeights{Request: 1}

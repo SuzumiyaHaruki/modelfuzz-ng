@@ -12,16 +12,18 @@ const (
 	ActionAdvanceTime ActionKind = "advance_time"
 	// ActionTimeout 立即注入一次协议超时。自然到期的 timer 不属于可选动作，
 	// 而是通过 EffectTimerFired 记录。
-	ActionTimeout ActionKind = "timeout"
-	ActionCrash   ActionKind = "crash"
-	ActionRestart ActionKind = "restart"
-	ActionRequest ActionKind = "request"
+	ActionTimeout   ActionKind = "timeout"
+	ActionCrash     ActionKind = "crash"
+	ActionRestart   ActionKind = "restart"
+	ActionRequest   ActionKind = "request"
+	ActionPartition ActionKind = "partition"
+	ActionHeal      ActionKind = "heal"
 )
 
 func (k ActionKind) Valid() bool {
 	switch k {
 	case ActionDeliver, ActionDrop, ActionDuplicate, ActionAdvanceTime,
-		ActionTimeout, ActionCrash, ActionRestart, ActionRequest:
+		ActionTimeout, ActionCrash, ActionRestart, ActionRequest, ActionPartition, ActionHeal:
 		return true
 	default:
 		return false
@@ -52,11 +54,12 @@ func (s MessageSelector) Validate() error {
 type Action struct {
 	Kind ActionKind `json:"kind"`
 
-	Node       NodeID           `json:"node,omitempty"`
-	Message    MessageID        `json:"message,omitempty"`
-	Selector   *MessageSelector `json:"selector,omitempty"`
-	TargetTime LogicalTime      `json:"target_time,omitempty"`
-	Request    []byte           `json:"request,omitempty"`
+	Node       NodeID            `json:"node,omitempty"`
+	Message    MessageID         `json:"message,omitempty"`
+	Selector   *MessageSelector  `json:"selector,omitempty"`
+	TargetTime LogicalTime       `json:"target_time,omitempty"`
+	Request    []byte            `json:"request,omitempty"`
+	Partition  *NetworkPartition `json:"partition,omitempty"`
 }
 
 func (a Action) Validate() error {
@@ -75,21 +78,21 @@ func (a Action) Validate() error {
 		if err := a.Selector.Validate(); err != nil {
 			return err
 		}
-		if a.Node.Valid() || a.TargetTime != 0 || len(a.Request) != 0 {
+		if a.Node.Valid() || a.TargetTime != 0 || len(a.Request) != 0 || a.Partition != nil {
 			return invalidValue("action", "", "message action contains unrelated fields")
 		}
 	case ActionAdvanceTime:
 		if a.TargetTime == 0 {
 			return invalidValue("action", "target_time", "must be non-zero")
 		}
-		if a.Node.Valid() || a.Message.Valid() || a.Selector != nil || len(a.Request) != 0 {
+		if a.Node.Valid() || a.Message.Valid() || a.Selector != nil || len(a.Request) != 0 || a.Partition != nil {
 			return invalidValue("action", "", "advance-time action contains unrelated fields")
 		}
 	case ActionTimeout, ActionCrash, ActionRestart:
 		if !a.Node.Valid() {
 			return invalidValue("action", "node", "must be non-zero")
 		}
-		if a.Message.Valid() || a.Selector != nil || a.TargetTime != 0 || len(a.Request) != 0 {
+		if a.Message.Valid() || a.Selector != nil || a.TargetTime != 0 || len(a.Request) != 0 || a.Partition != nil {
 			return invalidValue("action", "", "node action contains unrelated fields")
 		}
 	case ActionRequest:
@@ -99,8 +102,22 @@ func (a Action) Validate() error {
 		if len(a.Request) == 0 {
 			return invalidValue("action", "request", "must not be empty")
 		}
-		if a.Message.Valid() || a.Selector != nil || a.TargetTime != 0 {
+		if a.Message.Valid() || a.Selector != nil || a.TargetTime != 0 || a.Partition != nil {
 			return invalidValue("action", "", "request action contains unrelated fields")
+		}
+	case ActionPartition:
+		if a.Partition == nil {
+			return invalidValue("action", "partition", "partition action requires groups")
+		}
+		if err := a.Partition.Validate(); err != nil {
+			return err
+		}
+		if a.Node.Valid() || a.Message.Valid() || a.Selector != nil || a.TargetTime != 0 || len(a.Request) != 0 {
+			return invalidValue("action", "", "partition action contains unrelated fields")
+		}
+	case ActionHeal:
+		if a.Node.Valid() || a.Message.Valid() || a.Selector != nil || a.TargetTime != 0 || len(a.Request) != 0 || a.Partition != nil {
+			return invalidValue("action", "", "heal action contains unrelated fields")
 		}
 	}
 	return nil
@@ -110,6 +127,10 @@ func (a Action) Validate() error {
 func (a Action) Copy() Action {
 	copy := a
 	copy.Request = append([]byte(nil), a.Request...)
+	if a.Partition != nil {
+		partition := a.Partition.Copy()
+		copy.Partition = &partition
+	}
 	if a.Selector != nil {
 		selector := *a.Selector
 		copy.Selector = &selector

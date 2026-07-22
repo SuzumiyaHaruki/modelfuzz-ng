@@ -85,3 +85,31 @@ func TestNetworkDuplicateAndRemoveUpdateCurrentPositions(t *testing.T) {
 		t.Fatalf("stale selector error = %v, want ErrMessageUnavailable", err)
 	}
 }
+
+func TestNetworkPartitionMarksOnlyCrossGroupMessagesAndHealPreservesQueue(t *testing.T) {
+	network := newNetwork()
+	cross, err := network.registerOutbound(outbound(1, 2, "cross"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	within, err := network.registerOutbound(outbound(2, 3, "within"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partition := core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}
+	if err := network.activatePartition(partition, []core.NodeID{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	observations := network.observations()
+	if len(observations) != 2 || observations[0].ID != cross.ID || !observations[0].Blocked ||
+		observations[1].ID != within.ID || observations[1].Blocked {
+		t.Fatalf("partitioned observations = %+v", observations)
+	}
+	if err := network.heal(); err != nil {
+		t.Fatal(err)
+	}
+	observations = network.observations()
+	if len(observations) != 2 || observations[0].Blocked || observations[1].Blocked {
+		t.Fatalf("healed observations = %+v", observations)
+	}
+}

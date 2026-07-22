@@ -18,22 +18,25 @@ import (
 )
 
 type Config struct {
-	Runs                    int   `json:"runs"`
-	BaseSeed                int64 `json:"base_seed"`
-	Parallelism             int   `json:"parallelism"`
-	InitialPopulation       int   `json:"initial_population"`
-	MutationsPerNewState    int   `json:"mutations_per_new_state"`
-	MaxMutationsPerCorpus   int   `json:"max_mutations_per_corpus_entry"`
-	RandomSeedInterval      int   `json:"random_seed_interval,omitempty"`
-	RandomSeedsPerInterval  int   `json:"random_seeds_per_interval,omitempty"`
-	MaxReadyCandidates      int   `json:"max_ready_candidates"`
-	MinNewModelStates       int   `json:"min_new_model_states"`
-	SemanticCoverage        bool  `json:"semantic_coverage"`
-	LifecycleCooldown       int   `json:"lifecycle_cooldown"`
-	MaxCrashEpisodes        int   `json:"max_crash_episodes"`
-	CrashRestartPairPercent int   `json:"crash_restart_pair_percent"`
-	CrashWeight             int   `json:"crash_weight"`
-	RestartWeight           int   `json:"restart_weight"`
+	Runs                     int   `json:"runs"`
+	BaseSeed                 int64 `json:"base_seed"`
+	Parallelism              int   `json:"parallelism"`
+	InitialPopulation        int   `json:"initial_population"`
+	MutationsPerNewState     int   `json:"mutations_per_new_state"`
+	MaxMutationsPerCorpus    int   `json:"max_mutations_per_corpus_entry"`
+	RandomSeedInterval       int   `json:"random_seed_interval,omitempty"`
+	RandomSeedsPerInterval   int   `json:"random_seeds_per_interval,omitempty"`
+	MaxReadyCandidates       int   `json:"max_ready_candidates"`
+	MinNewModelStates        int   `json:"min_new_model_states"`
+	SemanticCoverage         bool  `json:"semantic_coverage"`
+	LifecycleCooldown        int   `json:"lifecycle_cooldown"`
+	MaxCrashEpisodes         int   `json:"max_crash_episodes"`
+	CrashRestartPairPercent  int   `json:"crash_restart_pair_percent"`
+	CrashWeight              int   `json:"crash_weight"`
+	RestartWeight            int   `json:"restart_weight"`
+	PartitionHealPairPercent int   `json:"partition_heal_pair_percent"`
+	PartitionWeight          int   `json:"partition_weight"`
+	HealWeight               int   `json:"heal_weight"`
 }
 
 // Execute 必须为每次调用创建独立 Engine/Runtime。result 即使失败也应包含
@@ -265,7 +268,7 @@ func New(config Config) (*Runner, error) {
 	if config.MaxCrashEpisodes == 0 {
 		config.MaxCrashEpisodes = 4
 	}
-	if config.InitialPopulation < 0 || config.MutationsPerNewState < 0 || config.MaxMutationsPerCorpus < 0 || config.MaxReadyCandidates < 0 || config.MinNewModelStates < 0 || config.LifecycleCooldown < 0 || config.MaxCrashEpisodes < 0 || config.CrashRestartPairPercent < 0 || config.CrashRestartPairPercent > 100 || config.CrashWeight < 0 || config.RestartWeight < 0 {
+	if config.InitialPopulation < 0 || config.MutationsPerNewState < 0 || config.MaxMutationsPerCorpus < 0 || config.MaxReadyCandidates < 0 || config.MinNewModelStates < 0 || config.LifecycleCooldown < 0 || config.MaxCrashEpisodes < 0 || config.CrashRestartPairPercent < 0 || config.PartitionHealPairPercent < 0 || config.CrashRestartPairPercent+config.PartitionHealPairPercent > 100 || config.CrashWeight < 0 || config.RestartWeight < 0 || config.PartitionWeight < 0 || config.HealWeight < 0 {
 		return nil, fmt.Errorf("feedback experiment bounds must be non-negative")
 	}
 	if config.RandomSeedInterval < 0 || config.RandomSeedsPerInterval < 0 {
