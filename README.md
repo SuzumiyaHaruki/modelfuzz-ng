@@ -27,6 +27,7 @@ Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后�
 
 实验记录的主题索引和 `runs/` 原始产物保留规则见
 [`docs/experiments/README.md`](docs/experiments/README.md)。
+系统执行流程、Raft 事件语义、典型实验结果、与原始 ModelFuzz 的双向能力对照，以及原论文所称两个 etcd bug 的证据边界见 [`docs/system-overview-and-modelfuzz-comparison.md`](docs/system-overview-and-modelfuzz-comparison.md)。
 
 ## 本地依赖
 
