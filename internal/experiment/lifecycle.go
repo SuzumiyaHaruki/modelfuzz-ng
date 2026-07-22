@@ -7,9 +7,9 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 )
 
-// Version 8 在 v7 语义覆盖 checkpoint 上加入 network partition/heal 的
-// Policy 与 Mutation 配置边界，避免恢复时静默改变网络故障分布。
-const CheckpointVersion uint32 = 8
+// CheckpointVersion 是正式 v1 实验 checkpoint schema。pre-v1 checkpoint
+// 不提供兼容迁移，恢复时必须同时匹配版本、实验配置和完整配置指纹。
+const CheckpointVersion uint32 = 1
 
 type EventKind string
 

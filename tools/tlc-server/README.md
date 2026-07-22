@@ -16,7 +16,8 @@ tools/tlc-server/run.sh \
 服务提供：
 
 - `GET /health`：返回服务版本、模型/config 路径、严格模式以及 cfg 中实际的
-  `largest_term`/`max_log_index`；Go CLI 会据此拒绝模型边界漂移；
+  `largest_term`/`max_log_index` 和识别出的 `model_profile`；Go CLI 会据此拒绝
+  模型边界或 basic/storage-snapshot profile 漂移；
 - `GET /metrics`：返回请求、事件、稳定错误码以及 Action 查询、后继计算、状态校验、
   状态序列化的累计纳秒数；
 - `POST /execute`：兼容当前 Go TLC Client 的事件数组和成功响应格式；
@@ -28,13 +29,21 @@ tools/tlc-server/run.sh \
 - 每个新状态完整检查 model constraint 和 invariant；重复状态使用最多10万个条目的
   有界 fingerprint 验证缓存，避免反馈实验反复计算同一状态。
 
-当前服务只实现 NG Raft 模型使用的事件协议，且每次请求都从唯一初始状态开始。
-这是有意的边界：跨请求共享模型状态和协议无关 Java Mapper 暂不进入第一版。
+当前正式 v1 服务只实现 NG Raft 模型使用的事件协议，`/health.version` 为 `1`，且每次
+请求都从唯一初始状态开始。这是有意的边界：跨请求共享模型状态和协议无关 Java
+Mapper 不属于 v1 保证范围。
 
 `models/raft/raft-5.cfg` 是快速测试配置；`raft-10.cfg` 与原 ModelFuzz 主实验的
 10/10 边界一致。这两个 controlled server 配置使用 `ControlledNext`，避免
 TLC Tool 在启动时展开全部参数笛卡尔积；具体动作由服务层按事件创建。
 兼容文件 `raft.cfg` 仍是5/5且保留完整 `Spec`/`Next`，可用于普通 TLC 枚举。
+快照边界与 Leader progress 模型使用 `models/raft/raft_storage_snapshot.tla` 和对应的
+`raft-storage-snapshot-*.cfg`；服务会自动把基础事件绑定到该模块的 `Storage*`
+包装动作，并额外接受 `ApplyCommitted`、`CreateSnapshot`、`CompactLog`、
+`SendSnapshot`、`InstallSnapshot`、`FastForwardSnapshot`、`RejectSnapshot`、
+`HandleSnapshotStatus`；当前 storage-snapshot 服务共识别30个动作定义。
+TLC 对同一动作可能沿不同表达式分支生成内容相同的重复状态；服务会先归一化并按
+完整状态去重，只有仍存在多个不同 successor 时才报告 `ambiguous_successor`。
 
 运行服务端集成测试：
 

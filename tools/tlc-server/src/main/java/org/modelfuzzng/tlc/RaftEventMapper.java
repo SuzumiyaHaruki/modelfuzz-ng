@@ -26,6 +26,7 @@ final class RaftEventMapper {
     private final Map<String, ActionDefinition> definitionsByName = new HashMap<>();
     private final Map<ActionKey, Action> actionCache;
     private final ModelBounds bounds;
+    private final boolean storageSnapshotProfile;
     private final int actionCacheLimit;
     private final LongAdder lookupCount = new LongAdder();
     private final LongAdder lookupNanos = new LongAdder();
@@ -44,13 +45,21 @@ final class RaftEventMapper {
         for (String name : List.of(
             "RemoveFromActive", "AddToActive", "Timeout", "BecomeLeader", "ClientRequest",
             "HandleRequestVoteRequest", "HandleRequestVoteResponse", "HandleNilAppendEntriesRequest",
-            "HandleAppendEntriesRequest", "HandleAppendEntriesResponse", "AdvanceCommitIndex"
+            "HandleAppendEntriesRequest", "HandleAppendEntriesResponse", "AdvanceCommitIndex",
+            "StorageRemoveFromActive", "StorageAddToActive", "StorageTimeout", "StorageBecomeLeader",
+            "StorageClientRequest", "StorageHandleRequestVoteRequest", "StorageHandleRequestVoteResponse",
+            "StorageHandleNilAppendEntriesRequest", "StorageHandleAppendEntriesRequest",
+            "StorageHandleAppendEntriesResponse", "StorageAdvanceCommitIndex",
+            "ApplyCommitted", "CreateSnapshot", "CompactLog", "SendSnapshot",
+            "InstallSnapshot", "FastForwardSnapshot", "RejectSnapshot", "HandleSnapshotStatus"
         )) {
             OpDefNode definition = module.getOpDef(name);
             if (definition != null) {
                 definitionsByName.put(name, new ActionDefinition(definition));
             }
         }
+        this.storageSnapshotProfile = definitionsByName.containsKey("StorageTimeout")
+            && definitionsByName.containsKey("CreateSnapshot");
         this.actionCache = new LinkedHashMap<>(16, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<ActionKey, Action> eldest) {
@@ -73,6 +82,10 @@ final class RaftEventMapper {
 
     int actionCacheLimit() {
         return actionCacheLimit;
+    }
+
+    String modelProfile() {
+        return storageSnapshotProfile ? "storage-snapshot" : "basic";
     }
 
     long lookupCount() {
@@ -131,6 +144,32 @@ final class RaftEventMapper {
                 "v", number(params, "request", index, name));
             case "BecomeLeader", "Timeout" -> values("i", number(params, "node", index, name));
             case "AdvanceCommitIndex", "Add", "Remove" -> values("i", number(params, "i", index, name));
+            case "ApplyCommitted", "CompactLog" -> values(
+                "i", number(params, "i", index, name),
+                "index", number(params, "index", index, name));
+            case "CreateSnapshot" -> values(
+                "i", number(params, "i", index, name),
+                "index", number(params, "index", index, name),
+                "term", number(params, "term", index, name));
+            case "SendSnapshot" -> values(
+                "i", number(params, "i", index, name),
+                "j", number(params, "j", index, name),
+                "index", number(params, "index", index, name),
+                "term", number(params, "term", index, name),
+                "match", number(params, "match", index, name),
+                "next", number(params, "next", index, name),
+                "pending", number(params, "pending", index, name));
+            case "InstallSnapshot", "FastForwardSnapshot", "RejectSnapshot" -> values(
+                "i", number(params, "i", index, name),
+                "j", number(params, "j", index, name),
+                "index", number(params, "index", index, name),
+                "sTerm", number(params, "snapshot_term", index, name),
+                "term", number(params, "term", index, name));
+            case "HandleSnapshotStatus" -> values(
+                "i", number(params, "i", index, name),
+                "j", number(params, "j", index, name),
+                "success", requiredBoolean(params, "success", index, name),
+                "next", number(params, "next", index, name));
             case "DeliverMessage" -> deliveredMessage(params, index, name);
             default -> throw failure("unknown_event", index, name, 400, "unsupported model event " + name);
         };
@@ -140,7 +179,19 @@ final class RaftEventMapper {
             case "DeliverMessage" -> deliveredActionName(params, index, name);
             default -> name;
         };
+        if (storageSnapshotProfile && isBaseRaftAction(actionName)) {
+            actionName = "Storage" + actionName;
+        }
         return MappedEvent.action(name, findAction(actionName, expected, index, name));
+    }
+
+    private static boolean isBaseRaftAction(String name) {
+        return switch (name) {
+            case "RemoveFromActive", "AddToActive", "Timeout", "BecomeLeader", "ClientRequest",
+                "HandleRequestVoteRequest", "HandleRequestVoteResponse", "HandleNilAppendEntriesRequest",
+                "HandleAppendEntriesRequest", "HandleAppendEntriesResponse", "AdvanceCommitIndex" -> true;
+            default -> false;
+        };
     }
 
     private String deliveredActionName(JsonObject params, int index, String eventName) throws ProtocolException {

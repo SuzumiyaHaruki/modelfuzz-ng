@@ -9,12 +9,13 @@ func TestTraceAppendAndCopy(t *testing.T) {
 	trace := NewTrace("execution-1", 42)
 	nodes := traceTestNodes()
 	step := StepRecord{
-		Index:       0,
-		TimeBefore:  0,
-		TimeAfter:   1,
-		Action:      Action{Kind: ActionAdvanceTime, TargetTime: 1},
-		NodesBefore: nodes,
-		NodesAfter:  nodes,
+		Index:             0,
+		TimeBefore:        0,
+		TimeAfter:         1,
+		Action:            Action{Kind: ActionAdvanceTime, TargetTime: 1},
+		NodesBefore:       nodes,
+		NodesAfter:        nodes,
+		ObservationDigest: "digest",
 	}
 	if err := trace.Append(step); err != nil {
 		t.Fatalf("Append: %v", err)
@@ -40,6 +41,7 @@ func TestTraceRejectsDiscontinuousIndexAndTimeRegression(t *testing.T) {
 	if err := trace.Append(StepRecord{
 		Index: 0, TimeBefore: 0, TimeAfter: 2,
 		Action: Action{Kind: ActionAdvanceTime, TargetTime: 2}, NodesBefore: nodes, NodesAfter: nodes,
+		ObservationDigest: "digest",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +49,7 @@ func TestTraceRejectsDiscontinuousIndexAndTimeRegression(t *testing.T) {
 	err := trace.Append(StepRecord{
 		Index: 2, TimeBefore: 2, TimeAfter: 3,
 		Action: Action{Kind: ActionAdvanceTime, TargetTime: 3}, NodesBefore: nodes, NodesAfter: nodes,
+		ObservationDigest: "digest",
 	})
 	if !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("discontinuous index error = %v, want ErrInvalidValue", err)
@@ -55,13 +58,14 @@ func TestTraceRejectsDiscontinuousIndexAndTimeRegression(t *testing.T) {
 	err = trace.Append(StepRecord{
 		Index: 1, TimeBefore: 1, TimeAfter: 3,
 		Action: Action{Kind: ActionAdvanceTime, TargetTime: 3}, NodesBefore: nodes, NodesAfter: nodes,
+		ObservationDigest: "digest",
 	})
 	if !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("time regression error = %v, want ErrInvalidValue", err)
 	}
 }
 
-func TestTraceVersionTwoRequiresNodeSnapshots(t *testing.T) {
+func TestTraceVersionOneRequiresNodeSnapshots(t *testing.T) {
 	trace := NewTrace("execution-1", 42)
 	err := trace.Append(StepRecord{
 		Index: 0, TimeBefore: 0, TimeAfter: 1,
@@ -69,6 +73,26 @@ func TestTraceVersionTwoRequiresNodeSnapshots(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("missing snapshots error = %v, want ErrInvalidValue", err)
+	}
+}
+
+func TestTraceVersionOneRequiresObservationDigest(t *testing.T) {
+	trace := NewTrace("execution-1", 42)
+	nodes := traceTestNodes()
+	err := trace.Append(StepRecord{
+		Index: 0, TimeBefore: 0, TimeAfter: 1,
+		Action: Action{Kind: ActionAdvanceTime, TargetTime: 1}, NodesBefore: nodes, NodesAfter: nodes,
+	})
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("missing observation digest error = %v, want ErrInvalidValue", err)
+	}
+}
+
+func TestTraceRejectsPreV1SchemaVersion(t *testing.T) {
+	trace := NewTrace("execution-1", 42)
+	trace.Version = 4
+	if err := trace.Validate(); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("pre-v1 version error = %v, want ErrInvalidValue", err)
 	}
 }
 

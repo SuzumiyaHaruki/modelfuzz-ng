@@ -2,7 +2,9 @@
 
 ## 1. 文档目的
 
-本文总结 ModelFuzz-NG 在 timer 建模方面遇到的困难、已经确定的设计，以及仍需在 Adapter 和 Plan 层解决的问题。
+本文总结 ModelFuzz-NG 在 timer 建模方面遇到的困难、已经确定的设计，以及仍需在
+Adapter 和 Plan 层解决的问题。文中“第一版”指最初设计阶段；与正式 v1 能力冲突时，
+以 [`v1-baseline.md`](v1-baseline.md) 和当前代码为准。
 
 当前方案优先追求：
 
@@ -504,9 +506,10 @@ AllowForcedTimeout bool
 
 发现 violation 后，可以关闭 `AllowForcedTimeout`，尝试把强制轨迹具体化为自然时间推进和消息延迟，从而判断问题是否在严格时间语义下可达。
 
-## 15. 第一版Raft范围
+## 15. 正式 v1 Raft 范围
 
-第一版底层 Raft 应尽量简单，通过配置关闭暂时不需要的扩展，而不是从上游源码删除功能。
+正式 v1 底层 Raft 保持可重复的受控配置，通过配置关闭暂时不需要的扩展，而不是从
+上游源码删除功能。
 
 建议：
 
@@ -521,19 +524,22 @@ MemoryStorage
 受控的每节点随机源
 ```
 
-暂时不主动测试：
+正式 v1 仍不主动测试：
 
 - PreVote；
 - learner；
 - 动态成员变更；
 - leadership transfer；
-- snapshot；
 - ReadIndex/lease read；
 - async storage；
 - check-quorum；
 - 真实网络和磁盘 goroutine。
 
 关闭 PreVote 后，Follower/Candidate 的自然 election timeout 和 term 变化更直接，也更容易与 TLA+ 模型对齐。
+
+Snapshot、日志压缩、网络 partition/heal 已进入正式 v1：Concrete Adapter/Oracle 覆盖
+快照生命周期，`storage-snapshot` TLA+ profile 覆盖固定 voter 的发送、安装、失败重试和
+fast-forward；动态 ConfState 和异常 payload 仍不在范围内。
 
 不能省略的是随机性控制。当前本地 raft v3.7 已增加实例级 `Config.Rand`；
 Adapter 根据 `ExecutionSeed + NodeID + NodeEpoch` 为每个节点创建独立的稳定随机流。
@@ -610,8 +616,8 @@ ActionSequence:
 4. 是否需要在 Message 中持久化 `DeliveredAt`，还是从 Trace 推导；
 5. 强制 timeout 轨迹如何自动具体化为消息阻塞和自然时间推进；
 6. 如何衡量 Plan 与实际 Concrete Trace 的偏离程度；
-7. 何时增加动态节点选择器和 Partition、FairDeliver 等 Plan 宏；
-8. 何时引入 PreVote、CheckQuorum、snapshot 等扩展进行第二阶段测试。
+7. 是否增加动态节点选择器和 FairDeliver 等 Plan 宏；
+8. 何时引入 PreVote、CheckQuorum、动态 membership 等扩展测试。
 
 ## 19. 当前推荐方案摘要
 
@@ -624,6 +630,6 @@ ActionSequence:
 7. Concrete Action 使用绝对 `TargetTime`、MessageID 和确定 NodeID；
 8. 一次较大的 `AdvanceTime` 可以产生多次心跳、多个自然超时和多条消息，所有 Effect 必须保留发生时间；
 9. 自然与强制 timeout 始终可以共存，是否允许强制行为只由 `AllowForcedTimeout` 控制；
-10. 第一版关闭 PreVote、CheckQuorum 和其他可选扩展，使用简单内存内 Raft；
+10. 正式 v1 关闭 PreVote、CheckQuorum 和其他可选扩展，使用内存内 Raft；
 11. 使用受控随机源、稳定节点顺序和严格 Trace 校验保证重放；
 12. 通过 tick/Action budget、Election Storm 检测和后续 Plan 策略控制自然事件造成的偏离。

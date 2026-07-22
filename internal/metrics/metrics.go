@@ -25,7 +25,11 @@ type RunMetrics struct {
 	SnapshotsSent            int            `json:"snapshots_sent"`
 	SnapshotsDelivered       int            `json:"snapshots_delivered"`
 	SnapshotsApplied         int            `json:"snapshots_applied"`
+	SnapshotsFastForwarded   int            `json:"snapshots_fast_forwarded"`
 	SnapshotsRejectedOrStale int            `json:"snapshots_rejected_or_stale"`
+	SnapshotStatusSucceeded  int            `json:"snapshot_status_succeeded"`
+	SnapshotStatusFailed     int            `json:"snapshot_status_failed"`
+	SnapshotStatusIgnored    int            `json:"snapshot_status_ignored"`
 	LogsCompacted            int            `json:"logs_compacted"`
 	CompactedEntries         uint64         `json:"compacted_entries"`
 	SnapshotBytes            uint64         `json:"snapshot_bytes"`
@@ -81,8 +85,21 @@ func Collect(result engine.Result) RunMetrics {
 					metrics.SnapshotsDelivered++
 				case "raft.snapshot_applied":
 					metrics.SnapshotsApplied++
+				case "raft.snapshot_fast_forwarded":
+					metrics.SnapshotsFastForwarded++
 				case "raft.snapshot_rejected_or_stale":
 					metrics.SnapshotsRejectedOrStale++
+				case "raft.snapshot_status_reported":
+					handled, _ := effect.ModelEvent.Params["handled"].(bool)
+					reject, _ := effect.ModelEvent.Params["reject"].(bool)
+					switch {
+					case !handled:
+						metrics.SnapshotStatusIgnored++
+					case reject:
+						metrics.SnapshotStatusFailed++
+					default:
+						metrics.SnapshotStatusSucceeded++
+					}
 				case "raft.log_compacted":
 					metrics.LogsCompacted++
 					metrics.CompactedEntries += unsignedMetric(effect.ModelEvent.Params["compacted_entries"])

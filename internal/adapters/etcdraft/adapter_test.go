@@ -86,6 +86,18 @@ func findMessageOK(observation core.Observation, typeHint string, from, to core.
 	return core.MessageObservation{}, false
 }
 
+func findMessageWithMetadataOK(
+	observation core.Observation, typeHint string, from, to core.NodeID, key, value string,
+) (core.MessageObservation, bool) {
+	for _, message := range observation.Messages {
+		if message.TypeHint == typeHint && message.From == from && message.To == to &&
+			message.Metadata[key] == value {
+			return message, true
+		}
+	}
+	return core.MessageObservation{}, false
+}
+
 func findSnapshotMessage(t *testing.T, observation core.Observation, from, to core.NodeID, index uint64) core.MessageObservation {
 	t.Helper()
 	if message, found := findSnapshotMessageOK(observation, from, to, index); found {
@@ -572,6 +584,14 @@ func TestLaggingFollowerReceivesSnapshotThroughRuntimeAndRejectsDuplicate(t *tes
 	if leader.Observation.Nodes[0].Semantic["role"] != "leader" {
 		t.Fatalf("node 1 did not become leader: %+v", leader.Observation.Nodes[0])
 	}
+	progress, ok := leader.Observation.Nodes[0].Semantic["leader_progress"].(map[string]any)
+	if !ok || len(progress) != 3 {
+		t.Fatalf("leader progress is missing or incomplete: %+v", leader.Observation.Nodes[0].Semantic)
+	}
+	peer, ok := progress["3"].(map[string]any)
+	if !ok || peer["pending_snapshot"] != uint64(0) || peer["state"] == "" {
+		t.Fatalf("peer progress is invalid: %+v", progress["3"])
+	}
 	if _, err := r.Execute(ctx, core.Action{Kind: core.ActionCrash, Node: 3}); err != nil {
 		t.Fatal(err)
 	}
@@ -602,6 +622,20 @@ func TestLaggingFollowerReceivesSnapshotThroughRuntimeAndRejectsDuplicate(t *tes
 	heartbeatResponse := findMessage(t, heartbeatResult.Observation, "MsgHeartbeatResp", 3, 1)
 	snapshotResult := deliverObserved(t, r, heartbeatResponse)
 	snapshotMessage := findMessage(t, snapshotResult.Observation, "MsgSnap", 1, 3)
+	foundSentProgress := false
+	for _, effect := range snapshotResult.Record.Effects {
+		if effect.Kind != core.EffectModelEvent || effect.ModelEvent == nil ||
+			effect.ModelEvent.Name != "raft.snapshot_sent" {
+			continue
+		}
+		params := effect.ModelEvent.Params
+		foundSentProgress = effect.ModelEvent.Node == 1 && params["to"] == uint64(3) &&
+			params["index"] == uint64(2) && params["pending_snapshot"] == uint64(2) &&
+			params["next_index"] == uint64(3) && params["progress_state"] == "StateSnapshot"
+	}
+	if !foundSentProgress {
+		t.Fatalf("snapshot send did not expose leader progress: %+v", snapshotResult.Record.Effects)
+	}
 
 	duplicated, err := r.Execute(ctx, core.Action{
 		Kind: core.ActionDuplicate, Message: snapshotMessage.ID,
@@ -660,6 +694,115 @@ func TestLaggingFollowerReceivesSnapshotThroughRuntimeAndRejectsDuplicate(t *tes
 		final.Nodes[2].Semantic["committed_prefix_available"] != true {
 		t.Fatalf("follower did not catch up after snapshot: leader=%+v follower=%+v",
 			final.Nodes[0].Semantic, final.Nodes[2].Semantic)
+	}
+}
+
+func TestFollowerNaturallyFastForwardsMatchingSnapshot(t *testing.T) {
+	config := testConfig(1, 2, 3)
+	config.Snapshot = SnapshotPolicy{Threshold: 4}
+	r := newTestRuntime(t, config)
+	ctx := context.Background()
+
+	timeout, err := r.Execute(ctx, core.Action{Kind: core.ActionTimeout, Node: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vote := deliverObserved(t, r, findMessage(t, timeout.Observation, "MsgVote", 1, 2))
+	leader := deliverObserved(t, r, findMessage(t, vote.Observation, "MsgVoteResp", 2, 1))
+	if leader.Observation.Nodes[0].Semantic["role"] != "leader" {
+		t.Fatalf("node 1 did not become leader: %+v", leader.Observation.Nodes[0])
+	}
+
+	// First acknowledge the leader no-op so target n3 enters StateReplicate with
+	// Match=1. Keep its commit update out of the way: the later snapshot must be
+	// ahead of commit while still matching an entry already present in its log.
+	targetAppend := findMessage(t, leader.Observation, "MsgApp", 1, 3)
+	targetAccepted := deliverObserved(t, r, targetAppend)
+	deliverObserved(t, r, findMessage(t, targetAccepted.Observation, "MsgAppResp", 3, 1))
+	replicateLeaderToFollower(t, r, 1, 2)
+	dropMessagesTo(t, r, 3)
+
+	// Queue three optimistic appends for n3. Deliver index=2 out of order first
+	// to create a stale rejection, then replay its duplicate after index=1 so n3
+	// ultimately stores every entry through index 4 without advancing commit.
+	for _, value := range []string{"1", "2", "3"} {
+		if _, err := r.Execute(ctx, core.Action{Kind: core.ActionRequest, Node: 1, Request: []byte(value)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observation := currentObservation(t, r)
+	middle, found := findMessageWithMetadataOK(observation, "MsgApp", 1, 3, "index", "2")
+	if !found {
+		t.Fatalf("middle optimistic append not found: %+v", observation.Messages)
+	}
+	duplicated, err := r.Execute(ctx, core.Action{
+		Kind: core.ActionDuplicate, Message: middle.ID,
+		Selector: &core.MessageSelector{Link: core.LinkID{From: 1, To: 3}, Position: middle.Position},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	middle, _ = findMessageWithMetadataOK(duplicated.Observation, "MsgApp", 1, 3, "index", "2")
+	rejected := deliverObserved(t, r, middle)
+	if _, found := findMessageWithMetadataOK(rejected.Observation, "MsgAppResp", 3, 1, "reject", "true"); !found {
+		t.Fatalf("out-of-order append did not produce rejection: %+v", rejected.Observation.Messages)
+	}
+	for _, previousIndex := range []string{"1", "2", "3"} {
+		observation = currentObservation(t, r)
+		appendMessage, found := findMessageWithMetadataOK(observation, "MsgApp", 1, 3, "index", previousIndex)
+		if !found {
+			t.Fatalf("target append at previous index %s not found: %+v", previousIndex, observation.Messages)
+		}
+		deliverObserved(t, r, appendMessage)
+	}
+	observation = currentObservation(t, r)
+	if observation.Nodes[2].Semantic["last_index"] != uint64(4) ||
+		observation.Nodes[2].Semantic["commit"] != uint64(1) {
+		t.Fatalf("target did not retain an uncommitted matching suffix: %+v", observation.Nodes[2].Semantic)
+	}
+
+	// Let n2 form the committing quorum. Snapshot threshold 4 compacts the
+	// leader through index 4 while the stale rejection from n3 remains queued.
+	for attempts := 0; attempts < 40; attempts++ {
+		observation = currentObservation(t, r)
+		if observation.Nodes[0].Semantic["snapshot_index"] == uint64(4) {
+			break
+		}
+		message, found := findMessageOK(observation, "MsgApp", 1, 2)
+		if !found {
+			t.Fatalf("no quorum append while building snapshot: %+v", observation.Messages)
+		}
+		result := deliverObserved(t, r, message)
+		response, found := findMessageOK(result.Observation, "MsgAppResp", 2, 1)
+		if !found {
+			t.Fatalf("quorum append produced no response: %+v", result.Observation.Messages)
+		}
+		deliverObserved(t, r, response)
+	}
+	observation = currentObservation(t, r)
+	if observation.Nodes[0].Semantic["snapshot_index"] != uint64(4) ||
+		observation.Nodes[0].Semantic["first_index"] != uint64(5) {
+		t.Fatalf("leader did not compact through index 4: %+v", observation.Nodes[0].Semantic)
+	}
+
+	staleReject, found := findMessageWithMetadataOK(observation, "MsgAppResp", 3, 1, "reject", "true")
+	if !found {
+		t.Fatalf("stale rejection disappeared: %+v", observation.Messages)
+	}
+	snapshotSent := deliverObserved(t, r, staleReject)
+	snapshot := findSnapshotMessage(t, snapshotSent.Observation, 1, 3, 4)
+	fastForwarded := deliverObserved(t, r, snapshot)
+	foundFastForward := false
+	for _, effect := range fastForwarded.Record.Effects {
+		if effect.Kind == core.EffectModelEvent && effect.ModelEvent != nil &&
+			effect.ModelEvent.Name == "raft.snapshot_fast_forwarded" {
+			foundFastForward = true
+		}
+	}
+	if !foundFastForward || fastForwarded.Observation.Nodes[2].Semantic["commit"] != uint64(4) ||
+		fastForwarded.Observation.Nodes[2].Semantic["applied"] != uint64(4) {
+		t.Fatalf("matching snapshot did not naturally fast-forward: effects=%+v target=%+v",
+			fastForwarded.Record.Effects, fastForwarded.Observation.Nodes[2].Semantic)
 	}
 }
 

@@ -10,6 +10,7 @@
     "verbose_logging": false
   },
   "model": {
+    "profile": "storage-snapshot",
     "node_ids": [1, 2, 3, 4, 5],
     "max_value": 5,
     "max_log_index": 10,

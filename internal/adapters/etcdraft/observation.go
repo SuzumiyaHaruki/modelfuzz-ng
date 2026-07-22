@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 )
@@ -39,6 +40,9 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 				"heartbeat_ticks_remaining":   ticksRemaining(raftStatus.HeartbeatTimeout, raftStatus.HeartbeatElapsed),
 			}
 			addSnapshotObservation(a.config.Snapshot, n, semantic)
+			if roleName(raftStatus.RaftState) == "leader" {
+				semantic["leader_progress"] = observeLeaderProgress(n)
+			}
 		} else {
 			hardState, _, err := n.storage.InitialState()
 			if err != nil {
@@ -88,6 +92,23 @@ func (a *Adapter) observation(at core.LogicalTime) (core.Observation, error) {
 			"running_nodes": running,
 		},
 	}, nil
+}
+
+func observeLeaderProgress(n *node) map[string]any {
+	result := make(map[string]any)
+	if n == nil || n.raw == nil {
+		return result
+	}
+	status := n.raw.Status()
+	for id, progress := range status.Progress {
+		result[strconv.FormatUint(id, 10)] = map[string]any{
+			"match":            progress.Match,
+			"next":             progress.Next,
+			"pending_snapshot": progress.PendingSnapshot,
+			"state":            progress.State.String(),
+		}
+	}
+	return result
 }
 
 func addSnapshotObservation(policy SnapshotPolicy, n *node, semantic map[string]any) {

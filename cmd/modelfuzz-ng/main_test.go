@@ -24,6 +24,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/minimize"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
+	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/mutation"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/persistence"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/plan"
@@ -54,6 +55,16 @@ func readRunSummaries(t *testing.T, path string) []experiment.Run {
 	return result
 }
 
+func TestVersionCLIReportsFormalV1(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := runCLI(context.Background(), []string{"version"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "modelfuzz-ng v1.0.0\n" {
+		t.Fatalf("version output = %q", stdout.String())
+	}
+}
+
 func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
 	var received []model.Event
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -68,7 +79,10 @@ func TestRunCLIProducesCompleteArtifactsWithTLC(t *testing.T) {
 			t.Errorf("decode TLC request: %v", err)
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"States":["initial","leader"],"Keys":[1,2]}`))
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"States": []string{validCoverageTLCState("follower"), validCoverageTLCState("leader")},
+			"Keys":   []int64{1, 2},
+		})
 	}))
 	defer server.Close()
 
@@ -361,6 +375,96 @@ func TestDirectedSnapshotPartitionWithoutDuplicateUsesRealEtcdRaft(t *testing.T)
 	}
 }
 
+func TestDirectedSnapshotFastForwardUsesRealEtcdRaft(t *testing.T) {
+	config := defaultCLIConfig()
+	config.Raft.Snapshot.Threshold = 4
+	config.Raft.Snapshot.RetainEntries = 1
+	config.Model.Profile = raftmodel.ProfileStorageSnapshot
+	config.Model.MaxLogIndex = 10
+	config.Model.LargestTerm = 10
+	runner, err := buildEngine(config, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := randompolicy.NewSnapshotFastForward(9451, randompolicy.SnapshotFastForwardConfig{
+		NodeIDs: config.Raft.NodeIDs, MaxValue: config.Model.MaxValue, MaxLogIndex: config.Model.MaxLogIndex,
+		SnapshotThreshold: config.Raft.Snapshot.Threshold, RetainEntries: config.Raft.Snapshot.RetainEntries,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.RunSource(context.Background(), policy, 400)
+	if err != nil || result.Status != engine.StatusCompleted || result.Termination != engine.TerminationPolicyComplete {
+		t.Fatalf("directed fast-forward result/error = %+v/%v", result, err)
+	}
+	collected := metrics.Collect(result)
+	snapshotSends := make([]map[string]any, 0)
+	for _, step := range result.Trace.Steps {
+		for _, effect := range step.Effects {
+			if effect.Kind == core.EffectModelEvent && effect.ModelEvent != nil &&
+				effect.ModelEvent.Name == "raft.snapshot_sent" {
+				snapshotSends = append(snapshotSends, effect.ModelEvent.Params)
+			}
+		}
+	}
+	if collected.ModelEventCounts["raft.snapshot_fast_forwarded"] != 1 ||
+		collected.ModelEventCounts["raft.snapshot_applied"] != 0 ||
+		collected.ModelEventCounts["raft.snapshot_status_reported"] != 1 ||
+		collected.SnapshotsSent != 1 || collected.SnapshotsDelivered != 1 ||
+		collected.SnapshotsFastForwarded != 1 || collected.SnapshotStatusSucceeded != 1 {
+		t.Fatalf("directed fast-forward metrics = %+v, sends=%+v", collected, snapshotSends)
+	}
+	if collected.ModelEventCounts["HandleSnapshotStatus"] != 1 ||
+		collected.ModelEventCounts["FastForwardSnapshot"] != 1 {
+		t.Fatalf("directed fast-forward model events = %+v", collected.ModelEventCounts)
+	}
+	target := observedNode(t, result.Final, core.NodeID(3))
+	if semanticUint64(t, target, "commit") < 4 || semanticUint64(t, target, "applied") < 4 {
+		t.Fatalf("fast-forward target did not reach boundary: %+v", target.Semantic)
+	}
+}
+
+func TestDirectedSnapshotFailureReportsAndRetries(t *testing.T) {
+	config := defaultCLIConfig()
+	config.Raft.Snapshot.Threshold = 2
+	config.Raft.Snapshot.RetainEntries = 1
+	config.Model.Profile = raftmodel.ProfileStorageSnapshot
+	config.Model.MaxLogIndex = 10
+	config.Model.LargestTerm = 10
+	runner, err := buildEngine(config, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := randompolicy.NewSnapshotPartition(9461, randompolicy.SnapshotPartitionConfig{
+		NodeIDs: config.Raft.NodeIDs, MaxValue: config.Model.MaxValue, MaxLogIndex: config.Model.MaxLogIndex,
+		SnapshotThreshold: config.Raft.Snapshot.Threshold, RetainEntries: config.Raft.Snapshot.RetainEntries,
+		FailFirstSnapshot: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.RunSource(context.Background(), policy, 400)
+	if err != nil || result.Status != engine.StatusCompleted || result.Termination != engine.TerminationPolicyComplete {
+		t.Fatalf("directed snapshot failure result/error = %+v/%v", result, err)
+	}
+	collected := metrics.Collect(result)
+	if collected.SnapshotsSent != 2 || collected.SnapshotsDelivered != 1 || collected.SnapshotsApplied != 1 ||
+		collected.ModelEventCounts["raft.snapshot_status_reported"] != 2 ||
+		collected.ModelEventCounts["HandleSnapshotStatus"] != 2 ||
+		collected.SnapshotStatusFailed != 1 || collected.SnapshotStatusSucceeded != 1 ||
+		collected.ActionCounts[string(core.ActionDrop)] < 1 {
+		t.Fatalf("directed snapshot failure metrics = %+v", collected)
+	}
+	laggerID := core.NodeID(3)
+	if policy.Sequence().Metadata["lagger"] != "n3" {
+		laggerID = core.NodeID(2)
+	}
+	lagger := observedNode(t, result.Final, laggerID)
+	if semanticUint64(t, lagger, "snapshot_index") < 2 || semanticUint64(t, lagger, "applied") < 2 {
+		t.Fatalf("lagger did not recover after snapshot retry: %+v", lagger.Semantic)
+	}
+}
+
 func TestDirectedSnapshotPartitionCheckpointResumeMatchesControl(t *testing.T) {
 	config := defaultCLIConfig()
 	config.Raft.Snapshot.Threshold = 2
@@ -478,7 +582,7 @@ func TestMinimizeCLIPersistsOneMinimalFailure(t *testing.T) {
 					return
 				}
 			}
-			_ = json.NewEncoder(writer).Encode(map[string]any{"States": []string{"s"}, "Keys": []int64{1}})
+			_ = json.NewEncoder(writer).Encode(map[string]any{"States": []string{validCoverageTLCState("follower")}, "Keys": []int64{1}})
 		default:
 			http.NotFound(writer, request)
 		}
@@ -557,7 +661,7 @@ func TestMinimizeCLIResumesInterruptedCheckpoint(t *testing.T) {
 					return
 				}
 			}
-			_ = json.NewEncoder(writer).Encode(map[string]any{"States": []string{"s"}, "Keys": []int64{1}})
+			_ = json.NewEncoder(writer).Encode(map[string]any{"States": []string{validCoverageTLCState("follower")}, "Keys": []int64{1}})
 		}
 	}))
 	defer server.Close()
@@ -703,63 +807,25 @@ func TestExperimentCLIPersistsMetricsAndResumesCompletedCheckpoint(t *testing.T)
 	}
 }
 
-func TestExperimentCLIResumesAndMigratesLegacyV8WithoutOnlinePolicy(t *testing.T) {
-	output := filepath.Join(t.TempDir(), "legacy-v8")
+func TestExperimentCLIRejectsPreV1SemanticSchemaOnResume(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "pre-v1-semantic")
 	if err := runCLI(context.Background(), []string{
 		"experiment", "-output", output, "-runs", "1", "-initial-population", "1",
 		"-max-plan-actions", "3", "-artifact-policy", "summary", "-seed", "812",
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	var config cliConfig
-	var checkpoint experiment.Checkpoint
-	var policyConfig randompolicy.RandomConfig
 	var settings experimentSettings
-	for name, target := range map[string]any{
-		"config.json": &config, "checkpoint.json": &checkpoint,
-		"policy-config.json": &policyConfig, "experiment-settings.json": &settings,
-	} {
-		if err := persistence.ReadJSON(filepath.Join(output, name), target); err != nil {
-			t.Fatal(err)
-		}
-	}
-	fingerprintSettings := settings
-	fingerprintSettings.ArtifactPolicy = ""
-	fingerprintSettings.CheckpointEvery = 0
-	legacyFingerprint, err := configurationFingerprint(config, checkpoint.Config, policyConfig, legacyV8Settings(fingerprintSettings))
-	if err != nil {
+	if err := persistence.ReadJSON(filepath.Join(output, "experiment-settings.json"), &settings); err != nil {
 		t.Fatal(err)
 	}
-	checkpoint.ConfigurationFingerprint = legacyFingerprint
-	if err := writeJSONFile(filepath.Join(output, "checkpoint.json"), checkpoint); err != nil {
+	settings.SemanticSchema = "pre-v1-test-schema"
+	if err := writeJSONFile(filepath.Join(output, "experiment-settings.json"), settings); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJSONFile(filepath.Join(output, "experiment-settings.json"), legacyV8Settings(settings)); err != nil {
-		t.Fatal(err)
-	}
-	if err := runCLI(context.Background(), []string{
-		"experiment", "-resume", output, "-initial-policy", "snapshot-partition",
-	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "initial-policy") {
-		t.Fatalf("legacy policy override error = %v", err)
-	}
-	if err := runCLI(context.Background(), []string{"experiment", "-resume", output},
-		&bytes.Buffer{}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(output, "experiment-settings.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(data, []byte(`"online_policy": "random"`)) {
-		t.Fatalf("legacy settings were not migrated: %s", data)
-	}
-	var migrated experiment.Checkpoint
-	if err := persistence.ReadJSON(filepath.Join(output, "checkpoint.json"), &migrated); err != nil {
-		t.Fatal(err)
-	}
-	currentFingerprint, err := configurationFingerprint(config, migrated.Config, policyConfig, fingerprintSettings)
-	if err != nil || migrated.ConfigurationFingerprint != currentFingerprint {
-		t.Fatalf("migrated fingerprint = %s, want %s, err=%v", migrated.ConfigurationFingerprint, currentFingerprint, err)
+	err := runCLI(context.Background(), []string{"experiment", "-resume", output}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "不支持 semantic schema") {
+		t.Fatalf("pre-v1 semantic resume error = %v", err)
 	}
 }
 
@@ -797,10 +863,10 @@ func TestExperimentCLISupportsGenericLLMProviderConfiguration(t *testing.T) {
 		case "/execute":
 			tlcCalls++
 			keys := []int64{1}
-			states := []string{"s1"}
+			states := []string{validCoverageTLCState("follower")}
 			if tlcCalls == 2 {
 				keys = append(keys, 2)
-				states = append(states, "s2")
+				states = append(states, validCoverageTLCState("leader"))
 			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{"States": states, "Keys": keys})
 		default:
@@ -853,14 +919,17 @@ func TestExperimentCLISupportsGenericLLMProviderConfiguration(t *testing.T) {
 		t.Fatal("experiment settings leaked API Key")
 	}
 	var persistedSettings struct {
-		Provider string `json:"llm_provider"`
-		Model    string `json:"llm_model"`
-		KeyEnv   string `json:"llm_api_key_env"`
+		ReleaseVersion string `json:"release_version"`
+		SemanticSchema string `json:"semantic_schema"`
+		Provider       string `json:"llm_provider"`
+		Model          string `json:"llm_model"`
+		KeyEnv         string `json:"llm_api_key_env"`
 	}
 	if err := json.Unmarshal(settings, &persistedSettings); err != nil {
 		t.Fatal(err)
 	}
-	if persistedSettings.Provider != "deepseek" || persistedSettings.Model != "deepseek-v4-flash" || persistedSettings.KeyEnv != "DEEPSEEK_API_KEY" {
+	if persistedSettings.ReleaseVersion != releaseVersion || persistedSettings.SemanticSchema != raftmodel.SemanticSchemaVersion || persistedSettings.Provider != "deepseek" ||
+		persistedSettings.Model != "deepseek-v4-flash" || persistedSettings.KeyEnv != "DEEPSEEK_API_KEY" {
 		t.Fatalf("LLM settings = %+v", persistedSettings)
 	}
 
@@ -1136,6 +1205,36 @@ func TestValidateTLCModelBoundsWarnsForLegacyHealthSchema(t *testing.T) {
 	}
 }
 
+func TestValidateTLCModelBoundsChecksProfile(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		goProfile  string
+		tlcProfile string
+		wantError  bool
+	}{
+		{name: "matching basic", tlcProfile: raftmodel.ProfileBasic},
+		{name: "matching storage snapshot", goProfile: raftmodel.ProfileStorageSnapshot, tlcProfile: raftmodel.ProfileStorageSnapshot},
+		{name: "mismatch", goProfile: raftmodel.ProfileStorageSnapshot, tlcProfile: raftmodel.ProfileBasic, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(writer).Encode(map[string]any{
+					"largest_term": 5, "max_log_index": 5, "server_ids": []int{1, 2, 3},
+					"max_value": 5, "nil_value": 0, "model_profile": test.tlcProfile,
+				})
+			}))
+			defer server.Close()
+			config := defaultCLIConfig()
+			config.TLC.Address = server.URL
+			config.Model.Profile = test.goProfile
+			err := validateTLCModelBounds(context.Background(), config, &bytes.Buffer{})
+			if (err != nil) != test.wantError {
+				t.Fatalf("profile validation error = %v, wantError=%v", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestLifecyclePlansRunAndReplay(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1346,4 +1445,15 @@ func semanticUint64(t *testing.T, node core.NodeObservation, name string) uint64
 		t.Fatalf("node %s semantic %s = %T(%v)", node.ID, name, value, value)
 		return 0
 	}
+}
+
+func validCoverageTLCState(firstRole string) string {
+	return `/\ currentActive = {1, 2, 3}
+/\ matchIndex = <<<<0, 0, 0>>, <<0, 0, 0>>, <<0, 0, 0>>>>
+/\ log = <<<<>>, <<>>, <<>>>>
+/\ state = <<"` + firstRole + `", "follower", "follower">>
+/\ commitIndex = <<0, 0, 0>>
+/\ currentTerm = <<0, 0, 0>>
+/\ votesGranted = <<{}, {}, {}>>
+/\ votedFor = <<0, 0, 0>>`
 }

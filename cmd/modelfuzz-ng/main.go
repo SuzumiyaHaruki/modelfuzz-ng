@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,6 +37,8 @@ import (
 	raft "go.etcd.io/raft/v3"
 )
 
+const releaseVersion = "v1.0.0"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,6 +65,12 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return minimizeCommand(ctx, args[1:], stdout, stderr)
 	case "experiment":
 		return experimentCommand(ctx, args[1:], stdout, stderr)
+	case "version":
+		if len(args) != 1 {
+			return fmt.Errorf("version 子命令不接受参数")
+		}
+		_, err := fmt.Fprintf(stdout, "modelfuzz-ng %s\n", releaseVersion)
+		return err
 	case "help", "-h", "--help":
 		printRootUsage(stdout)
 		return flag.ErrHelp
@@ -109,7 +116,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	healWeight := flags.Int("heal-weight", 8, "在线 balanced 随机策略的 heal 权重")
 	randomSeedInterval := flags.Int("random-seed-interval", 0, "每完成多少次执行优先注入在线随机种子；0 表示关闭")
 	randomSeedsPerInterval := flags.Int("random-seeds-per-interval", 1, "每次周期注入的在线随机种子数")
-	initialPolicy := flags.String("initial-policy", "random", "在线种子策略: random 或 snapshot-partition")
+	initialPolicy := flags.String("initial-policy", "random", "在线种子策略: random、snapshot-partition、snapshot-failure 或 snapshot-fast-forward")
 	llmProvider := flags.String("llm-provider", string(llm.DefaultProvider), "LLM provider: deepseek、glm、qwen 或 kimi")
 	llmModel := flags.String("llm-model", "", "覆盖 provider 的默认模型")
 	llmBaseURL := flags.String("llm-base-url", "", "覆盖 provider 的 OpenAI-compatible API 基础地址")
@@ -129,7 +136,6 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 	var resumeCheckpoint *experiment.Checkpoint
 	var previousLLMStats llm.Stats
-	legacyV8OnlinePolicy := false
 	if *resumePath != "" {
 		resumeDirectory := filepath.Clean(*resumePath)
 		if *outputPath != "" && filepath.Clean(*outputPath) != resumeDirectory {
@@ -153,12 +159,21 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		if err := decodeStrictJSON(settingsData, &savedSettings); err != nil {
 			return fmt.Errorf("读取原实验设置: %w", err)
 		}
-		var settingsPresence map[string]json.RawMessage
-		if err := json.Unmarshal(settingsData, &settingsPresence); err != nil {
-			return fmt.Errorf("检查原实验设置: %w", err)
+		if savedSettings.ReleaseVersion != releaseVersion {
+			return fmt.Errorf(
+				"不支持 release version %q；当前版本要求 %q",
+				savedSettings.ReleaseVersion, releaseVersion,
+			)
 		}
-		_, hasOnlinePolicy := settingsPresence["online_policy"]
-		legacyV8OnlinePolicy = resumeCheckpoint.Version == experiment.CheckpointVersion && !hasOnlinePolicy
+		if savedSettings.SemanticSchema != raftmodel.SemanticSchemaVersion {
+			return fmt.Errorf(
+				"不支持 semantic schema %q；当前版本要求 %q",
+				savedSettings.SemanticSchema, raftmodel.SemanticSchemaVersion,
+			)
+		}
+		if savedSettings.OnlinePolicy == "" {
+			return fmt.Errorf("原实验设置缺少 online_policy")
+		}
 		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "llm-stats.json"), &previousLLMStats); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("读取原 LLM 统计: %w", err)
 		}
@@ -190,9 +205,6 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 			*llmTimeout = time.Duration(savedSettings.LLMTimeoutMillis) * time.Millisecond
 		}
 		savedOnlinePolicy := savedSettings.OnlinePolicy
-		if savedOnlinePolicy == "" {
-			savedOnlinePolicy = "random"
-		}
 		if setFlags["initial-policy"] && *initialPolicy != savedOnlinePolicy {
 			return fmt.Errorf("恢复时 -initial-policy=%s 与原实验中的 %s 不一致", *initialPolicy, savedOnlinePolicy)
 		}
@@ -305,11 +317,15 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	if *maxPlanActions <= 0 {
 		return fmt.Errorf("-max-plan-actions 必须为正数")
 	}
-	if *initialPolicy != "random" && *initialPolicy != "snapshot-partition" {
-		return fmt.Errorf("未知 -initial-policy=%q；可选 random、snapshot-partition", *initialPolicy)
+	if *initialPolicy != "random" && *initialPolicy != "snapshot-partition" &&
+		*initialPolicy != "snapshot-failure" && *initialPolicy != "snapshot-fast-forward" {
+		return fmt.Errorf(
+			"未知 -initial-policy=%q；可选 random、snapshot-partition、snapshot-failure、snapshot-fast-forward",
+			*initialPolicy,
+		)
 	}
-	if *initialPolicy == "snapshot-partition" && config.Raft.Snapshot.Threshold == 0 {
-		return fmt.Errorf("-initial-policy=snapshot-partition 要求启用 snapshot-threshold")
+	if *initialPolicy != "random" && config.Raft.Snapshot.Threshold == 0 {
+		return fmt.Errorf("-initial-policy=%s 要求启用 snapshot-threshold", *initialPolicy)
 	}
 	if config.TLC.Address != "" && *parallelism != 1 {
 		return fmt.Errorf("旧 controlled TLC 不保证请求隔离，连接 TLC 时 -parallelism 必须为1")
@@ -417,9 +433,9 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 	}
 	feedbackOptions.Mutator = selectedMutator
-	feedbackOptions.CoverageProjector = func(states []model.State, events []model.Event) corpus.Projection {
-		projection := raftmodel.ProjectCoverage(states, events)
-		return corpus.Projection{StateKeys: projection.StateKeys, TransitionKeys: projection.TransitionKeys}
+	feedbackOptions.CoverageProjector = func(states []model.State, events []model.Event) (corpus.Projection, error) {
+		projection, projectionErr := raftmodel.ProjectCoverage(states, events)
+		return corpus.Projection{StateKeys: projection.StateKeys, TransitionKeys: projection.TransitionKeys}, projectionErr
 	}
 	feedbackOptions.Resume = resumeCheckpoint
 	feedbackOptions.CheckpointEvery = *checkpointEvery
@@ -431,6 +447,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		return fmt.Errorf("恢复目录 %s 不存在或不是目录", *outputPath)
 	}
 	settings := experimentSettings{
+		ReleaseVersion: releaseVersion, SemanticSchema: raftmodel.SemanticSchemaVersion,
 		LLMInit: *llmInit, LLMMutate: *llmMutate, Initializer: feedbackOptions.InitializerName,
 		OnlinePolicy: *initialPolicy, Mutator: selectedMutator.Name(), RandomMutation: mutationConfig,
 		ArtifactPolicy: artifactPolicy, CheckpointEvery: *checkpointEvery,
@@ -451,24 +468,8 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 	feedbackOptions.ConfigurationFingerprint = fingerprint
 	if resumeCheckpoint != nil {
-		validationFingerprint := fingerprint
-		if legacyV8OnlinePolicy && resumeCheckpoint.ConfigurationFingerprint != fingerprint {
-			legacyFingerprintSettings := legacyV8Settings(fingerprintSettings)
-			validationFingerprint, err = configurationFingerprint(config, experimentConfig, policyConfig, legacyFingerprintSettings)
-			if err != nil {
-				return err
-			}
-		}
-		if err := resumeCheckpoint.Validate(experimentConfig, validationFingerprint); err != nil {
+		if err := resumeCheckpoint.Validate(experimentConfig, fingerprint); err != nil {
 			return fmt.Errorf("恢复点校验失败: %w", err)
-		}
-		resumeCheckpoint.ConfigurationFingerprint = fingerprint
-		// The runner writes the next checkpoint with the current fingerprint.
-		// Persist the matching settings schema before execution resumes.
-		if legacyV8OnlinePolicy {
-			if err := writeJSONFile(filepath.Join(*outputPath, "experiment-settings.json"), settings); err != nil {
-				return fmt.Errorf("迁移 v8 实验设置: %w", err)
-			}
 		}
 	}
 	if resumeCheckpoint == nil {
@@ -618,6 +619,18 @@ func buildOnlinePolicy(name string, seed int64, randomConfig randompolicy.Random
 			NodeIDs: append([]core.NodeID(nil), randomConfig.NodeIDs...), MaxValue: randomConfig.MaxValue,
 			MaxLogIndex: randomConfig.MaxLogIndex, SnapshotThreshold: snapshotThreshold,
 			RetainEntries: snapshotRetainEntries, DuplicateSnapshot: true,
+		})
+	case "snapshot-failure":
+		return randompolicy.NewSnapshotPartition(seed, randompolicy.SnapshotPartitionConfig{
+			NodeIDs: append([]core.NodeID(nil), randomConfig.NodeIDs...), MaxValue: randomConfig.MaxValue,
+			MaxLogIndex: randomConfig.MaxLogIndex, SnapshotThreshold: snapshotThreshold,
+			RetainEntries: snapshotRetainEntries, FailFirstSnapshot: true,
+		})
+	case "snapshot-fast-forward":
+		return randompolicy.NewSnapshotFastForward(seed, randompolicy.SnapshotFastForwardConfig{
+			NodeIDs: append([]core.NodeID(nil), randomConfig.NodeIDs...), MaxValue: randomConfig.MaxValue,
+			MaxLogIndex: randomConfig.MaxLogIndex, SnapshotThreshold: snapshotThreshold,
+			RetainEntries: snapshotRetainEntries,
 		})
 	default:
 		return nil, fmt.Errorf("unknown online policy %q", name)
@@ -972,6 +985,12 @@ func validateTLCModelBounds(ctx context.Context, config cliConfig, warnings io.W
 			bounds.LargestTerm, bounds.MaxLogIndex, config.Model.LargestTerm, config.Model.MaxLogIndex,
 		)
 	}
+	wantProfile := config.Model.EffectiveProfile()
+	if bounds.ModelProfile == "" {
+		_, _ = fmt.Fprintln(warnings, "警告: TLC 服务未暴露 model_profile，无法自动核对 basic/storage-snapshot 模型")
+	} else if bounds.ModelProfile != wantProfile {
+		return fmt.Errorf("TLC/Go 模型 profile 不一致: TLC=%s，Go=%s", bounds.ModelProfile, wantProfile)
+	}
 	if len(bounds.ServerIDs) == 0 || bounds.MaxValue == nil {
 		_, _ = fmt.Fprintln(warnings, "警告: TLC 服务未暴露 Server/MaxValue，无法自动核对节点集合和取值边界")
 		return nil
@@ -1029,6 +1048,7 @@ func printRootUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng minimize -plan PLAN.json -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng version")
 	_, _ = fmt.Fprintln(output)
 	_, _ = fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
 }

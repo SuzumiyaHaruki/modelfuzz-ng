@@ -21,6 +21,8 @@ import (
 )
 
 type experimentSettings struct {
+	ReleaseVersion   string                `json:"release_version"`
+	SemanticSchema   string                `json:"semantic_schema"`
 	LLMInit          bool                  `json:"llm_init"`
 	LLMMutate        bool                  `json:"llm_mutate"`
 	Initializer      string                `json:"initializer"`
@@ -34,33 +36,6 @@ type experimentSettings struct {
 	RandomMutation   mutation.RandomConfig `json:"random_mutation"`
 	ArtifactPolicy   artifactPolicy        `json:"artifact_policy"`
 	CheckpointEvery  int                   `json:"checkpoint_every"`
-}
-
-// legacyExperimentSettingsV8 preserves the exact JSON field order used by v8
-// before online_policy was added without a checkpoint version bump.
-type legacyExperimentSettingsV8 struct {
-	LLMInit          bool                  `json:"llm_init"`
-	LLMMutate        bool                  `json:"llm_mutate"`
-	Initializer      string                `json:"initializer"`
-	Mutator          string                `json:"mutator"`
-	LLMProvider      llm.Provider          `json:"llm_provider,omitempty"`
-	LLMModel         string                `json:"llm_model,omitempty"`
-	LLMBaseURL       string                `json:"llm_base_url,omitempty"`
-	LLMAPIKeyEnv     string                `json:"llm_api_key_env,omitempty"`
-	LLMTimeoutMillis int64                 `json:"llm_timeout_millis,omitempty"`
-	RandomMutation   mutation.RandomConfig `json:"random_mutation"`
-	ArtifactPolicy   artifactPolicy        `json:"artifact_policy"`
-	CheckpointEvery  int                   `json:"checkpoint_every"`
-}
-
-func legacyV8Settings(settings experimentSettings) legacyExperimentSettingsV8 {
-	return legacyExperimentSettingsV8{
-		LLMInit: settings.LLMInit, LLMMutate: settings.LLMMutate, Initializer: settings.Initializer,
-		Mutator: settings.Mutator, LLMProvider: settings.LLMProvider, LLMModel: settings.LLMModel,
-		LLMBaseURL: settings.LLMBaseURL, LLMAPIKeyEnv: settings.LLMAPIKeyEnv,
-		LLMTimeoutMillis: settings.LLMTimeoutMillis, RandomMutation: settings.RandomMutation,
-		ArtifactPolicy: settings.ArtifactPolicy, CheckpointEvery: settings.CheckpointEvery,
-	}
 }
 
 type tlcMetricsArtifact struct {

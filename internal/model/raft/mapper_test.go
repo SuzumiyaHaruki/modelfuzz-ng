@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -344,6 +345,335 @@ func TestMapperTreatsSnapshotLifecycleEffectsAsStutter(t *testing.T) {
 	events, err := mapper.Map(transition)
 	if err != nil || len(events) != 0 {
 		t.Fatalf("snapshot lifecycle mapping = %+v, %v; want stutter", events, err)
+	}
+}
+
+func TestStorageSnapshotProfileMapsApplyCreateAndCompactBoundaries(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deliveredRecord("MsgHeartbeatResp", nil, false)
+	record.Effects = append(record.Effects,
+		core.Effect{Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
+			Name: "raft.entry_committed", Node: 1, Params: map[string]any{"index": uint64(2), "term": uint64(1)},
+		}},
+		core.Effect{Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
+			Name: "raft.snapshot_created", Node: 1, Params: map[string]any{"index": uint64(2), "term": uint64(1)},
+		}},
+		core.Effect{Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
+			Name: "raft.log_compacted", Node: 1, Params: map[string]any{
+				"index": uint64(2), "term": uint64(1), "compact_index": uint64(1),
+			},
+		}},
+	)
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "AdvanceCommitIndex", "ApplyCommitted", "CreateSnapshot", "CompactLog")
+	if events[1].Params["index"] != uint64(2) || events[2].Params["term"] != uint64(1) ||
+		events[3].Params["index"] != uint64(1) {
+		t.Fatalf("storage boundary params = %+v", events)
+	}
+}
+
+func TestStorageSnapshotProfileOrdersCommitBeforeStorageEffects(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := []core.NodeObservation{
+		{ID: 1, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("leader")},
+		{ID: 2, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
+		{ID: 3, Epoch: 1, Status: core.NodeRunning, Semantic: modelNode("follower")},
+	}
+	after := append([]core.NodeObservation(nil), before...)
+	after[0].Semantic = modelNode("leader")
+	after[0].Semantic["last_index"] = uint64(1)
+	after[0].Semantic["last_term"] = uint64(1)
+	after[0].Semantic["commit"] = uint64(1)
+	record := core.StepRecord{
+		Action:      core.Action{Kind: core.ActionRequest, Node: 1, Request: []byte("1")},
+		NodesBefore: before,
+		NodesAfter:  after,
+		Effects: []core.Effect{
+			{Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
+				Name: "raft.entry_committed", Node: 1, Params: map[string]any{"index": uint64(1), "term": uint64(1)},
+			}},
+			{Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
+				Name: "raft.snapshot_created", Node: 1, Params: map[string]any{"index": uint64(1), "term": uint64(1)},
+			}},
+		},
+	}
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "ClientRequest", "AdvanceCommitIndex", "ApplyCommitted", "CreateSnapshot")
+}
+
+func TestStorageSnapshotProfileStuttersStandaloneSnapshotLifecycleEffects(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deliveredRecord("MsgHeartbeatResp", nil, false)
+	for _, name := range []string{"raft.snapshot_delivered",
+		"raft.snapshot_applied", "raft.snapshot_fast_forwarded", "raft.snapshot_rejected_or_stale"} {
+		record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+			ModelEvent: &core.ModelEvent{Name: name, Node: 2, Params: map[string]any{
+				"index": uint64(2), "term": uint64(1),
+			}}})
+	}
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("standalone lifecycle mapping = %+v, %v; want stutter", events, err)
+	}
+}
+
+func TestStorageSnapshotProfileMapsFollowerSnapshotOutcomes(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for lifecycle, wantName := range map[string]string{
+		"raft.snapshot_applied":           "InstallSnapshot",
+		"raft.snapshot_fast_forwarded":    "FastForwardSnapshot",
+		"raft.snapshot_rejected_or_stale": "RejectSnapshot",
+	} {
+		record := deliveredRecord("MsgSnap", nil, false)
+		delivered := record.Effects[0].ModelEvent.Params
+		delivered["snapshot_index"] = uint64(2)
+		delivered["snapshot_term"] = uint64(1)
+		record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+			ModelEvent: &core.ModelEvent{Name: lifecycle, Node: 2, Params: map[string]any{
+				"index": uint64(2), "term": uint64(1),
+			}}})
+		transition, transitionErr := model.TransitionFromRecord(record)
+		if transitionErr != nil {
+			t.Fatal(transitionErr)
+		}
+		events, mapErr := mapper.Map(transition)
+		if mapErr != nil {
+			t.Fatalf("%s: %v", lifecycle, mapErr)
+		}
+		assertEventNames(t, events, wantName)
+		want := map[string]any{
+			"i": uint64(1), "j": uint64(2), "index": uint64(2),
+			"snapshot_term": uint64(1), "term": uint64(1),
+		}
+		if !reflect.DeepEqual(events[0].Params, want) {
+			t.Fatalf("%s params = %+v, want %+v", lifecycle, events[0].Params, want)
+		}
+	}
+}
+
+func TestStorageSnapshotProfileRejectsMissingOrConflictingSnapshotOutcome(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deliveredRecord("MsgSnap", nil, false)
+	record.Effects[0].ModelEvent.Params["snapshot_index"] = uint64(2)
+	record.Effects[0].ModelEvent.Params["snapshot_term"] = uint64(1)
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mapper.Map(transition); err == nil {
+		t.Fatal("MsgSnap without lifecycle outcome accepted")
+	}
+	for _, name := range []string{"raft.snapshot_applied", "raft.snapshot_rejected_or_stale"} {
+		record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+			ModelEvent: &core.ModelEvent{Name: name, Node: 2, Params: map[string]any{
+				"index": uint64(2), "term": uint64(1),
+			}}})
+	}
+	transition, err = model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mapper.Map(transition); err == nil {
+		t.Fatal("MsgSnap with conflicting lifecycle outcomes accepted")
+	}
+}
+
+func TestStorageSnapshotProfileMapsSnapshotSendProgress(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deliveredRecord("MsgHeartbeatResp", nil, false)
+	record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+		ModelEvent: &core.ModelEvent{Name: "raft.snapshot_sent", Node: 1, Params: map[string]any{
+			"index": uint64(2), "term": uint64(1), "to": uint64(3),
+			"match_index": uint64(0), "next_index": uint64(3),
+			"pending_snapshot": uint64(2), "progress_state": "StateSnapshot",
+		}}})
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventNames(t, events, "SendSnapshot")
+	want := map[string]any{
+		"i": uint64(1), "j": uint64(3), "index": uint64(2), "term": uint64(1),
+		"match": uint64(0), "next": uint64(3), "pending": uint64(2),
+	}
+	if !reflect.DeepEqual(events[0].Params, want) {
+		t.Fatalf("snapshot progress params = %+v, want %+v", events[0].Params, want)
+	}
+}
+
+func TestStorageSnapshotProfileMapsHandledSnapshotStatus(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	config.MaxLogIndex = 10
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name                 string
+		reject               bool
+		pending, match, next uint64
+	}{
+		{name: "success", pending: 2, match: 0, next: 3},
+		{name: "success with match ahead of pending snapshot", pending: 6, match: 7, next: 8},
+		{name: "failure", reject: true, pending: 2, match: 1, next: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record := deliveredRecord("MsgHeartbeatResp", nil, false)
+			record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+				ModelEvent: &core.ModelEvent{Name: "raft.snapshot_status_reported", Node: 1, Params: map[string]any{
+					"from": uint64(3), "to": uint64(1), "reject": test.reject, "handled": true,
+					"pending_before": test.pending, "pending_after": uint64(0),
+					"match_index": test.match, "next_before": test.next, "next_after": test.next,
+				}}})
+			transition, transitionErr := model.TransitionFromRecord(record)
+			if transitionErr != nil {
+				t.Fatal(transitionErr)
+			}
+			events, mapErr := mapper.Map(transition)
+			if mapErr != nil {
+				t.Fatal(mapErr)
+			}
+			assertEventNames(t, events, "HandleSnapshotStatus")
+			want := map[string]any{"i": uint64(1), "j": uint64(3), "success": !test.reject, "next": test.next}
+			if !reflect.DeepEqual(events[0].Params, want) {
+				t.Fatalf("status params = %+v, want %+v", events[0].Params, want)
+			}
+		})
+	}
+}
+
+func TestStorageSnapshotProfileStuttersIgnoredSnapshotStatus(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deliveredRecord("MsgHeartbeatResp", nil, false)
+	record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+		ModelEvent: &core.ModelEvent{Name: "raft.snapshot_status_reported", Node: 1, Params: map[string]any{
+			"from": uint64(3), "to": uint64(1), "reject": false, "handled": false,
+			"pending_before": uint64(0), "pending_after": uint64(0),
+			"match_index": uint64(2), "next_before": uint64(3), "next_after": uint64(3),
+		}}})
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := mapper.Map(transition)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("ignored status mapping = %+v, %v; want stutter", events, err)
+	}
+}
+
+func TestStorageSnapshotProfileRejectsInconsistentSnapshotSendProgress(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(map[string]any){
+		func(params map[string]any) { params["to"] = uint64(99) },
+		func(params map[string]any) { params["pending_snapshot"] = uint64(1) },
+		func(params map[string]any) { params["next_index"] = uint64(2) },
+		func(params map[string]any) { params["progress_state"] = "StateProbe" },
+	} {
+		record := deliveredRecord("MsgHeartbeatResp", nil, false)
+		params := map[string]any{
+			"index": uint64(2), "term": uint64(1), "to": uint64(3),
+			"match_index": uint64(0), "next_index": uint64(3),
+			"pending_snapshot": uint64(2), "progress_state": "StateSnapshot",
+		}
+		mutate(params)
+		record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+			ModelEvent: &core.ModelEvent{Name: "raft.snapshot_sent", Node: 1, Params: params}})
+		transition, transitionErr := model.TransitionFromRecord(record)
+		if transitionErr != nil {
+			t.Fatal(transitionErr)
+		}
+		if _, mapErr := mapper.Map(transition); mapErr == nil {
+			t.Fatalf("inconsistent snapshot progress accepted: %+v", params)
+		}
+	}
+}
+
+func TestMapperRejectsUnknownProfileAndOutOfBoundsSnapshotBoundary(t *testing.T) {
+	config := raftmodel.DefaultConfig()
+	config.Profile = "unknown"
+	if _, err := raftmodel.NewMapperWithConfig(config); err == nil {
+		t.Fatal("unknown model profile accepted")
+	}
+
+	config.Profile = raftmodel.ProfileStorageSnapshot
+	mapper, err := raftmodel.NewMapperWithConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deliveredRecord("MsgHeartbeatResp", nil, false)
+	record.Effects = append(record.Effects, core.Effect{Kind: core.EffectModelEvent,
+		ModelEvent: &core.ModelEvent{Name: "raft.snapshot_created", Node: 1, Params: map[string]any{
+			"index": config.MaxLogIndex + 1, "term": uint64(1),
+		}}})
+	transition, err := model.TransitionFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mapper.Map(transition); err == nil {
+		t.Fatal("out-of-bounds snapshot boundary accepted")
 	}
 }
 

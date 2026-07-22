@@ -123,10 +123,120 @@ func (a *Adapter) Deliver(ctx context.Context, at core.LogicalTime, message core
 	if err != nil {
 		return nil, err
 	}
+	if payload.GetType() == raftpb.MsgSnap &&
+		!hasSnapshotDeliveryOutcome(deliveryEffects, effects) {
+		snapshot := payload.GetSnapshot()
+		index := snapshot.GetMetadata().GetIndex()
+		after := n.raw.BasicStatus()
+		if before.GetCommit() < index && after.GetCommit() >= index {
+			deliveryEffects = append(deliveryEffects, snapshotEvent(
+				at, "raft.snapshot_fast_forwarded", n.id, snapshot, map[string]any{
+					"commit_before": before.GetCommit(), "commit_after": after.GetCommit(),
+				},
+			))
+		} else {
+			reason := "ignored"
+			switch {
+			case payload.GetTerm() < before.GetTerm():
+				reason = "lower_term"
+			case index <= before.GetCommit() || index <= n.applied:
+				reason = "not_ahead_of_local_progress"
+			}
+			deliveryEffects = append(deliveryEffects, snapshotEvent(
+				at, "raft.snapshot_rejected_or_stale", n.id, snapshot,
+				map[string]any{"reason": reason},
+			))
+		}
+	}
 	// Action 中只有稳定的 MessageID。把实际交给 Raft 的消息语义记录下来，
 	// 后续模型映射即使只读取序列化后的 StepRecord，也不需要依赖 Payload。
 	deliveryEffects = append(deliveryEffects, faultEffects...)
-	return append(deliveryEffects, effects...), nil
+	result := append(deliveryEffects, effects...)
+	if payload.GetType() == raftpb.MsgSnap {
+		statusEffects, err := a.reportSnapshotStatus(at, message.From, message.To, raft.SnapshotFinish)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, statusEffects...)
+	}
+	return result, nil
+}
+
+// Drop reports application-layer snapshot transport failure back to the sender.
+// Other Raft messages need no local feedback when the controlled network drops them.
+func (a *Adapter) Drop(ctx context.Context, at core.LogicalTime, message core.Message) ([]core.Effect, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	payload, err := decodeMessage(message)
+	if err != nil {
+		return nil, err
+	}
+	if payload.GetType() != raftpb.MsgSnap {
+		return nil, nil
+	}
+	return a.reportSnapshotStatus(at, message.From, message.To, raft.SnapshotFailure)
+}
+
+func (a *Adapter) reportSnapshotStatus(
+	at core.LogicalTime, leaderID, followerID core.NodeID, status raft.SnapshotStatus,
+) ([]core.Effect, error) {
+	leader, err := a.node(leaderID)
+	if err != nil {
+		return nil, err
+	}
+	reject := status == raft.SnapshotFailure
+	params := map[string]any{
+		"from": uint64(followerID), "to": uint64(leaderID), "reject": reject,
+		"handled": false, "pending_before": uint64(0), "pending_after": uint64(0),
+		"match_index": uint64(0), "next_before": uint64(0), "next_after": uint64(0),
+	}
+	if !leader.running || leader.raw == nil {
+		params["reason"] = "sender_not_running"
+		return []core.Effect{modelEffect(at, "raft.snapshot_status_reported", leaderID, params)}, nil
+	}
+	before, exists := leader.raw.Status().Progress[uint64(followerID)]
+	if exists {
+		params["pending_before"] = before.PendingSnapshot
+		params["match_index"] = before.Match
+		params["next_before"] = before.Next
+		params["progress_before"] = before.State.String()
+	}
+	leader.raw.ReportSnapshot(uint64(followerID), status)
+	effects, err := a.drainReady(leader, at, true)
+	if err != nil {
+		return nil, fmt.Errorf("node %s report snapshot status for %s: %w", leaderID, followerID, err)
+	}
+	after, stillTracked := leader.raw.Status().Progress[uint64(followerID)]
+	if stillTracked {
+		params["pending_after"] = after.PendingSnapshot
+		params["next_after"] = after.Next
+		params["progress_after"] = after.State.String()
+	}
+	handled := exists && stillTracked && before.State.String() == "StateSnapshot" && before.PendingSnapshot > 0
+	params["handled"] = handled
+	if !exists || !stillTracked {
+		params["reason"] = "peer_not_tracked"
+	} else if !handled {
+		params["reason"] = "not_pending_snapshot"
+	}
+	return append([]core.Effect{modelEffect(at, "raft.snapshot_status_reported", leaderID, params)}, effects...), nil
+}
+
+func hasSnapshotDeliveryOutcome(groups ...[]core.Effect) bool {
+	for _, effects := range groups {
+		for _, effect := range effects {
+			if effect.Kind != core.EffectModelEvent || effect.ModelEvent == nil {
+				continue
+			}
+			switch effect.ModelEvent.Name {
+			case "raft.snapshot_applied", "raft.snapshot_fast_forwarded",
+				"raft.snapshot_rejected_or_stale":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Adapter) ForceTimeout(ctx context.Context, at core.LogicalTime, id core.NodeID) ([]core.Effect, error) {

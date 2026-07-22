@@ -183,7 +183,11 @@ func (a *reportAccumulator) addRun(run Run, corpusEntries int, elapsedMillis int
 		r.SnapshotsSent += run.Metrics.SnapshotsSent
 		r.SnapshotsDelivered += run.Metrics.SnapshotsDelivered
 		r.SnapshotsApplied += run.Metrics.SnapshotsApplied
+		r.SnapshotsFastForwarded += run.Metrics.SnapshotsFastForwarded
 		r.SnapshotsRejectedOrStale += run.Metrics.SnapshotsRejectedOrStale
+		r.SnapshotStatusSucceeded += run.Metrics.SnapshotStatusSucceeded
+		r.SnapshotStatusFailed += run.Metrics.SnapshotStatusFailed
+		r.SnapshotStatusIgnored += run.Metrics.SnapshotStatusIgnored
 		r.LogsCompacted += run.Metrics.LogsCompacted
 		r.CompactedEntries += run.Metrics.CompactedEntries
 		r.SnapshotBytes += run.Metrics.SnapshotBytes

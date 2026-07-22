@@ -21,9 +21,11 @@ type fakeAdapter struct {
 	nodes        map[core.NodeID]fakeNode
 	ticks        []core.LogicalTime
 	delivered    []core.Message
+	dropped      []core.Message
 
 	tickEffects    func(core.LogicalTime) []core.Effect
 	deliverEffects func(core.LogicalTime, core.Message) []core.Effect
+	dropEffects    func(core.LogicalTime, core.Message) []core.Effect
 	timeoutEffects func(core.LogicalTime, core.NodeID) []core.Effect
 }
 
@@ -49,6 +51,7 @@ func (f *fakeAdapter) Reset(context.Context, sut.ResetOptions) error {
 	}
 	f.ticks = nil
 	f.delivered = nil
+	f.dropped = nil
 	return nil
 }
 
@@ -64,6 +67,14 @@ func (f *fakeAdapter) Deliver(_ context.Context, at core.LogicalTime, message co
 	f.delivered = append(f.delivered, message.Copy())
 	if f.deliverEffects != nil {
 		return f.deliverEffects(at, message), nil
+	}
+	return nil, nil
+}
+
+func (f *fakeAdapter) Drop(_ context.Context, at core.LogicalTime, message core.Message) ([]core.Effect, error) {
+	f.dropped = append(f.dropped, message.Copy())
+	if f.dropEffects != nil {
+		return f.dropEffects(at, message), nil
 	}
 	return nil, nil
 }
@@ -363,6 +374,11 @@ func TestRuntimeDuplicateAndDropUseCurrentQueuePosition(t *testing.T) {
 	if duplicate.ParentID != firstID || duplicate.Position != 2 {
 		t.Fatalf("duplicate observation = %+v", duplicate)
 	}
+	adapter.dropEffects = func(at core.LogicalTime, message core.Message) []core.Effect {
+		return []core.Effect{{At: at, Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
+			Name: "transport.drop_reported", Params: map[string]any{"message": uint64(message.ID)},
+		}}}
+	}
 
 	dropped, err := runtime.Execute(ctx, core.Action{
 		Kind: core.ActionDrop, Message: secondID,
@@ -371,7 +387,8 @@ func TestRuntimeDuplicateAndDropUseCurrentQueuePosition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dropped.Record.Effects) != 0 || len(dropped.Observation.Messages) != 2 {
+	if len(dropped.Record.Effects) != 1 || len(dropped.Observation.Messages) != 2 ||
+		len(adapter.dropped) != 1 || adapter.dropped[0].ID != secondID {
 		t.Fatalf("drop result = %+v", dropped)
 	}
 	if dropped.Observation.Messages[1].ID != duplicate.ID || dropped.Observation.Messages[1].Position != 1 {

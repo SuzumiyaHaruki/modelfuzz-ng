@@ -1,9 +1,11 @@
 # ModelFuzz-NG
 
-ModelFuzz-NG 是一个正在从零实现的、面向分布式系统的模型引导模糊测试框架。
-当前目标是先跑通 etcd-raft 的最小闭环：高层 Plan 在线解析为 Concrete Action，
-Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后把 Trace 映射到
-轻量 TLA+ 模型。
+当前正式版本为 **v1.0.0**。
+
+ModelFuzz-NG 是一个以进程内 etcd-raft 为首个完整目标的模型引导模糊测试框架。
+v1 已实现从高层 Plan、确定性 Runtime、真实 Raft Adapter，到 strict TLA+、Oracle、
+Corpus feedback、Replay 和 Minimize 的闭环；跨协议插件和外部进程 backend 不属于
+v1 保证范围。
 
 ## 当前模块
 
@@ -12,11 +14,11 @@ Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后�
 - `internal/plan`：高层 Plan 及其基于当前状态的在线解析。
 - `internal/engine`：Plan、Runtime、模型映射和模型执行的单次闭环编排。
 - `internal/policy`：在线随机基线，以及严格校验 LLM Plan 的生成策略。
-- `internal/corpus`：只保留触发全局新模型状态的 Plan 和增量覆盖键。
+- `internal/corpus`：按 raw 门槛及 semantic state/transition novelty 保留 Plan 和增量覆盖键。
 - `internal/mutation`：Corpus Plan 的本地随机变异和可选 LLM 变异。
 - `internal/llm`：厂商无关 JSON 补全接口及多 provider OpenAI-compatible 客户端。
 - `internal/experiment`：候选执行、覆盖反馈、Corpus 保留和异步变异闭环。
-- `internal/metrics`：协议无关的执行明细、耗时、吞吐和覆盖增长统计。
+- `internal/metrics`：通用执行/覆盖统计及当前 Raft Snapshot 专用指标。
 - `internal/minimize`：保持稳定失败签名的 Plan ddmin、单 Action 固定点缩减、候选缓存和中断恢复。
 - `internal/persistence`：原子 JSON、追加式 JSONL 和崩溃尾记录修复。
 - `internal/adapters/etcdraft`：etcd-raft 3.7 的最小集群适配器。
@@ -26,7 +28,8 @@ Runtime 控制逻辑时间和消息队列，Adapter 驱动真实 Raft，随后�
 - `models/raft`：首版轻量 Raft TLA+ 模型。
 - `docs`：Timer 设计与目标目录结构。
 
-实验记录的主题索引和 `runs/` 原始产物保留规则见
+正式 v1 的 schema、能力边界和数据起点见
+[`docs/v1-baseline.md`](docs/v1-baseline.md)。pre-v1 实验记录索引见
 [`docs/experiments/README.md`](docs/experiments/README.md)。
 系统执行流程、Raft 事件语义、典型实验结果、与原始 ModelFuzz 的双向能力对照，以及原论文所称两个 etcd bug 的证据边界见 [`docs/system-overview-and-modelfuzz-comparison.md`](docs/system-overview-and-modelfuzz-comparison.md)。
 
@@ -40,7 +43,7 @@ replace go.etcd.io/raft/v3 => ../raft
 
 因此 `modelfuzz-ng` 和修改后的 `raft` 目录需要同级放置。Raft 应基于 `v3.7.0`
 （release 3.7），并包含 Adapter 所需的实例级 `Config.Rand` 注入接口。Raft fork
-尚未发布前，仅克隆本仓库不能独立编译；这是当前阶段的已知部署约束。
+仅克隆本仓库不能独立编译；同级 Raft fork 是 v1 的已知部署约束。
 
 ## 运行最小闭环
 
@@ -71,6 +74,20 @@ CLI 增加：
 -tlc http://127.0.0.1:2023
 ```
 
+快照/压缩实验使用独立的 Storage/Snapshot profile：
+
+```bash
+tools/tlc-server/run.sh \
+  --model models/raft/raft_storage_snapshot.tla \
+  --config models/raft/raft-storage-snapshot-10.cfg \
+  --port 2023
+```
+
+同时在 JSON 的 `model` 中设置 `"profile": "storage-snapshot"`；
+`examples/config-snapshot.json` 和 `examples/config-5nodes-snapshot.json` 已给出匹配配置。
+严格服务的 `/health` 会暴露 `model_profile`，CLI 会拒绝把 basic Mapper 连接到
+storage-snapshot 服务，或反向连接。
+
 `raft-5.cfg` 对应 5/5 烟雾边界，`raft-10.cfg` 对应原 ModelFuzz 主实验使用的
 `LargestTerm=10`、`MaxLogIndex=10`。CLI 可用 `-largest-term` 和
 `-max-log-index` 覆盖 JSON 配置；严格 TLC 的 `/health` 会返回实际 cfg 的 Server、LargestTerm、MaxLogIndex、MaxValue 和 Nil，CLI 在执行前自动拒绝节点集合或边界与 Go Mapper/随机策略/LLM 配置不一致的组合；连接旧 health schema 时会明确警告无法核对 Server/MaxValue。恢复实验
@@ -88,9 +105,18 @@ Action，并用有界 LRU 缓存复用热点组合，因此10/10不再需要依�
 以及汇总结果。成功时 `failure.json` 为 `null`；同步 Adapter/SUT 调用发生
 panic 时，其中保存失败操作、逻辑时间、失败 Action、执行前 Observation、panic 值
 和 goroutine 堆栈。失败 Action 不会被写成虚假的完整 Step，已成功的 Trace 前缀仍会持久化。
-当前 Adapter 已支持可配置的 snapshot/日志压缩与 crash/restart。轻量 Raft 模型
-没有 snapshot 状态，因此快照维护 Effect 和 `MsgSnap` 在该 Profile 中明确分类为
-stutter，不声称它验证了 InstallSnapshot 协议。动态 membership change 仍未完整支持。
+当前 Adapter 已支持可配置的 snapshot/日志压缩与 crash/restart。默认 `basic`
+profile 保持原有行为，全部快照维护 Effect 和 `MsgSnap` 都明确分类为 stutter。
+可选 `storage-snapshot` profile 增加 applied、snapshot、first-index 和 Leader
+progress 边界。它验证本地快照创建/日志压缩，并把自然的 `raft.snapshot_sent`
+映射为 `SendSnapshot`，检查 `nextIndex < firstIndex`、snapshot 可用以及
+`pendingSnapshot/nextIndex` 转换。Follower 的 Restore、matching-entry fast-forward、
+旧/重复 snapshot 拒绝和 `MsgAppResp` pending 清除分别映射为
+`InstallSnapshot`、`FastForwardSnapshot`、`RejectSnapshot` 和复制响应动作。
+`MsgSnap` 成功投递或被丢弃还会调用 etcd-raft 的 `ReportSnapshot`，分别映射
+`HandleSnapshotStatus(success=true/false)`；失败会清除 pending 并把 next 回退到
+match+1，随后由真实 heartbeat 驱动重试。
+动态 membership/ConfState 恢复仍未完整支持。
 
 Profile 预检把非成功结果分为三类：动作与当前状态不匹配记为 `inapplicable`
 no-op；确定会越过有限模型 term/log 上界时以 `model_bound_reached` 正常结束已有
@@ -107,13 +133,13 @@ no-op；确定会越过有限模型 term/log 上界时以 `model_bound_reached` 
 
 | 能力 | Runtime/Adapter | 当前模型与Mapper | 说明 |
 |---|---|---|---|
-| Deliver/Drop/Duplicate | 支持 | 支持 | Drop/Duplicate 只改变受控网络，对模型是 stutter |
+| Deliver/Drop/Duplicate | 支持 | 支持 | Duplicate 和普通 Drop 为 stutter；Drop MsgSnap 会报告 SnapshotFailure |
 | AdvanceTime/自然超时 | 支持 | 支持 | 一单位时间对应每个存活节点一次 Tick |
 | 强制选举超时 | 支持 | 支持 | 自然/强制来源都映射为 `Timeout` |
 | Client Request | 支持 | 支持 | Leader 直接接收；Follower 向已知 Leader 转发；无 Leader/Candidate 的拒绝记录为模型 stutter |
 | crash/restart | 支持 | 支持 | 崩溃保留稳定状态；恢复时增加 epoch 并重置 Raft 易失状态 |
 | network partition/heal | 支持 | 明确 stutter | 跨组消息保留在确定性队列并标记 blocked；合并后按原 MessageID/顺序恢复投递 |
-| snapshot/log compaction | 支持，默认关闭 | 明确 stutter | Adapter 模拟应用层维护；`MsgSnap` 仍走受控网络 |
+| snapshot/log compaction | 支持，默认关闭 | basic 为 stutter；storage-snapshot 验证固定 voter 的端到端边界 | 覆盖 Apply/Create/Compact/Send/Install/FastForward/Reject/MsgSnapStatus/Response |
 | dynamic membership change | 仅保留 etcd-raft 基础处理 | 不支持 | 固定 voter 实验之外尚未验证 ConfState snapshot |
 | PreVote/CheckQuorum | 当前关闭 | 不支持 | 启用 Raft 配置前必须先补模型 |
 
@@ -153,7 +179,7 @@ etcd-raft 不会为应用自动调用 `CreateSnapshot` 或 `Compact`。NG Adapte
 | `MsgHeartbeatResp` | 当前 Profile 中明确 stutter |
 | `MsgReadIndex`、`MsgReadIndexResp` | 只读状态未进入模型，明确 stutter |
 | `MsgProp` | Follower 转发 proposal 时进入受控网络；投递到当前 Leader 才映射为 `ClientRequest`；Leader 变化后的 `ErrProposalDropped` 记录 `raft.proposal_dropped` 并 stutter |
-| `MsgSnap` | 由 Raft 在 follower 的 nextIndex 早于 FirstIndex 时产生，经 Runtime 延迟/丢弃/复制/投递；基础模型明确 stutter |
+| `MsgSnap` | 由 Raft 在 follower 的 nextIndex 早于 FirstIndex 时产生，经 Runtime 延迟/丢弃/复制/投递；basic stutter，storage-snapshot 映射 Send/Install/FastForward/Reject 及成功/失败 `MsgSnapStatus` |
 | `MsgTimeoutNow`、`MsgPreVote` 等其他网络消息 | 不支持并返回错误，不会静默忽略 |
 | `MsgHup`、`MsgBeat` 等本地消息 | 不进入 Runtime 网络队列 |
 
@@ -179,9 +205,15 @@ etcd-raft 不会为应用自动调用 `CreateSnapshot` 或 `Compact`。NG Adapte
 
 端到端回归还覆盖：Follower 安装 index=2 的 snapshot 后保留旧副本，Leader 继续压缩并发送 index=4 的 snapshot；Follower 先安装新 snapshot、再收到旧副本时必须拒绝旧 snapshot，随后再次 crash/restart 仍保持 snapshot 边界和 committed prefix。
 
-网络分区使用 `{"kind":"partition","partition":{"groups":[[1],[2,3]]}}`，每个节点必须恰好属于一个组；`{"kind":"heal"}` 合并当前分区。分区期间跨组消息继续入队但不能 Deliver，Drop/Duplicate 仍可控制队列；Observation 为这些消息记录 `blocked=true`。在线随机策略和本地 Mutation 分别提供可配置的 partition/heal 权重及成对插入比例，checkpoint v8 将这些参数纳入恢复边界。
+网络分区使用 `{"kind":"partition","partition":{"groups":[[1],[2,3]]}}`，每个节点必须恰好属于一个组；`{"kind":"heal"}` 合并当前分区。分区期间跨组消息继续入队但不能 Deliver，Drop/Duplicate 仍可控制队列；Observation 为这些消息记录 `blocked=true`。在线随机策略和本地 Mutation 分别提供可配置的 partition/heal 权重及成对插入比例，正式 v1 checkpoint 将这些参数纳入恢复边界。
 
 定向在线策略可用 `experiment -initial-policy snapshot-partition` 启动。它根据每一步最新 Observation 选举 Leader、隔离一个固定 lagger、在多数派提交并压缩日志，然后仅在 `leader.first_index > lagger.last_index+1` 时 heal，确保增量复制窗口确实已消失，再驱动 `MsgSnap` 发送、可选复制、应用和 stale 投递。策略不预测 MessageID；当前默认隔离最大非 Leader 节点、只生成二分区、复制一份 snapshot、使用16个 recovery tick，并只保证目标 lagger 追赶 Leader，不宣称所有其他 Follower 已完全排空。历史 3/5 节点多 seed 结果使用 `retain_entries=0`；端到端回归另覆盖 retain=1 和 retain=threshold，若 MaxLogIndex 不足以压缩过 lagger 会在启动时明确失败。
+
+另外两个定向策略用于第四阶段边界：`snapshot-fast-forward` 通过 optimistic
+`MsgApp` 乱序和保留旧 reject response，让 Follower 已有 matching entry 但 commit
+落后，从而自然命中 etcd-raft fast-forward；`snapshot-failure` 首次 Drop `MsgSnap`，
+验证 `SnapshotFailure`、heartbeat 和 retry。前者要求 threshold 至少为3，且压缩后的
+first index 必须越过旧 response 对应的 next index。
 
 失败 Plan 可用以下命令缩减：
 
@@ -210,15 +242,14 @@ panic 捕获、committed-prefix 和轨迹兼容性实验见
 
 ```bash
 go run ./cmd/modelfuzz-ng replay \
-  -trace runs/basic-raft-20260720/client-request-commit/trace.json \
-  -output runs/replay-client-request
+  -trace runs/example-run/trace.json \
+  -output runs/example-replay
 ```
 
 Replay 会逐步检查逻辑时间、MessageID/Link/Position、Effect、节点快照和
-ObservationDigest，并在第一处差异停止。当前 Trace 版本为 v4；Replay 会在比较时
-移除新增的 committed-prefix 观测字段，因此仍能重放 v2/v3 轨迹。四条完整示例的实际重放分别匹配
-`6/6`、`6/6`、`9/9` 和 `11/11` 个步骤。
-五条节点生命周期示例另外严格匹配合计 `54/54` 个步骤。
+ObservationDigest，并在第一处差异停止。正式 v1 Trace 只接受 schema 1，要求每一步
+包含前后节点快照和 ObservationDigest；pre-v1 Trace 不提供兼容重放。由于正式 v1 的
+`runs/` 从空目录开始，示例中的输入路径应替换为当前版本新生成的运行目录。
 
 运行默认反馈实验：
 
@@ -319,7 +350,7 @@ go run ./cmd/modelfuzz-ng experiment -resume runs/random-local \
 
 恢复会继续使用原来的 run index、seed、Corpus 和候选队列；中断时尚未完成的候选
 允许确定性重跑。`runs.jsonl` 或 `corpus.jsonl` 已写但未进入 checkpoint 的记录会先被
-截去再重跑，不会形成重复 run index 或 Corpus ID。当前 checkpoint 格式版本为 v8；检查点包含实验配置指纹，修改
+截去再重跑，不会形成重复 run index 或 Corpus ID。正式 v1 checkpoint schema 为1；检查点包含实验配置指纹，修改
 SUT、Engine、Policy 或 Mutator 配置后不能误接着旧实验运行。JSONL 最后一条若因
 进程崩溃只写入了一部分，重新打开时只截去该不完整尾记录。
 
@@ -382,7 +413,10 @@ go run ./cmd/modelfuzz-ng experiment \
 
 这一步只调用一次初始化生成，不开启 LLM Mutation；检查 Plan 有效率、实际 Trace、
 `llm-stats.json` 和失败产物后，再连接 TLC 并逐步开启 `-llm-mutate`。
-本轮随机基线和 TLC 覆盖实验见
+以下链接均为 pre-v1 设计验证记录；其中的 checkpoint/semantic 版本号和运行路径仅说明
+当时的实验环境，原始产物已在正式 v1 重置时清理，不能直接用于当前恢复或重放。
+
+Pre-v1 随机基线和 TLC 覆盖实验见
 [`docs/experiments/random-baseline-20260720.md`](docs/experiments/random-baseline-20260720.md)。
 统计、产物策略和 SIGTERM 恢复实验见
 [`docs/experiments/persistence-metrics-20260721.md`](docs/experiments/persistence-metrics-20260721.md)。
@@ -400,6 +434,17 @@ balanced lifecycle、严格 Corpus 准入、Raft 语义覆盖和 checkpoint v7 �
 [`docs/experiments/lazy-tlc-actions-20260721.md`](docs/experiments/lazy-tlc-actions-20260721.md)。
 Snapshot/日志压缩、MsgSnap 受控投递、Oracle 前缀恢复和 checkpoint 确定性实验见
 [`docs/experiments/snapshot-compaction-20260721.md`](docs/experiments/snapshot-compaction-20260721.md)。
+Storage/Snapshot 第一阶段边界与第二阶段 NeedSnapshot/SnapshotAvailable/Leader progress
+的 strict TLC 实验见
+[`docs/experiments/storage-snapshot-model-e2e-20260722.md`](docs/experiments/storage-snapshot-model-e2e-20260722.md)
+和
+[`docs/experiments/snapshot-progress-model-phase2-20260722.md`](docs/experiments/snapshot-progress-model-phase2-20260722.md)。
+Follower Restore、fast-forward、重复拒绝与 response/pending 清除实验见
+[`docs/experiments/snapshot-install-model-phase3-20260722.md`](docs/experiments/snapshot-install-model-phase3-20260722.md)。
+真实 fast-forward、`MsgSnapStatus` 成功/失败和 retry 矩阵见
+[`docs/experiments/snapshot-fast-forward-status-phase4-20260722.md`](docs/experiments/snapshot-fast-forward-status-phase4-20260722.md)。
+当前执行内核、Raft 语义泄漏、外部进程迁移风险和协议插件拆分建议见
+[`docs/protocol-coupling-audit-20260722.md`](docs/protocol-coupling-audit-20260722.md)。
 网络分区/合并、三节点收敛、五节点随机 smoke 和确定性 Replay 见
 [`docs/experiments/network-partition-20260722.md`](docs/experiments/network-partition-20260722.md)。
 定向 partition/compaction/snapshot、retain 回归和失败 Plan 缩减见

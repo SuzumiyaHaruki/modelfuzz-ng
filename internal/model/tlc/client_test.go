@@ -105,7 +105,7 @@ func TestBoundsUsesHealthEndpoint(t *testing.T) {
 		if request.URL.Path != "/health" || request.Method != http.MethodGet {
 			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
 		}
-		_, _ = writer.Write([]byte(`{"max_log_index":10,"largest_term":10,"server_ids":[1,2,3,4,5],"max_value":7,"nil_value":0}`))
+		_, _ = writer.Write([]byte(`{"max_log_index":10,"largest_term":10,"server_ids":[1,2,3,4,5],"max_value":7,"nil_value":0,"model_profile":"storage-snapshot"}`))
 	}))
 	defer server.Close()
 	client, err := NewClientWithHTTPClient(server.URL, server.Client())
@@ -114,7 +114,8 @@ func TestBoundsUsesHealthEndpoint(t *testing.T) {
 	}
 	bounds, err := client.Bounds(context.Background())
 	if err != nil || bounds.MaxLogIndex != 10 || bounds.LargestTerm != 10 || len(bounds.ServerIDs) != 5 ||
-		bounds.MaxValue == nil || *bounds.MaxValue != 7 || bounds.NilValue == nil || *bounds.NilValue != 0 {
+		bounds.MaxValue == nil || *bounds.MaxValue != 7 || bounds.NilValue == nil || *bounds.NilValue != 0 ||
+		bounds.ModelProfile != "storage-snapshot" {
 		t.Fatalf("bounds = %+v, err = %v", bounds, err)
 	}
 }

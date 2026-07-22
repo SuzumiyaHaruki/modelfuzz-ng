@@ -36,10 +36,11 @@ final class ModelBounds {
     boolean contains(String parameter, long value) {
         return switch (parameter) {
             case "i", "j" -> servers.isEmpty() || servers.contains(value);
-            case "term", "lTerm", "pLogTerm", "entryTerm" ->
+            case "term", "lTerm", "pLogTerm", "entryTerm", "sTerm" ->
                 largestTerm == null || value >= 0 && value <= largestTerm;
-            case "lIndex", "pLogIndex", "cIndex", "mIndex" ->
+            case "lIndex", "pLogIndex", "cIndex", "mIndex", "index", "match", "pending" ->
                 maxLogIndex == null || value >= 0 && value <= maxLogIndex;
+            case "next" -> maxLogIndex == null || value >= 1 && value <= maxLogIndex + 1;
             case "v", "entryValue" -> maxValue == null
                 || value >= 1 && value <= maxValue
                 || nil != null && value == nil;

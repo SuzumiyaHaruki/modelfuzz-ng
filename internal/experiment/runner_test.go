@@ -3,9 +3,12 @@ package experiment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
@@ -143,12 +146,12 @@ func TestFeedbackRunnerReportsCorpusAdmissionAndNoveltyDensity(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs := make([]Run, 0, 3)
-	project := func(states []model.State, _ []model.Event) corpus.Projection {
+	project := func(states []model.State, _ []model.Event) (corpus.Projection, error) {
 		switch states[0].Key {
 		case 1, 2:
-			return corpus.Projection{StateKeys: []int64{11}}
+			return corpus.Projection{StateKeys: []int64{11}}, nil
 		default:
-			return corpus.Projection{StateKeys: []int64{12}, TransitionKeys: []int64{21}}
+			return corpus.Projection{StateKeys: []int64{12}, TransitionKeys: []int64{21}}, nil
 		}
 	}
 	report, _, err := runner.RunFeedback(context.Background(), FeedbackOptions{
@@ -193,6 +196,36 @@ func TestFeedbackRunnerReportsCorpusAdmissionAndNoveltyDensity(t *testing.T) {
 	if statistics.CorpusAdmissionCounts[string(corpus.AdmissionRejectedRawThreshold)] != 1 ||
 		statistics.SemanticNoveltyPer100Actions != 50 {
 		t.Fatalf("statistics = %+v", statistics)
+	}
+}
+
+func TestFeedbackRunnerReportsSemanticProjectionFailure(t *testing.T) {
+	runner, err := New(Config{Runs: 1, BaseSeed: 18, Parallelism: 1, InitialPopulation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completed Run
+	report, snapshot, runErr := runner.RunFeedback(context.Background(), FeedbackOptions{
+		Mutator: failingMutator{},
+		CoverageProjector: func([]model.State, []model.Event) (corpus.Projection, error) {
+			return corpus.Projection{}, errors.New("malformed controlled state")
+		},
+		Hooks: Hooks{OnRunComplete: func(completion Completion) error {
+			completed = completion.Run
+			return nil
+		}},
+	}, func(_ context.Context, _ int, _ int64, _ Candidate) (FeedbackExecution, error) {
+		return FeedbackExecution{Plan: plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}}, Result: engine.Result{
+			Status: engine.StatusCompleted, ModelStates: []model.State{{Key: 1, Text: "malformed"}},
+			Trace: core.Trace{Version: core.CurrentTraceVersion, ExecutionID: "projection-failure"},
+		}}, nil
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if report.Succeeded != 0 || report.Failed != 1 || snapshot.EntryCount != 0 || completed.Succeeded ||
+		completed.Status != engine.StatusMappingFailed || !strings.Contains(completed.Error, "semantic coverage projection") {
+		t.Fatalf("report=%+v snapshot=%+v run=%+v", report, snapshot, completed)
 	}
 }
 
@@ -521,6 +554,61 @@ func TestFeedbackRunnerBoundsReadyQueueAndPrefersNewCandidates(t *testing.T) {
 	statistics := report.Statistics()
 	if statistics.PeakReadyCandidates != 2 || statistics.DiscardedMutations != report.DiscardedMutations {
 		t.Fatalf("bounded queue statistics = %+v", statistics)
+	}
+}
+
+func TestFeedbackRunnerRefillsEveryAvailableExecutionSlot(t *testing.T) {
+	runner, err := New(Config{
+		Runs: 8, BaseSeed: 900, Parallelism: 4, InitialPopulation: 8,
+		MaxReadyCandidates: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var initialStarted sync.WaitGroup
+	initialStarted.Add(4)
+	releaseInitialTail := make(chan struct{})
+	postBoundaryStarted := make(chan struct{}, 1)
+	probeResult := make(chan bool, 1)
+	go func() {
+		select {
+		case <-postBoundaryStarted:
+			probeResult <- true
+		case <-time.After(time.Second):
+			probeResult <- false
+		}
+		close(releaseInitialTail)
+	}()
+
+	report, _, runErr := runner.RunFeedback(context.Background(), FeedbackOptions{Mutator: failingMutator{}},
+		func(_ context.Context, index int, _ int64, _ Candidate) (FeedbackExecution, error) {
+			if index < 4 {
+				initialStarted.Done()
+				initialStarted.Wait()
+				if index != 0 {
+					<-releaseInitialTail
+				}
+			} else {
+				select {
+				case postBoundaryStarted <- struct{}{}:
+				default:
+				}
+			}
+			return FeedbackExecution{Plan: plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}}, Result: engine.Result{
+				Status: engine.StatusCompleted,
+				Trace: core.Trace{Version: core.CurrentTraceVersion,
+					ExecutionID: core.ExecutionID(fmt.Sprintf("refill-slots-%d", index))},
+			}}, nil
+		})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !<-probeResult {
+		t.Fatal("runner waited for all active executions before refilling an available slot")
+	}
+	if report.Succeeded != 8 || report.InitialExecutions != 8 {
+		t.Fatalf("report = %+v", report)
 	}
 }
 

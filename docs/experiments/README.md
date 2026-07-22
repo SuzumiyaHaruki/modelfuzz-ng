@@ -1,8 +1,9 @@
-# 实验记录索引与原始产物保留规则
+# Pre-v1 实验记录索引
 
-`docs/experiments` 保存可长期阅读的实验结论；仓库根目录的 `runs/` 保存可重复生成、
-不进入 Git 的原始运行产物。文档是长期记录，`runs/` 不是归档系统。历史文档中出现的
-运行路径可能已经按本页规则清理。
+本目录保存正式 v1 之前的验证结论，只用于说明设计依据，不代表当前可恢复的 artifact
+schema。历史文档中的 checkpoint/semantic 版本均为内部候选编号；正式 v1 不兼容这些
+格式。仓库根目录的 `runs/` 已在正式 v1 基线重置时清空，文档中的运行路径仅作历史
+定位，不保证仍存在。
 
 ## 当前主题索引
 
@@ -16,13 +17,15 @@
 | 持久化与 checkpoint 演进 | `persistence-metrics-20260721.md`、`failure-checkpoint-v3-20260721.md`、`checkpoint-v5-tlc-metrics-20260721.md`、`checkpoint-v6-feedback-20260721.md` |
 | 反馈准入与动作分布 | `feedback-tuning-v7-20260722.md` |
 | 严格/按需 TLC | `strict-tlc-migration-20260721.md`、`lazy-tlc-actions-20260721.md` |
+| Storage/Snapshot TLA+ | `storage-snapshot-model-phase1-20260722.md`、`storage-snapshot-model-e2e-20260722.md`、`snapshot-progress-model-phase2-20260722.md`、`snapshot-install-model-phase3-20260722.md`、`snapshot-fast-forward-status-phase4-20260722.md` |
+| Snapshot strict soak、吞吐与重放 | `snapshot-strict-soak-20260722.md` |
 | Snapshot 与日志压缩 | `snapshot-compaction-20260721.md` |
 | 网络分区、合并与五节点 smoke | `network-partition-20260722.md` |
 | 定向 partition/snapshot 与失败缩减 | `directed-snapshot-minimization-20260722.md` |
 | n/3+1 quorum mutant | `quorum-one-third-mutant-20260721.md` |
 | LLM 接入准备 | `deepseek-readiness-20260721.md` |
 
-## 保留规则
+## 正式 v1 之后的保留规则
 
 优先保留以下原始产物：
 
@@ -44,14 +47,8 @@
 明确列出的 `runs/<name>`，不要递归删除整个 `runs/`。优先移入系统回收站，确认无需恢复
 后再由用户单独清空回收站。
 
-## 2026-07-21 清理后的代表性数据
+## Pre-v1 历史清理记录
 
-本次清理将 `runs/` 从约 2.5 GB 精简到约 81 MB。保留集合包括：
-
-- checkpoint v6 的无 TLC smoke、100-seed、恢复/control 和 lazy-TLC 对照；
-- snapshot 的 TLC feedback、恢复/control 和三条代表性固定 Plan；
-- quorum mutant 的固定 TLC 最短反例、100-seed 正常/异常对照、seed 470724 成对完整
-  Trace、seed 470729 snapshot panic，以及 seed 470723 转发修复后的 TLC 回归。
-
-2026-07-20 的原始运行、checkpoint v5/两小时 v5 soak、TLC 迁移过程的重复运行和其他
-中间副本已移入系统回收站。相关结论仍保留在本目录文档中。
+正式 v1 重置时，pre-v1 的 `runs/` 原始产物已整体移入系统回收站，仓库内从空的
+`runs/` 重新开始。可复核的配置、seed、统计和结论保留在本目录的带日期报告中；报告
+引用的旧运行路径不再保证存在。回收站由用户在确认不再需要恢复后单独清空。

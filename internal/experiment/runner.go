@@ -77,7 +77,7 @@ type FeedbackOptions struct {
 	InitializerName   string
 	Initializer       Initializer
 	Mutator           mutation.Mutator
-	CoverageProjector func(states []model.State, events []model.Event) corpus.Projection
+	CoverageProjector func(states []model.State, events []model.Event) (corpus.Projection, error)
 	// Resume 恢复一个此前由同一 Config 产生的反馈实验。
 	Resume *Checkpoint
 	// ResumeCorpusEntries 是 corpus.jsonl 中 checkpoint 水位以前的完整条目。
@@ -227,7 +227,11 @@ type Report struct {
 	SnapshotsSent                int                       `json:"snapshots_sent"`
 	SnapshotsDelivered           int                       `json:"snapshots_delivered"`
 	SnapshotsApplied             int                       `json:"snapshots_applied"`
+	SnapshotsFastForwarded       int                       `json:"snapshots_fast_forwarded"`
 	SnapshotsRejectedOrStale     int                       `json:"snapshots_rejected_or_stale"`
+	SnapshotStatusSucceeded      int                       `json:"snapshot_status_succeeded"`
+	SnapshotStatusFailed         int                       `json:"snapshot_status_failed"`
+	SnapshotStatusIgnored        int                       `json:"snapshot_status_ignored"`
 	LogsCompacted                int                       `json:"logs_compacted"`
 	CompactedEntries             uint64                    `json:"compacted_entries"`
 	SnapshotBytes                uint64                    `json:"snapshot_bytes"`
@@ -536,10 +540,13 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 		if completed == r.config.Runs {
 			break
 		}
-		// 队列和变异工作都已耗尽时才补充新种子，避免种子抢完运行预算，
-		// 同时给刚产生的新覆盖留下执行变异后代的机会。
-		if running == 0 && len(ready) == 0 && len(pending) == 0 && nextRunIndex < r.config.Runs {
-			seeds, nextID, seedErr := r.initialCandidates(runContext, options, 1, r.config.BaseSeed+int64(nextRunIndex), nextCandidateID)
+		// 队列和变异工作都已耗尽时按空闲执行槽批量补充新种子，避免种子抢完
+		// 运行预算，同时避免 ready queue 耗尽后退化为一次只执行一条。
+		if running < r.config.Parallelism && len(ready) == 0 && len(pending) == 0 && nextRunIndex < r.config.Runs {
+			count := min(r.config.Parallelism-running, r.config.Runs-nextRunIndex)
+			seeds, nextID, seedErr := r.initialCandidates(
+				runContext, options, count, r.config.BaseSeed+int64(nextRunIndex), nextCandidateID,
+			)
 			if seedErr != nil {
 				return stopWithError(seedErr)
 			}
@@ -572,44 +579,52 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 			if run.Succeeded && len(done.execution.Result.ModelStates) > 0 {
 				projection := defaultCoverageProjection(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
 				if options.CoverageProjector != nil {
-					projection = options.CoverageProjector(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
-				}
-				entry, retained, corpusErr := collection.Consider(corpus.Input{
-					ParentID: done.candidate.ParentID, Source: done.candidate.Source,
-					Depth: done.candidate.Depth, RunIndex: done.index, Seed: done.seed,
-					Plan:                   done.execution.Plan,
-					States:                 done.execution.Result.ModelStates,
-					SemanticStateKeys:      projection.StateKeys,
-					SemanticTransitionKeys: projection.TransitionKeys,
-				})
-				run.NewStateKeys = append([]int64(nil), entry.NewStateKeys...)
-				run.NewRawStates = len(entry.NewStateKeys)
-				run.NewSemanticStates = len(entry.NewSemanticStateKeys)
-				run.NewSemanticTransitions = len(entry.NewSemanticTransitionKeys)
-				run.CorpusAdmission = string(entry.AdmissionReason)
-				if run.Actions > 0 {
-					run.SemanticNoveltyPer100Actions = float64(run.NewSemanticStates+run.NewSemanticTransitions) * 100 / float64(run.Actions)
-				}
-				if corpusErr != nil {
-					run.Error = joinErrorText(run.Error, corpusErr.Error())
-					run.Succeeded = false
-				} else if retained {
-					if options.Hooks.OnCorpusEntry != nil {
-						if err := options.Hooks.OnCorpusEntry(entry); err != nil {
-							if rollbackErr := collection.RollbackLast(entry); rollbackErr != nil {
-								return stopWithError(fmt.Errorf("persist corpus entry: %w; rollback: %v", err, rollbackErr))
-							}
-							return stopWithError(fmt.Errorf("persist corpus entry: %w", err))
-						}
+					var projectionErr error
+					projection, projectionErr = options.CoverageProjector(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
+					if projectionErr != nil {
+						run.Error = joinErrorText(run.Error, "semantic coverage projection: "+projectionErr.Error())
+						run.Status = engine.StatusMappingFailed
+						run.Succeeded = false
 					}
-					run.Retained, run.CorpusID = true, entry.ID
-					count := mutationCount(max(1, len(entry.NewSemanticStateKeys)+len(entry.NewSemanticTransitionKeys)), r.config.MutationsPerNewState, r.config.MaxMutationsPerCorpus)
-					// 已经发出的执行占满总预算时不再启动没有机会被执行的变异，
-					// 对 LLM mutator 尤其可以避免一次无意义的远程调用。
-					if count > 0 && nextRunIndex < r.config.Runs {
-						request := mutation.Request{Entry: entry, Count: count, Seed: mutationSeed(r.config.BaseSeed, entry.RunIndex)}
-						pending[entry.ID] = request
-						mutationRequests <- request
+				}
+				if run.Succeeded {
+					entry, retained, corpusErr := collection.Consider(corpus.Input{
+						ParentID: done.candidate.ParentID, Source: done.candidate.Source,
+						Depth: done.candidate.Depth, RunIndex: done.index, Seed: done.seed,
+						Plan:                   done.execution.Plan,
+						States:                 done.execution.Result.ModelStates,
+						SemanticStateKeys:      projection.StateKeys,
+						SemanticTransitionKeys: projection.TransitionKeys,
+					})
+					run.NewStateKeys = append([]int64(nil), entry.NewStateKeys...)
+					run.NewRawStates = len(entry.NewStateKeys)
+					run.NewSemanticStates = len(entry.NewSemanticStateKeys)
+					run.NewSemanticTransitions = len(entry.NewSemanticTransitionKeys)
+					run.CorpusAdmission = string(entry.AdmissionReason)
+					if run.Actions > 0 {
+						run.SemanticNoveltyPer100Actions = float64(run.NewSemanticStates+run.NewSemanticTransitions) * 100 / float64(run.Actions)
+					}
+					if corpusErr != nil {
+						run.Error = joinErrorText(run.Error, corpusErr.Error())
+						run.Succeeded = false
+					} else if retained {
+						if options.Hooks.OnCorpusEntry != nil {
+							if err := options.Hooks.OnCorpusEntry(entry); err != nil {
+								if rollbackErr := collection.RollbackLast(entry); rollbackErr != nil {
+									return stopWithError(fmt.Errorf("persist corpus entry: %w; rollback: %v", err, rollbackErr))
+								}
+								return stopWithError(fmt.Errorf("persist corpus entry: %w", err))
+							}
+						}
+						run.Retained, run.CorpusID = true, entry.ID
+						count := mutationCount(max(1, len(entry.NewSemanticStateKeys)+len(entry.NewSemanticTransitionKeys)), r.config.MutationsPerNewState, r.config.MaxMutationsPerCorpus)
+						// 已经发出的执行占满总预算时不再启动没有机会被执行的变异，
+						// 对 LLM mutator 尤其可以避免一次无意义的远程调用。
+						if count > 0 && nextRunIndex < r.config.Runs {
+							request := mutation.Request{Entry: entry, Count: count, Seed: mutationSeed(r.config.BaseSeed, entry.RunIndex)}
+							pending[entry.ID] = request
+							mutationRequests <- request
+						}
 					}
 				}
 			}
@@ -902,7 +917,11 @@ func aggregate(report Report) Report {
 			report.SnapshotsSent += run.Metrics.SnapshotsSent
 			report.SnapshotsDelivered += run.Metrics.SnapshotsDelivered
 			report.SnapshotsApplied += run.Metrics.SnapshotsApplied
+			report.SnapshotsFastForwarded += run.Metrics.SnapshotsFastForwarded
 			report.SnapshotsRejectedOrStale += run.Metrics.SnapshotsRejectedOrStale
+			report.SnapshotStatusSucceeded += run.Metrics.SnapshotStatusSucceeded
+			report.SnapshotStatusFailed += run.Metrics.SnapshotStatusFailed
+			report.SnapshotStatusIgnored += run.Metrics.SnapshotStatusIgnored
 			report.LogsCompacted += run.Metrics.LogsCompacted
 			report.CompactedEntries += run.Metrics.CompactedEntries
 			report.SnapshotBytes += run.Metrics.SnapshotBytes
@@ -1023,33 +1042,6 @@ func mergeCounts(destination, source map[string]int) {
 
 func pointerTo[T any](value T) *T {
 	return &value
-}
-
-func coveragePoint(report Report, collection *corpus.Corpus, completed int, elapsedMillis int64) CoveragePoint {
-	states := make(map[int64]struct{})
-	plans := make(map[string]struct{})
-	traces := make(map[string]struct{})
-	statePaths := make(map[string]struct{})
-	actions := 0
-	for _, run := range report.Runs {
-		if !run.Completed {
-			continue
-		}
-		actions += run.Actions
-		for _, key := range run.StateKeys {
-			states[key] = struct{}{}
-		}
-		remember(plans, run.PlanDigest)
-		remember(traces, run.TraceDigest)
-		remember(statePaths, run.ModelStatePathDigest)
-	}
-	semanticStates, semanticTransitions := collection.SemanticCoverageLen()
-	return CoveragePoint{
-		CompletedRuns: completed, TotalActions: actions, UniqueModelStates: len(states),
-		UniqueSemanticStates: semanticStates, UniqueSemanticTransitions: semanticTransitions,
-		UniquePlans: len(plans), UniqueTraces: len(traces), UniqueModelStatePaths: len(statePaths),
-		CorpusEntries: collection.Len(), ElapsedMillis: elapsedMillis,
-	}
 }
 
 func copyCandidates(source []Candidate) []Candidate {

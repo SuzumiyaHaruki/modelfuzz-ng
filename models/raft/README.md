@@ -1,6 +1,7 @@
 # Raft 模型
 
-该目录保存 ModelFuzz-NG 首个可运行的 Raft 模型。它沿用原 ModelFuzz
+该目录保存 ModelFuzz-NG 的基础 Raft 模型与 Storage/Snapshot 扩展模型。
+基础模型沿用原 ModelFuzz
 `raft_alt.tla` 的核心思路：网络队列由 Runtime 控制，TLA+ 模型本身不维护
 message bag；实际消息投递由 `internal/model/raft.Mapper` 转成具体消息处理动作。
 
@@ -15,6 +16,41 @@ Timeout
   -> ClientRequest(leader no-op)
 ```
 
+## 模型 Profile
+
+- `basic`：`raft.tla` 与 `raft-{5,10}.cfg`。保持原有状态空间和历史实验可比性，
+  snapshot lifecycle 与 `MsgSnap` 都明确 stutter。
+- `storage-snapshot`：`raft_storage_snapshot.tla` 与
+  `raft-storage-snapshot-{5,10}.cfg`。扩展基础模型但不复制其协议定义，新增
+  `appliedIndex`、`snapshotIndex`、`snapshotTerm`、`firstIndex` 和
+  `pendingSnapshot`，并映射 `ApplyCommitted`、`CreateSnapshot`、
+  `CompactLog`、`SendSnapshot`、`InstallSnapshot`、`FastForwardSnapshot`、
+  `RejectSnapshot`、`HandleSnapshotStatus`。
+
+`raft-storage-snapshot.cfg` 是1节点、1/1边界的完整 `StorageSpec`，用于快速穷举
+模型本身；带 `-5`、`-10`、`-5nodes-10` 后缀的配置使用
+`StorageControlledNext`，供真实多节点轨迹按事件严格执行。
+`raft-storage-snapshot-progress.cfg` 是两节点聚焦穷举配置，从合法 Leader progress
+边界检查 Create/Compact/Send 的次序。
+
+Storage/Snapshot 模型保留完整 `log` 作为 ghost history，压缩只移动
+`firstIndex`，不会从逻辑日志删除前缀。`SnapshotStorageBoundary` 检查：
+
+```text
+snapshotIndex <= appliedIndex <= commitIndex <= Len(log)
+firstIndex - 1 <= snapshotIndex
+snapshotTerm = log[snapshotIndex].term（snapshotIndex > 0）
+```
+
+这能验证“只对已应用前缀创建快照”和“只压缩已被快照覆盖的日志”。第二阶段
+还定义 `EntryAvailable`、`NeedSnapshot`、`SnapshotAvailable` 和 `SendSnapshot`，
+复用 `nextIndex/matchIndex` 并跟踪 Leader 的 `pendingSnapshot`；成功且覆盖 pending
+边界的当前 term `MsgAppResp` 会清除 pending。第三阶段进一步用 source ghost log
+prefix 表达 Follower Restore，并区分 matching-entry fast-forward 与旧/重复 snapshot
+拒绝。第四阶段进一步覆盖成功/失败 `MsgSnapStatus`、失败后的 progress 回退和重试；
+heartbeat 等待节奏仍抽象为 stutter。固定 voter 的安装路径已进入模型；ConfState
+动态恢复和损坏 payload 仍未建模。
+
 ## 使用约束
 
 - 默认配置是 3 节点，term、日志长度和请求值均有界；规模变化时应从同一份
@@ -26,6 +62,9 @@ Timeout
   不在 Tool 启动时枚举全部参数组合。兼容文件 `raft.cfg` 仍使用5/5边界的
   完整 `Spec`，可用于普通 TLC 枚举。使用 controlled TLC 时必须让 Go JSON/CLI 边界
   与所选 cfg 一致，严格服务会在 `/health` 暴露实际值供 CLI 自动核对。
+- 使用扩展模型时，Go JSON 必须设置 `model.profile=storage-snapshot`，并启动
+  `raft_storage_snapshot.tla`。strict server 从本地 `Storage*` 动作识别 profile，
+  `/health.model_profile` 与 Go 配置不一致时 CLI 会在执行前拒绝。
 - 客户端请求暂时必须是 `1..MaxValue` 的十进制整数。`0` 保留给 etcd-raft
   成为 leader 时产生的 no-op entry。Follower 已知当前 Leader 时会产生受控
   `MsgProp`；只有该消息投递到当前 Leader 时，Mapper 才生成 `ClientRequest`。
@@ -41,24 +80,29 @@ Timeout
 - 更高term节点可能直接忽略旧term的多 entry `MsgApp` 且不发送响应。Mapper
   将这种节点状态未变化的输入缩减为第一条 entry 对应的模型 stutter，不再把
   “没有响应”误判成映射失败。
-- 未知消息、snapshot、membership change 等超出轻量模型表达能力的转换会返回
+- 未知消息、未建模的 snapshot/ConfState 异常路径、membership change 等超出轻量模型表达能力的转换会返回
   错误，不会静默忽略。
 - 模型使用 `currentActive`、`RemoveFromActive` 和 `AddToActive` 表达
   crash/restart；崩溃保留稳定状态，恢复会重置节点的 Raft 易失状态。
-- membership change 和 PreVote 尚未建模，Mapper 会明确拒绝对应语义；snapshot 生命周期按下述规则明确 stutter。
+- membership change 和 PreVote 尚未建模，Mapper 会明确拒绝对应语义。
 - `partition`/`heal` 由 Runtime 管理，在基础模型中明确映射为 stutter；分区造成的后续选举、消息投递、日志复制和提交仍按现有模型动作检查。
-- 更准确地说，当前基础模型不包含 snapshot 变量或 InstallSnapshot 状态转换；
+- 更准确地说，基础模型不包含 snapshot 变量或 InstallSnapshot 状态转换；
   Adapter 产生的 snapshot 创建/发送/投递/应用/压缩 Effect 和 `MsgSnap` 被稳定归类为
   model stutter。这保持基础模型可用，但不等于形式化验证了 snapshot install。
 - 原 artifact 的 `raft_enhanced.tla` 只提供 `snapshotIndex`/
-  `UpdateSnapshotIndex(i, si)` 抽象，也不是完整 InstallSnapshot 协议。NG 当前没有将它
-  冒充为增强 snapshot 模型；如果后续引入，将使用独立 Profile/配置。
+  `UpdateSnapshotIndex(i, si)` 抽象，也不是完整 InstallSnapshot 协议。NG 的
+  `storage-snapshot` profile 额外建模 applied/term/first-index、Leader progress 和
+  固定 voter 的 Follower install；动态成员与异常 payload 仍是明确边界。
 - `TypeOK` 对 term、日志 entry、日志长度、commit、投票集合以及 leader 复制索引
   做完整有界检查；`CommittedPrefixAgreement` 和 `LogMatching` 分别检查已提交
   前缀一致性与 Raft 日志匹配性质。
 
-`raft.tla` 的动作名和参数保持与原 controlled TLC 的 `RaftActionMapper` 兼容，
-启动 TLC HTTP 服务时将本目录作为模型目录，并选择 `raft.tla`/`raft.cfg`。
-旧版 `ActionMapperFactory` 对模型文件名进行大小写敏感判断，因此必须通过
-`-mapperparams 'name=raft;port=2023'` 显式选择 `RaftActionMapper`；只传入小写
-`raft.tla` 会错误回退到默认 Mapper。
+当前支持的执行路径是仓库内的 strict TLC server；不需要原 artifact 的
+`ActionMapperFactory`。扩展模型启动示例：
+
+```bash
+tools/tlc-server/run.sh \
+  --model models/raft/raft_storage_snapshot.tla \
+  --config models/raft/raft-storage-snapshot-5.cfg \
+  --port 2023
+```

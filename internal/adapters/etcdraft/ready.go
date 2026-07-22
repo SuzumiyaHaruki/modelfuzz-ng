@@ -88,7 +88,17 @@ func (a *Adapter) handleReady(
 		}
 		effects = append(effects, core.Effect{At: at, Kind: core.EffectSendMessage, Message: &outbound})
 		if message.GetType() == raftpb.MsgSnap {
-			effects = append(effects, snapshotEvent(at, "raft.snapshot_sent", n.id, message.GetSnapshot(), nil))
+			progress, exists := n.raw.Status().Progress[message.GetTo()]
+			if !exists {
+				return nil, fmt.Errorf("node %s sent snapshot to untracked node n%d", n.id, message.GetTo())
+			}
+			effects = append(effects, snapshotEvent(at, "raft.snapshot_sent", n.id, message.GetSnapshot(), map[string]any{
+				"to":               message.GetTo(),
+				"match_index":      progress.Match,
+				"next_index":       progress.Next,
+				"pending_snapshot": progress.PendingSnapshot,
+				"progress_state":   progress.State.String(),
+			}))
 		}
 	}
 	return effects, nil

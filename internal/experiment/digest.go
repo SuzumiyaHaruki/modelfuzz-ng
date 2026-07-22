@@ -55,42 +55,6 @@ func digestValue(value any) string {
 	return hex.EncodeToString(digest[:])
 }
 
-type noveltyTracker struct {
-	plans      map[string]struct{}
-	traces     map[string]struct{}
-	statePaths map[string]struct{}
-}
-
-func newNoveltyTracker(report Report) *noveltyTracker {
-	tracker := &noveltyTracker{
-		plans: make(map[string]struct{}), traces: make(map[string]struct{}), statePaths: make(map[string]struct{}),
-	}
-	for _, run := range report.Runs {
-		if !run.Completed {
-			continue
-		}
-		remember(tracker.plans, run.PlanDigest)
-		remember(tracker.traces, run.TraceDigest)
-		remember(tracker.statePaths, run.ModelStatePathDigest)
-	}
-	return tracker
-}
-
-func (t *noveltyTracker) classify(run *Run) {
-	if run == nil {
-		return
-	}
-	run.NewPlan = markNew(t.plans, run.PlanDigest)
-	run.NewTrace = markNew(t.traces, run.TraceDigest)
-	run.NewModelStatePath = markNew(t.statePaths, run.ModelStatePathDigest)
-}
-
-func remember(set map[string]struct{}, digest string) {
-	if digest != "" {
-		set[digest] = struct{}{}
-	}
-}
-
 func markNew(set map[string]struct{}, digest string) bool {
 	if digest == "" {
 		return false

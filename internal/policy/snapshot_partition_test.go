@@ -146,6 +146,45 @@ func TestSnapshotPartitionDuplicateSwitchAndRecoveryBudget(t *testing.T) {
 	}
 }
 
+func TestSnapshotPartitionFailsOnlyFirstSnapshot(t *testing.T) {
+	config := snapshotPolicyConfig(false, 0)
+	config.FailFirstSnapshot = true
+	policy, _ := NewSnapshotPartition(0, config)
+	policy.preferredLeader, policy.leader, policy.lagger = 1, 1, 3
+	policy.partitionStarted, policy.healIssued, policy.targetSnapshot = true, true, 2
+	observation := snapshotObservation(1, 2, 3, 3, false)
+	observation.Messages = []core.MessageObservation{{
+		ID: 1, From: 1, To: 3, SenderEpoch: 1, LinkSequence: 1, TypeHint: "MsgSnap",
+	}}
+	first, more, err := policy.Next(observation)
+	if err != nil || !more || first.Kind != plan.ActionDrop {
+		t.Fatalf("first snapshot failure = %+v, more=%v, err=%v", first, more, err)
+	}
+	second, more, err := policy.Next(observation)
+	if err != nil || !more || second.Kind != plan.ActionDeliver {
+		t.Fatalf("retried snapshot = %+v, more=%v, err=%v", second, more, err)
+	}
+}
+
+func TestSnapshotPartitionDrainsFollowerResponseBeforeCompletion(t *testing.T) {
+	policy, _ := NewSnapshotPartition(0, snapshotPolicyConfig(true, 0))
+	policy.preferredLeader, policy.leader, policy.lagger = 1, 1, 3
+	policy.partitionStarted, policy.healIssued, policy.targetSnapshot = true, true, 2
+	observation := snapshotObservation(1, 2, 3, 3, false)
+	observation.Nodes[2].Semantic["snapshot_index"] = uint64(2)
+	observation.Messages = []core.MessageObservation{{
+		ID: 1, From: 3, To: 1, SenderEpoch: 1, LinkSequence: 1, TypeHint: "MsgAppResp",
+	}}
+	action, more, err := policy.Next(observation)
+	if err != nil || !more || action.Kind != plan.ActionDeliver {
+		t.Fatalf("response drain = action=%+v, more=%v, err=%v", action, more, err)
+	}
+	observation.Messages = nil
+	if _, more, err := policy.Next(observation); err != nil || more {
+		t.Fatalf("completion after response = more=%v, err=%v", more, err)
+	}
+}
+
 func snapshotPolicyConfig(duplicate bool, retain uint64) SnapshotPartitionConfig {
 	return SnapshotPartitionConfig{
 		NodeIDs: []core.NodeID{1, 2, 3}, MaxValue: 5, MaxLogIndex: 10,

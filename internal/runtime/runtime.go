@@ -54,7 +54,7 @@ func (c Config) validate() error {
 	return nil
 }
 
-// StepResult 同时返回具体步骤及其执行前后的全局可观察状态。Concrete Trace v2
+// StepResult 同时返回具体步骤及其执行前后的全局可观察状态。正式 Trace
 // 会在 Record 中保存前后节点快照；完整 Observation 仍主要供在线 Plan、模型映射
 // 和 Oracle 使用，避免每一步重复保存整个消息队列。
 type StepResult struct {

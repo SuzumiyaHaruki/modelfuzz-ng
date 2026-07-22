@@ -207,10 +207,20 @@ func (r *Runtime) applyAction(ctx context.Context, action core.Action) ([]core.E
 		return r.processAdapterEffects(effects, r.time)
 
 	case core.ActionDrop:
+		selected, err := r.network.resolve(action.Message, *action.Selector)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidAction, err)
+		}
+		effects, err := callSUT("drop", func() ([]core.Effect, error) {
+			return r.adapter.Drop(ctx, r.time, selected.message.Copy())
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%w: drop %s: %w", ErrAdapter, action.Message, err)
+		}
 		if _, err := r.network.remove(action.Message, *action.Selector); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidAction, err)
 		}
-		return nil, nil
+		return r.processAdapterEffects(effects, r.time)
 
 	case core.ActionDuplicate:
 		if _, err := r.network.duplicate(action.Message, *action.Selector, r.time); err != nil {

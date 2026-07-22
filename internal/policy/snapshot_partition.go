@@ -19,6 +19,7 @@ type SnapshotPartitionConfig struct {
 	SnapshotThreshold uint64        `json:"snapshot_threshold"`
 	RetainEntries     uint64        `json:"retain_entries"`
 	DuplicateSnapshot bool          `json:"duplicate_snapshot"`
+	FailFirstSnapshot bool          `json:"fail_first_snapshot"`
 }
 
 // SnapshotPartition is a deterministic online scenario generator. It elects a
@@ -34,6 +35,7 @@ type SnapshotPartition struct {
 	partitionStarted   bool
 	healIssued         bool
 	snapshotDuplicated bool
+	snapshotFailed     bool
 	targetSnapshot     uint64
 	laggerBaseline     uint64
 	recoveryTicks      int
@@ -90,6 +92,7 @@ func (p *SnapshotPartition) Reset(initial core.Observation) error {
 	p.partitionStarted = false
 	p.healIssued = false
 	p.snapshotDuplicated = false
+	p.snapshotFailed = false
 	p.targetSnapshot = 0
 	p.laggerBaseline = 0
 	p.recoveryTicks = 0
@@ -126,8 +129,12 @@ func (p *SnapshotPartition) Next(observation core.Observation) (plan.PlanAction,
 }
 
 func (p *SnapshotPartition) Sequence() plan.PlanSequence {
+	source := "snapshot_partition"
+	if p.config.FailFirstSnapshot {
+		source = "snapshot_failure"
+	}
 	return plan.PlanSequence{Actions: copyActions(p.generated), Metadata: map[string]string{
-		"source": "snapshot_partition", "seed": strconv.FormatInt(p.seed, 10),
+		"source": source, "seed": strconv.FormatInt(p.seed, 10),
 		"leader": p.leader.String(), "lagger": p.lagger.String(),
 		"target_snapshot": strconv.FormatUint(p.targetSnapshot, 10),
 	}}
@@ -217,11 +224,22 @@ func (p *SnapshotPartition) afterHeal(observation core.Observation) (plan.PlanAc
 	if snapshot, ok := chooseMessage(observation, func(message core.MessageObservation) bool {
 		return message.From == p.leader && message.To == p.lagger && message.TypeHint == "MsgSnap"
 	}); ok {
+		if p.config.FailFirstSnapshot && !p.snapshotFailed {
+			p.snapshotFailed = true
+			return observedMessageAction(plan.ActionDrop, snapshot), true, nil
+		}
 		if p.config.DuplicateSnapshot && !p.snapshotDuplicated {
 			p.snapshotDuplicated = true
 			return observedMessageAction(plan.ActionDuplicate, snapshot), true, nil
 		}
 		return observedMessageAction(plan.ActionDeliver, snapshot), true, nil
+	}
+	// Snapshot Restore 会产生 MsgAppResp。先让 Leader 消费响应并退出 pending
+	// snapshot progress，再把场景判定为完成。
+	if response, ok := chooseMessage(observation, func(message core.MessageObservation) bool {
+		return message.From == p.lagger && message.To == p.leader
+	}); ok {
+		return observedMessageAction(plan.ActionDeliver, response), true, nil
 	}
 	if snapshotApplied && snapshotConverged(leader, lagger, p.targetSnapshot) {
 		return plan.PlanAction{}, false, nil
@@ -238,11 +256,6 @@ func (p *SnapshotPartition) afterHeal(observation core.Observation) (plan.PlanAc
 		}); ok {
 			return observedMessageAction(plan.ActionDeliver, heartbeat), true, nil
 		}
-	}
-	if response, ok := chooseMessage(observation, func(message core.MessageObservation) bool {
-		return message.From == p.lagger && message.To == p.leader
-	}); ok {
-		return observedMessageAction(plan.ActionDeliver, response), true, nil
 	}
 	if snapshotApplied {
 		if message, ok := chooseMessage(observation, func(message core.MessageObservation) bool {

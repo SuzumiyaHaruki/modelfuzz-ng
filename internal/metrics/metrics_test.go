@@ -50,16 +50,20 @@ func TestCollectCountsAdapterModelEventsThatMapToStutter(t *testing.T) {
 
 func TestCollectSnapshotLifecycleMetrics(t *testing.T) {
 	names := []string{"raft.snapshot_created", "raft.snapshot_sent", "raft.snapshot_delivered",
-		"raft.snapshot_applied", "raft.snapshot_rejected_or_stale", "raft.log_compacted"}
+		"raft.snapshot_applied", "raft.snapshot_fast_forwarded", "raft.snapshot_rejected_or_stale",
+		"raft.snapshot_status_reported", "raft.log_compacted"}
 	effects := make([]core.Effect, 0, len(names))
 	for _, name := range names {
 		effects = append(effects, core.Effect{Kind: core.EffectModelEvent, ModelEvent: &core.ModelEvent{
-			Name: name, Params: map[string]any{"snapshot_bytes": 123, "compacted_entries": uint64(4)},
+			Name: name, Params: map[string]any{
+				"snapshot_bytes": 123, "compacted_entries": uint64(4), "handled": true, "reject": true,
+			},
 		}})
 	}
 	got := Collect(engine.Result{Trace: core.Trace{Steps: []core.StepRecord{{Effects: effects}}}})
 	if got.SnapshotsCreated != 1 || got.SnapshotsSent != 1 || got.SnapshotsDelivered != 1 ||
-		got.SnapshotsApplied != 1 || got.SnapshotsRejectedOrStale != 1 || got.LogsCompacted != 1 ||
+		got.SnapshotsApplied != 1 || got.SnapshotsFastForwarded != 1 || got.SnapshotsRejectedOrStale != 1 ||
+		got.SnapshotStatusFailed != 1 || got.SnapshotStatusSucceeded != 0 || got.LogsCompacted != 1 ||
 		got.CompactedEntries != 4 || got.SnapshotBytes != 123 {
 		t.Fatalf("snapshot metrics = %+v", got)
 	}
