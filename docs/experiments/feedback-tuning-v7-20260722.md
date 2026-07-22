@@ -157,6 +157,51 @@ A组第二次语义拒绝发生在run 722，对应81个新增raw状态、0个新
 影响0.2%的执行，raw=25仍是主要准入门槛。现阶段没有证据支持进一步收紧语义门槛；
 应先在更长实验中观察其拒绝率是否随语义空间饱和而上升。
 
+## 修复后30分钟稳定性实验
+
+代码先冻结为本地 commit `d3c5e91c3479ef37f3504e2db760cc3d8778b9e0`，从该提交
+构建二进制。目录：`runs/feedback-soak-30m-postfix-20260722`。实验使用 seed=884000、
+raw门槛25、semantic on、每条最多300个 PlanAction、LargestTerm/MaxLogIndex=10/10、
+checkpoint每100轮、只保存失败产物。总运行上限设为100,000轮，由外层30分钟 timeout
+发送 SIGINT 正常停止；最终退出码124和`context canceled`属于预期时间边界。
+
+最终结果：
+
+| 指标 | 结果 |
+|---|---:|
+| elapsed | 1,801.024秒 |
+| completed / succeeded / failed | 8,197 / 8,197 / 0 |
+| Action / model event | 1,905,565 / 1,215,917 |
+| actions/s / runs/s | 1,058.05 / 4.55 |
+| raw状态覆盖 | 232,471 |
+| 语义状态 / 转移覆盖 | 160,867 / 256,805 |
+| 语义novelty / 100 Action | 21.9185 |
+| Corpus / 准入率 | 3,293 / 40.17% |
+| raw门槛拒绝 | 4,879（59.52%） |
+| 无语义novelty拒绝 | 25（全部执行0.305%，raw合格轨迹0.753%） |
+| mutation / random init执行 | 6,583 / 1,614 |
+| Ready峰值 / discarded mutation | 17 / 0 |
+| runtime error / TLC failure | 0 / 0 |
+| proposal dropped | 17,027 |
+| model bound reached | 1,588（19.37%） |
+| checkpoint / corpus.jsonl / runs.jsonl | 28 / 68 / 34 MiB |
+
+Action分布中 Deliver=59.53%、强制timeout=2.36%、crash+restart=2.28%。
+`message_not_available=101,207`（5.31% Action），`selector_start_clamped=40,021`
+（2.10%），`timeout_term_bound=44`。proposal dropped占Action约0.89%，全部作为可见
+stutter统计，没有进入runtime error。
+
+按每1000轮分窗，Corpus准入率保持在38.5%–42.1%，无语义novelty拒绝分别为
+1、4、2、6、2、1、4、5次；每窗语义novelty保持在21.37–22.76/100 Action，没有出现
+明显的语义空间饱和。semantic gate在长跑中持续正确工作，但独立筛选仍不足1%，
+raw=25继续主导准入；当前数据不支持进一步收紧语义门槛。
+
+JVM启动RSS约81 MiB，首个100-run checkpoint后约211 MiB，随后缓慢增长并经历GC回落，
+实验结束前约253 MiB；30分钟内没有OOM或单调快速膨胀。本次没有复现此前 eager
+Action 大量常驻导致的短时间OOM，支持按需创建Action的修改有效。checkpoint约
+3.5 KiB/完成轮，远小于旧2小时实验约11 KiB/轮且不再包含膨胀Ready队列；本次Ready
+峰值只有17。
+
 ## 验证
 
 - `gofmt`：通过；
@@ -169,3 +214,4 @@ A组第二次语义拒绝发生在run 722，对应81个新增raw状态、0个新
 - Corpus 准入统计30-run TLC烟雾通过，checkpoint 聚合校验与逐run字段一致。
 - Mapper修复100-seed回归100/100通过，proposal dropped可见且不计为runtime error；
 - semantic on/off同seed 1000-run A/B均1000/1000通过，首次分歧和最终覆盖已记录。
+- 修复后30分钟soak完成8,197轮和约190.6万Action，零失败、无JVM OOM；timeout停止符合预期。
