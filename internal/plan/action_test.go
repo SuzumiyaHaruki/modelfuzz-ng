@@ -18,6 +18,8 @@ func TestPlanActionValidation(t *testing.T) {
 		{Kind: ActionCrash, Node: 1},
 		{Kind: ActionRestart, Node: 1},
 		{Kind: ActionRequest, Node: 1, Request: "1"},
+		{Kind: ActionPartition, Partition: &core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}},
+		{Kind: ActionHeal},
 	}
 	for _, action := range valid {
 		if err := action.Validate(); err != nil {
@@ -33,6 +35,8 @@ func TestPlanActionValidation(t *testing.T) {
 		{Kind: ActionTimeout},
 		{Kind: ActionRequest, Node: 1},
 		{Kind: ActionCrash, Node: 1, Ticks: 1},
+		{Kind: ActionPartition},
+		{Kind: ActionHeal, Node: 1},
 	}
 	for _, action := range invalid {
 		if err := action.Validate(); !errors.Is(err, ErrInvalidPlan) {
@@ -56,5 +60,12 @@ func TestPlanSequenceCopyDoesNotAlias(t *testing.T) {
 	copy.Metadata["source"] = "random"
 	if sequence.Actions[0].Messages.Count != 2 || sequence.Metadata["source"] != "manual" {
 		t.Fatal("PlanSequence.Copy shares mutable data with the original")
+	}
+
+	partition := PlanAction{Kind: ActionPartition, Partition: &core.NetworkPartition{Groups: [][]core.NodeID{{1}, {2, 3}}}}
+	partitionCopy := partition.Copy()
+	partitionCopy.Partition.Groups[1][0] = 4
+	if partition.Partition.Groups[1][0] != 2 {
+		t.Fatal("PlanAction.Copy shares partition groups")
 	}
 }

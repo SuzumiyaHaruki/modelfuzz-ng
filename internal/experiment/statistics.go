@@ -62,7 +62,11 @@ type Statistics struct {
 	SnapshotsSent                int                       `json:"snapshots_sent"`
 	SnapshotsDelivered           int                       `json:"snapshots_delivered"`
 	SnapshotsApplied             int                       `json:"snapshots_applied"`
+	SnapshotsFastForwarded       int                       `json:"snapshots_fast_forwarded"`
 	SnapshotsRejectedOrStale     int                       `json:"snapshots_rejected_or_stale"`
+	SnapshotStatusSucceeded      int                       `json:"snapshot_status_succeeded"`
+	SnapshotStatusFailed         int                       `json:"snapshot_status_failed"`
+	SnapshotStatusIgnored        int                       `json:"snapshot_status_ignored"`
 	LogsCompacted                int                       `json:"logs_compacted"`
 	CompactedEntries             uint64                    `json:"compacted_entries"`
 	SnapshotBytes                uint64                    `json:"snapshot_bytes"`
@@ -102,7 +106,11 @@ func (r Report) Statistics() Statistics {
 		ElapsedMillis:       r.ElapsedMillis,
 		SnapshotsCreated:    r.SnapshotsCreated, SnapshotsSent: r.SnapshotsSent,
 		SnapshotsDelivered: r.SnapshotsDelivered, SnapshotsApplied: r.SnapshotsApplied,
-		SnapshotsRejectedOrStale: r.SnapshotsRejectedOrStale, LogsCompacted: r.LogsCompacted,
+		SnapshotsFastForwarded:   r.SnapshotsFastForwarded,
+		SnapshotsRejectedOrStale: r.SnapshotsRejectedOrStale,
+		SnapshotStatusSucceeded:  r.SnapshotStatusSucceeded,
+		SnapshotStatusFailed:     r.SnapshotStatusFailed, SnapshotStatusIgnored: r.SnapshotStatusIgnored,
+		LogsCompacted:    r.LogsCompacted,
 		CompactedEntries: r.CompactedEntries, SnapshotBytes: r.SnapshotBytes,
 	}
 }

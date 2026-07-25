@@ -139,3 +139,37 @@ func TestRandomMutationUsesConfiguredCrashPairRate(t *testing.T) {
 		t.Fatalf("crash/restart pair selections=%d/1000, want approximately 5%%", pairs)
 	}
 }
+
+func TestRandomMutationInsertsPartitionHealPair(t *testing.T) {
+	mutator, err := NewRandom(RandomConfig{
+		NodeIDs: []core.NodeID{1, 2, 3}, MaxValue: 2, MaxTicks: 2, MaxActions: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence := plan.PlanSequence{Actions: []plan.PlanAction{
+		{Kind: plan.ActionAdvanceTicks, Ticks: 1},
+		{Kind: plan.ActionRequest, Node: 1, Request: "1"},
+	}}
+	if !mutator.insertPartitionHealPair(rand.New(rand.NewSource(7)), &sequence) {
+		t.Fatal("没有生成 partition/heal 对")
+	}
+	if len(sequence.Actions) != 4 || mutator.validateNetworkLifecycle(sequence) != nil {
+		t.Fatalf("invalid partition/heal mutation: %+v", sequence.Actions)
+	}
+	partitionIndex, healIndex := -1, -1
+	for index, action := range sequence.Actions {
+		switch action.Kind {
+		case plan.ActionPartition:
+			partitionIndex = index
+			if action.Partition == nil || !action.Partition.Covers(mutator.config.NodeIDs) {
+				t.Fatalf("partition does not cover configured nodes: %+v", action.Partition)
+			}
+		case plan.ActionHeal:
+			healIndex = index
+		}
+	}
+	if partitionIndex < 0 || healIndex-partitionIndex < 2 {
+		t.Fatalf("partition/heal did not enclose an existing action: %+v", sequence.Actions)
+	}
+}

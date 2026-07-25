@@ -3,6 +3,7 @@ package org.modelfuzzng.tlc;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,15 +36,36 @@ final class ModelBounds {
     boolean contains(String parameter, long value) {
         return switch (parameter) {
             case "i", "j" -> servers.isEmpty() || servers.contains(value);
-            case "term", "lTerm", "pLogTerm", "entryTerm" ->
+            case "term", "lTerm", "pLogTerm", "entryTerm", "sTerm" ->
                 largestTerm == null || value >= 0 && value <= largestTerm;
-            case "lIndex", "pLogIndex", "cIndex", "mIndex" ->
+            case "lIndex", "pLogIndex", "cIndex", "mIndex", "index", "match", "pending" ->
                 maxLogIndex == null || value >= 0 && value <= maxLogIndex;
+            case "next" -> maxLogIndex == null || value >= 1 && value <= maxLogIndex + 1;
             case "v", "entryValue" -> maxValue == null
                 || value >= 1 && value <= maxValue
                 || nil != null && value == nil;
             default -> true;
         };
+    }
+
+    List<Long> serverIDs() {
+        return servers.stream().sorted().toList();
+    }
+
+    Long largestTerm() {
+        return largestTerm;
+    }
+
+    Long maxLogIndex() {
+        return maxLogIndex;
+    }
+
+    Long maxValue() {
+        return maxValue;
+    }
+
+    Long nilValue() {
+        return nil;
     }
 
     private static Long integer(String config, String name) {

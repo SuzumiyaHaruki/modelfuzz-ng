@@ -21,9 +21,12 @@ import (
 )
 
 type experimentSettings struct {
+	ReleaseVersion   string                `json:"release_version"`
+	SemanticSchema   string                `json:"semantic_schema"`
 	LLMInit          bool                  `json:"llm_init"`
 	LLMMutate        bool                  `json:"llm_mutate"`
 	Initializer      string                `json:"initializer"`
+	OnlinePolicy     string                `json:"online_policy"`
 	Mutator          string                `json:"mutator"`
 	LLMProvider      llm.Provider          `json:"llm_provider,omitempty"`
 	LLMModel         string                `json:"llm_model,omitempty"`

@@ -43,6 +43,8 @@ func TestNonMessageActionValidation(t *testing.T) {
 		{Kind: ActionCrash, Node: 1},
 		{Kind: ActionRestart, Node: 1},
 		{Kind: ActionRequest, Node: 1, Request: []byte("write")},
+		{Kind: ActionPartition, Partition: &NetworkPartition{Groups: [][]NodeID{{1}, {2, 3}}}},
+		{Kind: ActionHeal},
 	}
 	for _, action := range valid {
 		if err := action.Validate(); err != nil {
@@ -55,6 +57,9 @@ func TestNonMessageActionValidation(t *testing.T) {
 		{Kind: ActionTimeout},
 		{Kind: ActionTimeout, Node: 1, TargetTime: 10},
 		{Kind: ActionRequest, Request: []byte("write")},
+		{Kind: ActionPartition},
+		{Kind: ActionPartition, Partition: &NetworkPartition{Groups: [][]NodeID{{1, 2}}}},
+		{Kind: ActionHeal, Node: 1},
 	}
 	for _, action := range invalid {
 		if err := action.Validate(); !errors.Is(err, ErrInvalidValue) {
@@ -86,5 +91,14 @@ func TestActionCopyDoesNotAliasMutableFields(t *testing.T) {
 	selectorCopy.Selector.Position = 4
 	if selectorAction.Selector.Position != 0 {
 		t.Fatal("copy mutated original selector")
+	}
+
+	partitionAction := Action{
+		Kind: ActionPartition, Partition: &NetworkPartition{Groups: [][]NodeID{{1}, {2, 3}}},
+	}
+	partitionCopy := partitionAction.Copy()
+	partitionCopy.Partition.Groups[1][0] = 4
+	if partitionAction.Partition.Groups[1][0] != 2 {
+		t.Fatal("copy mutated original partition")
 	}
 }

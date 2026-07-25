@@ -1,9 +1,7 @@
 package core
 
-// v3 将消息 Metadata 纳入 ObservationDigest；v4 将 Raft committed-prefix
-// 摘要纳入节点语义观测。旧版 Trace 仍可重放，但 Replay 不比较旧版
-// ObservationDigest，因为旧摘要无法表达新增字段。
-const CurrentTraceVersion uint32 = 4
+// CurrentTraceVersion 是正式 v1 Trace schema。pre-v1 Trace 不提供兼容重放。
+const CurrentTraceVersion uint32 = 1
 
 // StepRecord 表示具体 Trace 中一次已经解析并执行的状态转换。
 type StepRecord struct {
@@ -105,8 +103,11 @@ func (t *Trace) Append(step StepRecord) error {
 	if err := step.Validate(); err != nil {
 		return err
 	}
-	if t.Version >= 2 && (len(step.NodesBefore) == 0 || len(step.NodesAfter) == 0) {
-		return invalidValue("step_record", "nodes", "version 2 requires before/after node snapshots")
+	if len(step.NodesBefore) == 0 || len(step.NodesAfter) == 0 {
+		return invalidValue("step_record", "nodes", "before/after node snapshots are required")
+	}
+	if step.ObservationDigest == "" {
+		return invalidValue("step_record", "observation_digest", "is required")
 	}
 	if expected := uint64(len(t.Steps)); step.Index != expected {
 		return invalidValue("step_record", "index", "must be the next contiguous index")
@@ -119,7 +120,7 @@ func (t *Trace) Append(step StepRecord) error {
 }
 
 func (t Trace) Validate() error {
-	if t.Version == 0 || t.Version > CurrentTraceVersion {
+	if t.Version != CurrentTraceVersion {
 		return invalidValue("trace", "version", "is unsupported")
 	}
 	if !t.ExecutionID.Valid() {
@@ -132,8 +133,11 @@ func (t Trace) Validate() error {
 		if err := step.Validate(); err != nil {
 			return err
 		}
-		if t.Version >= 2 && (len(step.NodesBefore) == 0 || len(step.NodesAfter) == 0) {
-			return invalidValue("trace", "steps", "version 2 steps require before/after node snapshots")
+		if len(step.NodesBefore) == 0 || len(step.NodesAfter) == 0 {
+			return invalidValue("trace", "steps", "before/after node snapshots are required")
+		}
+		if step.ObservationDigest == "" {
+			return invalidValue("trace", "steps", "observation digest is required")
 		}
 		if i > 0 && step.TimeBefore != t.Steps[i-1].TimeAfter {
 			return invalidValue("trace", "steps", "logical time must be contiguous")

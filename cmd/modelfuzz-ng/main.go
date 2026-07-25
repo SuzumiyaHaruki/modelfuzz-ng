@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/minimize"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 	raftmodel "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/raft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
@@ -33,6 +36,8 @@ import (
 	tracepkg "github.com/SuzumiyaHaruki/modelfuzz-ng/internal/trace"
 	raft "go.etcd.io/raft/v3"
 )
+
+const releaseVersion = "v1.0.0"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -56,8 +61,16 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return runCommand(ctx, args[1:], stdout, stderr)
 	case "replay":
 		return replayCommand(ctx, args[1:], stdout, stderr)
+	case "minimize":
+		return minimizeCommand(ctx, args[1:], stdout, stderr)
 	case "experiment":
 		return experimentCommand(ctx, args[1:], stdout, stderr)
+	case "version":
+		if len(args) != 1 {
+			return fmt.Errorf("version 子命令不接受参数")
+		}
+		_, err := fmt.Fprintf(stdout, "modelfuzz-ng %s\n", releaseVersion)
+		return err
 	case "help", "-h", "--help":
 		printRootUsage(stdout)
 		return flag.ErrHelp
@@ -96,10 +109,14 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	lifecycleCooldown := flags.Int("lifecycle-cooldown", 48, "两次 crash 周期之间至少间隔的 Action 数")
 	maxCrashEpisodes := flags.Int("max-crash-episodes", 4, "单条轨迹允许的最大 crash/restart 周期数")
 	crashRestartPairPercent := flags.Int("crash-restart-pair-percent", 5, "随机变异插入 crash/restart 对的百分比")
+	partitionHealPairPercent := flags.Int("partition-heal-pair-percent", 5, "随机变异插入 partition/heal 对的百分比")
 	crashWeight := flags.Int("crash-weight", 1, "在线 balanced 随机策略的 crash 权重")
 	restartWeight := flags.Int("restart-weight", 10, "在线 balanced 随机策略的 restart 权重")
+	partitionWeight := flags.Int("partition-weight", 2, "在线 balanced 随机策略的 partition 权重")
+	healWeight := flags.Int("heal-weight", 8, "在线 balanced 随机策略的 heal 权重")
 	randomSeedInterval := flags.Int("random-seed-interval", 0, "每完成多少次执行优先注入在线随机种子；0 表示关闭")
 	randomSeedsPerInterval := flags.Int("random-seeds-per-interval", 1, "每次周期注入的在线随机种子数")
+	initialPolicy := flags.String("initial-policy", "random", "在线种子策略: random、snapshot-partition、snapshot-failure 或 snapshot-fast-forward")
 	llmProvider := flags.String("llm-provider", string(llm.DefaultProvider), "LLM provider: deepseek、glm、qwen 或 kimi")
 	llmModel := flags.String("llm-model", "", "覆盖 provider 的默认模型")
 	llmBaseURL := flags.String("llm-base-url", "", "覆盖 provider 的 OpenAI-compatible API 基础地址")
@@ -134,8 +151,28 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 			return fmt.Errorf("读取恢复点: %w", err)
 		}
 		var savedSettings experimentSettings
-		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "experiment-settings.json"), &savedSettings); err != nil {
+		settingsPath := filepath.Join(resumeDirectory, "experiment-settings.json")
+		settingsData, err := os.ReadFile(settingsPath)
+		if err != nil {
 			return fmt.Errorf("读取原实验设置: %w", err)
+		}
+		if err := decodeStrictJSON(settingsData, &savedSettings); err != nil {
+			return fmt.Errorf("读取原实验设置: %w", err)
+		}
+		if savedSettings.ReleaseVersion != releaseVersion {
+			return fmt.Errorf(
+				"不支持 release version %q；当前版本要求 %q",
+				savedSettings.ReleaseVersion, releaseVersion,
+			)
+		}
+		if savedSettings.SemanticSchema != raftmodel.SemanticSchemaVersion {
+			return fmt.Errorf(
+				"不支持 semantic schema %q；当前版本要求 %q",
+				savedSettings.SemanticSchema, raftmodel.SemanticSchemaVersion,
+			)
+		}
+		if savedSettings.OnlinePolicy == "" {
+			return fmt.Errorf("原实验设置缺少 online_policy")
 		}
 		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "llm-stats.json"), &previousLLMStats); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("读取原 LLM 统计: %w", err)
@@ -167,20 +204,28 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		if !setFlags["llm-timeout"] && savedSettings.LLMTimeoutMillis > 0 {
 			*llmTimeout = time.Duration(savedSettings.LLMTimeoutMillis) * time.Millisecond
 		}
+		savedOnlinePolicy := savedSettings.OnlinePolicy
+		if setFlags["initial-policy"] && *initialPolicy != savedOnlinePolicy {
+			return fmt.Errorf("恢复时 -initial-policy=%s 与原实验中的 %s 不一致", *initialPolicy, savedOnlinePolicy)
+		}
+		*initialPolicy = savedOnlinePolicy
 		resumeValues := map[string][2]int{
 			"runs": {*runs, resumeCheckpoint.Config.Runs}, "parallelism": {*parallelism, resumeCheckpoint.Config.Parallelism},
-			"initial-population":         {*initialPopulation, resumeCheckpoint.Config.InitialPopulation},
-			"mutations-per-state":        {*mutationsPerState, resumeCheckpoint.Config.MutationsPerNewState},
-			"max-mutations-per-corpus":   {*maxMutationsPerCorpus, resumeCheckpoint.Config.MaxMutationsPerCorpus},
-			"max-ready-candidates":       {*maxReadyCandidates, resumeCheckpoint.Config.MaxReadyCandidates},
-			"min-new-model-states":       {*minNewModelStates, resumeCheckpoint.Config.MinNewModelStates},
-			"lifecycle-cooldown":         {*lifecycleCooldown, resumeCheckpoint.Config.LifecycleCooldown},
-			"max-crash-episodes":         {*maxCrashEpisodes, resumeCheckpoint.Config.MaxCrashEpisodes},
-			"crash-restart-pair-percent": {*crashRestartPairPercent, resumeCheckpoint.Config.CrashRestartPairPercent},
-			"crash-weight":               {*crashWeight, resumeCheckpoint.Config.CrashWeight},
-			"restart-weight":             {*restartWeight, resumeCheckpoint.Config.RestartWeight},
-			"random-seed-interval":       {*randomSeedInterval, resumeCheckpoint.Config.RandomSeedInterval},
-			"random-seeds-per-interval":  {*randomSeedsPerInterval, resumeCheckpoint.Config.RandomSeedsPerInterval},
+			"initial-population":          {*initialPopulation, resumeCheckpoint.Config.InitialPopulation},
+			"mutations-per-state":         {*mutationsPerState, resumeCheckpoint.Config.MutationsPerNewState},
+			"max-mutations-per-corpus":    {*maxMutationsPerCorpus, resumeCheckpoint.Config.MaxMutationsPerCorpus},
+			"max-ready-candidates":        {*maxReadyCandidates, resumeCheckpoint.Config.MaxReadyCandidates},
+			"min-new-model-states":        {*minNewModelStates, resumeCheckpoint.Config.MinNewModelStates},
+			"lifecycle-cooldown":          {*lifecycleCooldown, resumeCheckpoint.Config.LifecycleCooldown},
+			"max-crash-episodes":          {*maxCrashEpisodes, resumeCheckpoint.Config.MaxCrashEpisodes},
+			"crash-restart-pair-percent":  {*crashRestartPairPercent, resumeCheckpoint.Config.CrashRestartPairPercent},
+			"crash-weight":                {*crashWeight, resumeCheckpoint.Config.CrashWeight},
+			"restart-weight":              {*restartWeight, resumeCheckpoint.Config.RestartWeight},
+			"partition-heal-pair-percent": {*partitionHealPairPercent, resumeCheckpoint.Config.PartitionHealPairPercent},
+			"partition-weight":            {*partitionWeight, resumeCheckpoint.Config.PartitionWeight},
+			"heal-weight":                 {*healWeight, resumeCheckpoint.Config.HealWeight},
+			"random-seed-interval":        {*randomSeedInterval, resumeCheckpoint.Config.RandomSeedInterval},
+			"random-seeds-per-interval":   {*randomSeedsPerInterval, resumeCheckpoint.Config.RandomSeedsPerInterval},
 		}
 		for name, values := range resumeValues {
 			if setFlags[name] && values[0] != values[1] {
@@ -202,6 +247,9 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		*crashRestartPairPercent = resumeCheckpoint.Config.CrashRestartPairPercent
 		*crashWeight = resumeCheckpoint.Config.CrashWeight
 		*restartWeight = resumeCheckpoint.Config.RestartWeight
+		*partitionHealPairPercent = resumeCheckpoint.Config.PartitionHealPairPercent
+		*partitionWeight = resumeCheckpoint.Config.PartitionWeight
+		*healWeight = resumeCheckpoint.Config.HealWeight
 		*semanticCoverage = resumeCheckpoint.Config.SemanticCoverage
 		*randomSeedInterval = resumeCheckpoint.Config.RandomSeedInterval
 		*randomSeedsPerInterval = resumeCheckpoint.Config.RandomSeedsPerInterval
@@ -269,6 +317,16 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	if *maxPlanActions <= 0 {
 		return fmt.Errorf("-max-plan-actions 必须为正数")
 	}
+	if *initialPolicy != "random" && *initialPolicy != "snapshot-partition" &&
+		*initialPolicy != "snapshot-failure" && *initialPolicy != "snapshot-fast-forward" {
+		return fmt.Errorf(
+			"未知 -initial-policy=%q；可选 random、snapshot-partition、snapshot-failure、snapshot-fast-forward",
+			*initialPolicy,
+		)
+	}
+	if *initialPolicy != "random" && config.Raft.Snapshot.Threshold == 0 {
+		return fmt.Errorf("-initial-policy=%s 要求启用 snapshot-threshold", *initialPolicy)
+	}
 	if config.TLC.Address != "" && *parallelism != 1 {
 		return fmt.Errorf("旧 controlled TLC 不保证请求隔离，连接 TLC 时 -parallelism 必须为1")
 	}
@@ -286,6 +344,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		MinNewModelStates: *minNewModelStates, SemanticCoverage: *semanticCoverage,
 		LifecycleCooldown: *lifecycleCooldown, MaxCrashEpisodes: *maxCrashEpisodes,
 		CrashRestartPairPercent: *crashRestartPairPercent, CrashWeight: *crashWeight, RestartWeight: *restartWeight,
+		PartitionHealPairPercent: *partitionHealPairPercent, PartitionWeight: *partitionWeight, HealWeight: *healWeight,
 	}
 	runner, err := experiment.New(experimentConfig)
 	if err != nil {
@@ -301,11 +360,14 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	policyConfig.MaxCrashEpisodes = experimentConfig.MaxCrashEpisodes
 	policyConfig.Weights.Crash = experimentConfig.CrashWeight
 	policyConfig.Weights.Restart = experimentConfig.RestartWeight
+	policyConfig.Weights.Partition = experimentConfig.PartitionWeight
+	policyConfig.Weights.Heal = experimentConfig.HealWeight
 	mutationConfig := mutation.RandomConfig{
 		NodeIDs: append([]core.NodeID(nil), config.Raft.NodeIDs...), MaxValue: config.Model.MaxValue,
 		MaxTicks: 5, MaxActions: *maxPlanActions, MaxCrashed: policyConfig.MaxCrashed,
 		LifecycleCooldown: experimentConfig.LifecycleCooldown, MaxCrashEpisodes: experimentConfig.MaxCrashEpisodes,
-		CrashRestartPairPercent: experimentConfig.CrashRestartPairPercent,
+		CrashRestartPairPercent:  experimentConfig.CrashRestartPairPercent,
+		PartitionHealPairPercent: experimentConfig.PartitionHealPairPercent,
 	}
 	localMutator, err := mutation.NewRandom(mutationConfig)
 	if err != nil {
@@ -315,7 +377,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	var llmClient *llm.Client
 	var effectiveLLMProvider llm.Provider
 	var effectiveLLMModel, effectiveLLMBaseURL, effectiveAPIKeyEnv string
-	feedbackOptions := experiment.FeedbackOptions{InitializerName: "random_init"}
+	feedbackOptions := experiment.FeedbackOptions{InitializerName: *initialPolicy + "_init"}
 	if *llmInit || *llmMutate {
 		effectiveLLMProvider, err = llm.ParseProvider(*llmProvider)
 		if err != nil {
@@ -371,9 +433,9 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 	}
 	feedbackOptions.Mutator = selectedMutator
-	feedbackOptions.CoverageProjector = func(states []model.State, events []model.Event) corpus.Projection {
-		projection := raftmodel.ProjectCoverage(states, events)
-		return corpus.Projection{StateKeys: projection.StateKeys, TransitionKeys: projection.TransitionKeys}
+	feedbackOptions.CoverageProjector = func(states []model.State, events []model.Event) (corpus.Projection, error) {
+		projection, projectionErr := raftmodel.ProjectCoverage(states, events)
+		return corpus.Projection{StateKeys: projection.StateKeys, TransitionKeys: projection.TransitionKeys}, projectionErr
 	}
 	feedbackOptions.Resume = resumeCheckpoint
 	feedbackOptions.CheckpointEvery = *checkpointEvery
@@ -385,8 +447,9 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		return fmt.Errorf("恢复目录 %s 不存在或不是目录", *outputPath)
 	}
 	settings := experimentSettings{
+		ReleaseVersion: releaseVersion, SemanticSchema: raftmodel.SemanticSchemaVersion,
 		LLMInit: *llmInit, LLMMutate: *llmMutate, Initializer: feedbackOptions.InitializerName,
-		Mutator: selectedMutator.Name(), RandomMutation: mutationConfig,
+		OnlinePolicy: *initialPolicy, Mutator: selectedMutator.Name(), RandomMutation: mutationConfig,
 		ArtifactPolicy: artifactPolicy, CheckpointEvery: *checkpointEvery,
 	}
 	if *llmInit || *llmMutate {
@@ -483,7 +546,8 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 			var result engine.Result
 			var engineErr error
 			if candidate.Plan == nil {
-				policy, err := randompolicy.NewRandom(seed, policyConfig)
+				policy, err := buildOnlinePolicy(*initialPolicy, seed, policyConfig,
+					config.Raft.Snapshot.Threshold, config.Raft.Snapshot.RetainEntries)
 				if err != nil {
 					return experiment.FeedbackExecution{}, err
 				}
@@ -541,6 +605,38 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	return errors.Join(runErr, storeErr, outputErr)
 }
 
+type sequencedActionSource interface {
+	engine.ActionSource
+	Sequence() plan.PlanSequence
+}
+
+func buildOnlinePolicy(name string, seed int64, randomConfig randompolicy.RandomConfig, snapshotThreshold, snapshotRetainEntries uint64) (sequencedActionSource, error) {
+	switch name {
+	case "random":
+		return randompolicy.NewRandom(seed, randomConfig)
+	case "snapshot-partition":
+		return randompolicy.NewSnapshotPartition(seed, randompolicy.SnapshotPartitionConfig{
+			NodeIDs: append([]core.NodeID(nil), randomConfig.NodeIDs...), MaxValue: randomConfig.MaxValue,
+			MaxLogIndex: randomConfig.MaxLogIndex, SnapshotThreshold: snapshotThreshold,
+			RetainEntries: snapshotRetainEntries, DuplicateSnapshot: true,
+		})
+	case "snapshot-failure":
+		return randompolicy.NewSnapshotPartition(seed, randompolicy.SnapshotPartitionConfig{
+			NodeIDs: append([]core.NodeID(nil), randomConfig.NodeIDs...), MaxValue: randomConfig.MaxValue,
+			MaxLogIndex: randomConfig.MaxLogIndex, SnapshotThreshold: snapshotThreshold,
+			RetainEntries: snapshotRetainEntries, FailFirstSnapshot: true,
+		})
+	case "snapshot-fast-forward":
+		return randompolicy.NewSnapshotFastForward(seed, randompolicy.SnapshotFastForwardConfig{
+			NodeIDs: append([]core.NodeID(nil), randomConfig.NodeIDs...), MaxValue: randomConfig.MaxValue,
+			MaxLogIndex: randomConfig.MaxLogIndex, SnapshotThreshold: snapshotThreshold,
+			RetainEntries: snapshotRetainEntries,
+		})
+	default:
+		return nil, fmt.Errorf("unknown online policy %q", name)
+	}
+}
+
 func replayCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("modelfuzz-ng replay", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -587,6 +683,156 @@ func replayCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	_, outputErr := fmt.Fprintf(stdout, "重放结束: status=%s matched_steps=%d output=%s\n",
 		result.Status, result.MatchedSteps, *outputPath)
 	return errors.Join(replayErr, outputErr)
+}
+
+func minimizeCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("modelfuzz-ng minimize", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	planPath := flags.String("plan", "", "产生失败的 PlanSequence JSON 文件（必填）")
+	outputPath := flags.String("output", "", "新的最短反例产物目录（必填，不覆盖）")
+	resumePath := flags.String("resume", "", "从已有最小化产物目录继续")
+	configPath := flags.String("config", "", "配置文件；默认优先使用 Plan 同目录的 config.json")
+	tlcAddress := flags.String("tlc", "", "覆盖配置中的 controlled TLC 地址")
+	maxAttempts := flags.Int("max-attempts", minimize.DefaultConfig().MaxAttempts, "最多执行的缩减尝试数（包含稳定性验证）")
+	verifyRuns := flags.Int("verify-runs", minimize.DefaultConfig().VerifyRuns, "缩减前重复验证原始 failure 签名的次数")
+	finalVerifyRuns := flags.Int("final-verify-runs", minimize.DefaultConfig().FinalVerifyRuns, "最终候选独立重复验证次数")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("无法识别的位置参数: %v", flags.Args())
+	}
+	setFlags := make(map[string]bool)
+	flags.Visit(func(value *flag.Flag) { setFlags[value.Name] = true })
+	if *resumePath == "" && (*planPath == "" || *outputPath == "") {
+		flags.Usage()
+		return fmt.Errorf("新缩减需要 -plan 和 -output，恢复缩减需要 -resume")
+	}
+	var resumeCheckpoint *minimize.Checkpoint
+	if *resumePath != "" {
+		if *planPath != "" || *outputPath != "" || *configPath != "" || setFlags["tlc"] {
+			return fmt.Errorf("-resume 不能与 -plan、-output、-config 或 -tlc 同时使用")
+		}
+		*outputPath = filepath.Clean(*resumePath)
+		*planPath = filepath.Join(*outputPath, "original-plan.json")
+		*configPath = filepath.Join(*outputPath, "config.json")
+		resumeCheckpoint = &minimize.Checkpoint{}
+		if err := persistence.ReadJSON(filepath.Join(*outputPath, "minimization-checkpoint.json"), resumeCheckpoint); err != nil {
+			return fmt.Errorf("读取最小化恢复点: %w", err)
+		}
+		if resumeCheckpoint.Complete {
+			return fmt.Errorf("最小化恢复点已经完成")
+		}
+		if !setFlags["verify-runs"] {
+			*verifyRuns = resumeCheckpoint.VerifyRuns
+		}
+		if !setFlags["final-verify-runs"] {
+			*finalVerifyRuns = resumeCheckpoint.FinalVerifyRuns
+		}
+	} else if *configPath == "" {
+		adjacent := filepath.Join(filepath.Dir(*planPath), "config.json")
+		if information, err := os.Stat(adjacent); err == nil && !information.IsDir() {
+			*configPath = adjacent
+		}
+	}
+	if *configPath == "" {
+		return fmt.Errorf("minimize 要求显式 -config，或 Plan 同目录必须存在 config.json")
+	}
+	config, err := loadCLIConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	if flagWasSet(flags, "tlc") {
+		config.TLC.Address = *tlcAddress
+	}
+	if err := validateAlignedNodes(config.Raft.NodeIDs, config.Model.NodeIDs); err != nil {
+		return fmt.Errorf("raft/模型配置不一致: %w", err)
+	}
+	if err := validateTLCModelBounds(ctx, config, stderr); err != nil {
+		return err
+	}
+	sequence, err := readPlan(*planPath)
+	if err != nil {
+		return err
+	}
+	inputPlanSHA256, err := fileSHA256(*planPath)
+	if err != nil {
+		return err
+	}
+	configSHA256, err := fileSHA256(*configPath)
+	if err != nil {
+		return err
+	}
+	if resumeCheckpoint != nil {
+		if inputPlanSHA256 != resumeCheckpoint.InputPlanSHA256 || configSHA256 != resumeCheckpoint.ConfigSHA256 {
+			return fmt.Errorf("最小化恢复点的 Plan 或配置摘要不匹配")
+		}
+	} else {
+		if err := createOutputDirectory(*outputPath); err != nil {
+			return err
+		}
+		if err := writeJSONFile(filepath.Join(*outputPath, "config.json"), config); err != nil {
+			return err
+		}
+		if err := writeJSONFile(filepath.Join(*outputPath, "original-plan.json"), sequence); err != nil {
+			return err
+		}
+		inputPlanSHA256, err = fileSHA256(filepath.Join(*outputPath, "original-plan.json"))
+		if err != nil {
+			return err
+		}
+		configSHA256, err = fileSHA256(filepath.Join(*outputPath, "config.json"))
+		if err != nil {
+			return err
+		}
+	}
+	var lastCheckpoint minimize.Checkpoint
+	reduced, err := minimize.Reduce(ctx, sequence, minimize.Config{
+		MaxAttempts: *maxAttempts, VerifyRuns: *verifyRuns, FinalVerifyRuns: *finalVerifyRuns,
+		Resume: resumeCheckpoint, InputPlanSHA256: inputPlanSHA256, ConfigSHA256: configSHA256,
+		OnCheckpoint: func(checkpoint minimize.Checkpoint) error {
+			lastCheckpoint = checkpoint
+			// Do not expose a completed checkpoint until all final artifacts below
+			// have been written successfully.
+			checkpoint.Complete = false
+			return persistence.WriteJSONAtomic(filepath.Join(*outputPath, "minimization-checkpoint.json"), checkpoint)
+		},
+	}, func(trialContext context.Context, candidate plan.PlanSequence) (engine.Result, error) {
+		trialEngine, buildErr := buildEngine(config, stderr)
+		if buildErr != nil {
+			return engine.Result{}, buildErr
+		}
+		return trialEngine.Run(trialContext, candidate)
+	})
+	if err != nil {
+		return err
+	}
+	if err := writeArtifacts(*outputPath, config, reduced.Plan, reduced.MinimizedExecution); err != nil {
+		return err
+	}
+	for _, artifact := range []struct {
+		name  string
+		value any
+	}{
+		{name: "original-plan.json", value: sequence},
+		{name: "minimized-plan.json", value: reduced.Plan},
+		{name: "baseline-result.json", value: reduced.BaselineExecution},
+		{name: "minimization-report.json", value: reduced.Report},
+	} {
+		if err := writeJSONFile(filepath.Join(*outputPath, artifact.name), artifact.value); err != nil {
+			return err
+		}
+	}
+	lastCheckpoint.Complete = true
+	if err := writeJSONFile(filepath.Join(*outputPath, "minimization-checkpoint.json"), lastCheckpoint); err != nil {
+		return err
+	}
+	_, outputErr := fmt.Fprintf(stdout,
+		"缩减结束: status=%s actions=%d->%d attempts=%d one_minimal=%v output=%s\n",
+		reduced.Report.Signature.Status, reduced.Report.OriginalActions, reduced.Report.MinimizedActions,
+		reduced.Report.Attempts, reduced.Report.OneMinimal, *outputPath,
+	)
+	return outputErr
 }
 
 func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -739,6 +985,30 @@ func validateTLCModelBounds(ctx context.Context, config cliConfig, warnings io.W
 			bounds.LargestTerm, bounds.MaxLogIndex, config.Model.LargestTerm, config.Model.MaxLogIndex,
 		)
 	}
+	wantProfile := config.Model.EffectiveProfile()
+	if bounds.ModelProfile == "" {
+		_, _ = fmt.Fprintln(warnings, "警告: TLC 服务未暴露 model_profile，无法自动核对 basic/storage-snapshot 模型")
+	} else if bounds.ModelProfile != wantProfile {
+		return fmt.Errorf("TLC/Go 模型 profile 不一致: TLC=%s，Go=%s", bounds.ModelProfile, wantProfile)
+	}
+	if len(bounds.ServerIDs) == 0 || bounds.MaxValue == nil {
+		_, _ = fmt.Fprintln(warnings, "警告: TLC 服务未暴露 Server/MaxValue，无法自动核对节点集合和取值边界")
+		return nil
+	}
+	wantNodes := make([]uint64, len(config.Model.NodeIDs))
+	for index, node := range config.Model.NodeIDs {
+		wantNodes[index] = uint64(node)
+	}
+	sort.Slice(wantNodes, func(i, j int) bool { return wantNodes[i] < wantNodes[j] })
+	gotNodes := append([]uint64(nil), bounds.ServerIDs...)
+	sort.Slice(gotNodes, func(i, j int) bool { return gotNodes[i] < gotNodes[j] })
+	if !reflect.DeepEqual(gotNodes, wantNodes) || *bounds.MaxValue != uint64(config.Model.MaxValue) {
+		return fmt.Errorf("TLC/Go 模型边界不一致: TLC Server=%v MaxValue=%d，Go Server=%v MaxValue=%d",
+			gotNodes, *bounds.MaxValue, wantNodes, config.Model.MaxValue)
+	}
+	if bounds.NilValue != nil && *bounds.NilValue != 0 {
+		return fmt.Errorf("TLC/Go 模型边界不一致: TLC Nil=%d，Go Nil=0", *bounds.NilValue)
+	}
 	return nil
 }
 
@@ -776,7 +1046,9 @@ func printRootUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, "用法:")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng run -plan PLAN.json -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng minimize -plan PLAN.json -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng version")
 	_, _ = fmt.Fprintln(output)
 	_, _ = fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
 }

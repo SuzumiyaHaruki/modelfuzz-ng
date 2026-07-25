@@ -36,16 +36,20 @@ type Config struct {
 	Logger raft.Logger
 }
 
-// FaultPolicy 保存只用于受控缺陷复现实验的 SUT fault injection。正常运行的
-// VoteQuorumDivisor 为2，即 floor(n/2)+1；设为3复现 ModelFuzz 论文中的
-// floor(n/3)+1 选举 quorum mutant。
+// FaultPolicy 保存只用于受控缺陷复现实验的 fault injection。所有字段的默认值
+// 都保持正确实现；非默认值必须由实验配置显式开启。
 type FaultPolicy struct {
-	VoteQuorumDivisor int `json:"vote_quorum_divisor"`
+	VoteQuorumDivisor    int    `json:"vote_quorum_divisor"`
+	SnapshotStatusMap    string `json:"snapshot_status_mapping"`
+	RestartLoseHardState bool   `json:"restart_lose_hard_state"`
 }
 
 const (
 	normalVoteQuorumDivisor   = 2
 	weakenedVoteQuorumDivisor = 3
+
+	SnapshotStatusMappingCorrect = "correct"
+	SnapshotStatusMappingInvert  = "invert"
 )
 
 // SnapshotPolicy 模拟应用层按已应用日志数量维护 snapshot 和压缩日志。
@@ -65,7 +69,10 @@ func DefaultConfig() Config {
 		MaxSizePerMsg:    math.MaxUint64,
 		MaxInflightMsgs:  256,
 		MaxInflightBytes: math.MaxUint64,
-		Faults:           FaultPolicy{VoteQuorumDivisor: normalVoteQuorumDivisor},
+		Faults: FaultPolicy{
+			VoteQuorumDivisor: normalVoteQuorumDivisor,
+			SnapshotStatusMap: SnapshotStatusMappingCorrect,
+		},
 	}
 }
 
@@ -91,6 +98,9 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.Faults.VoteQuorumDivisor == 0 {
 		c.Faults.VoteQuorumDivisor = defaults.Faults.VoteQuorumDivisor
+	}
+	if c.Faults.SnapshotStatusMap == "" {
+		c.Faults.SnapshotStatusMap = defaults.Faults.SnapshotStatusMap
 	}
 
 	c.NodeIDs = append([]core.NodeID(nil), c.NodeIDs...)
@@ -126,6 +136,13 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.Faults.VoteQuorumDivisor == weakenedVoteQuorumDivisor && len(c.NodeIDs) < 4 {
 		return Config{}, fmt.Errorf("%w: vote quorum divisor 3 needs at least four voters to differ from majority", ErrInvalidConfig)
+	}
+	if c.Faults.SnapshotStatusMap != SnapshotStatusMappingCorrect &&
+		c.Faults.SnapshotStatusMap != SnapshotStatusMappingInvert {
+		return Config{}, fmt.Errorf(
+			"%w: snapshot status mapping must be %q or %q",
+			ErrInvalidConfig, SnapshotStatusMappingCorrect, SnapshotStatusMappingInvert,
+		)
 	}
 	return c, nil
 }

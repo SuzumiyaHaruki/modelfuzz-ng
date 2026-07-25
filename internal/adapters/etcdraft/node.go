@@ -137,9 +137,8 @@ func (n *node) refreshLogState() error {
 	}
 	n.lastSnapshotIndex = snapshot.GetMetadata().GetIndex()
 	n.lastSnapshotTerm = snapshot.GetMetadata().GetTerm()
-	entries := make([]*raftpb.Entry, 0)
 	if first <= last {
-		entries, err = n.storage.Entries(first, last+1, math.MaxUint64)
+		entries, err := n.storage.Entries(first, last+1, math.MaxUint64)
 		if err != nil {
 			return err
 		}

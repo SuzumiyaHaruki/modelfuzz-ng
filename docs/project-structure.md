@@ -8,7 +8,7 @@
 
 - `已有`：当前已经存在；
 - `近期`：完成基础执行链路需要优先增加；
-- `后续`：第一版可以不实现；
+- `后续`：正式 v1 可以不实现；
 - `可选`：是否需要取决于后续复杂度。
 
 ## 2. Workspace关系
@@ -158,6 +158,7 @@ modelfuzz-ng/
 ├── examples/
 │   ├── config.json
 │   ├── config-quorum-mutant.json
+│   ├── config-5nodes-snapshot.json
 │   ├── config-soak-10.json
 │   ├── config-snapshot.json
 │   └── plans/
@@ -165,6 +166,7 @@ modelfuzz-ng/
 │       ├── election-commit-node1.json
 │       ├── election-commit-node2.json
 │       ├── election.json
+│       ├── network-partition-merge.json
 │       └── quorum-one-third-mutant.json
 ├── models/
 │   └── raft/
@@ -173,6 +175,12 @@ modelfuzz-ng/
 │       ├── raft-5.cfg
 │       ├── raft-10.cfg
 │       ├── raft-5nodes-10.cfg
+│       ├── raft_storage_snapshot.tla
+│       ├── raft-storage-snapshot-5.cfg
+│       ├── raft-storage-snapshot-10.cfg
+│       ├── raft-storage-snapshot-5nodes-10.cfg
+│       ├── raft-storage-snapshot-progress.cfg
+│       ├── raft-storage-snapshot.cfg
 │       └── raft.tla
 ├── tools/
 │   └── tlc-server/                  # NG自有严格controlled TLC服务
@@ -186,12 +194,11 @@ modelfuzz-ng/
 └── go.sum
 ```
 
-当前阶段已经完成协议无关的 core 数据模型、最小 SUT 接口、基础 Runtime、
-可通过 Runtime 端到端运行的 `internal/adapters/etcdraft` 最小适配器，以及
-Concrete Transition 到 Raft TLA+ 事件的映射、TLC HTTP 客户端，以及
-Plan 数据结构和 Resolver。当前也已经具备 Engine、反馈式 Experiment 和 CLI，
-可以把 JSON Plan、真实 Raft、模型事件映射和 NG 自有严格 controlled TLC 串成一次
-完整执行，并持久化全部中间产物；LLM 初始化与变异是默认关闭的可选策略。
+正式 v1 已完成协议无关的 core 数据模型、SUT 接口、确定性 Runtime、
+`internal/adapters/etcdraft`、Raft Basic/Storage-Snapshot 模型映射、strict TLC HTTP
+客户端、Plan/Resolver、Engine、反馈式 Experiment、Replay、Minimize 和 CLI。它可以
+把 JSON Plan、真实 Raft、模型事件、Oracle 与 NG 自有 controlled TLC 串成完整执行，
+并持久化 Trace、Corpus、checkpoint 和统计；LLM 初始化与变异是默认关闭的可选策略。
 
 ## 4. 建议的目标目录
 
@@ -285,6 +292,10 @@ modelfuzz-ng/
 │   ├── policy/                       # 在线计划生成和调度策略
 │   │   ├── random.go                 # 已有：确定性基础随机策略
 │   │   ├── random_test.go
+│   │   ├── snapshot_partition.go     # 已有：观察驱动的partition/compaction/MsgSnap定向策略
+│   │   ├── snapshot_partition_test.go
+│   │   ├── snapshot_fast_forward.go  # 已有：乱序append触发真实snapshot fast-forward
+│   │   ├── snapshot_fast_forward_test.go
 │   │   ├── llm.go                    # 已有：LLM prompt、解析和边界校验
 │   │   ├── llm_test.go
 │   │   ├── fair.go                   # 后续：有限公平/消息年龄策略
@@ -310,8 +321,11 @@ modelfuzz-ng/
 │   │   ├── io.go                     # JSON读写
 │   │   ├── replay.go                 # Concrete replay
 │   │   ├── compare.go                # Effect/状态差异比较
-│   │   ├── minimize.go               # 后续：失败轨迹缩减
 │   │   └── *_test.go
+│   │
+│   ├── minimize/                     # 已有：保持失败签名的Plan缩减
+│   │   ├── minimize.go               # ddmin、单Action固定点、缓存和checkpoint/resume
+│   │   └── minimize_test.go
 │   │
 │   ├── corpus/                       # 已有：有价值Plan、增量覆盖键及紧凑checkpoint水位
 │   │   ├── corpus.go
@@ -336,7 +350,9 @@ modelfuzz-ng/
 │       ├── raft.cfg                  # 兼容的5/5配置
 │       ├── raft-5.cfg                # 明确的烟雾边界
 │       ├── raft-10.cfg               # 原ModelFuzz主实验边界
-│       └── raft-5nodes-10.cfg        # 五节点10/10 quorum mutant实验
+│       ├── raft-5nodes-10.cfg        # 五节点10/10 quorum mutant实验
+│       ├── raft_storage_snapshot.tla # Storage边界与Leader snapshot progress扩展
+│       └── raft-storage-snapshot-*.cfg
 │
 ├── tools/                            # 非Go的构建与运行工具
 │   └── tlc-server/                   # 已有：严格controlled TLC服务
@@ -371,6 +387,7 @@ modelfuzz-ng/
 | 文件               | 职责                                             |
 | ------------------ | ------------------------------------------------ |
 | `action.go`      | Concrete Action、MessageSelector和ActionSequence |
+| `partition.go`   | 通用多组网络分区、覆盖校验和跨组链路判定       |
 | `effect.go`      | Action产生的消息、timeout和模型事件Effect        |
 | `id.go`          | Node、Message、Execution和Link等稳定ID           |
 | `message.go`     | 协议无关消息信封                                 |
@@ -401,13 +418,14 @@ modelfuzz-ng/
 - Effect收集。
 
 这里不能包含 etcd-raft 特有类型。`AdvanceTime` 由 Runtime 拆成多次
-`Tick`；Drop 和 Duplicate 仅操作 Runtime 的消息队列，不进入 SUT 接口。
+`Tick`；Duplicate 仅操作 Runtime 消息队列。Drop 会通知 SUT Adapter，使
+etcd-raft 能把 `MsgSnap` 丢弃反馈为 `SnapshotFailure`；普通消息仍无额外状态转换。
 
 ### 5.3 `internal/adapters/etcdraft`
 
 负责把通用 Action 翻译成 etcd-raft 行为，并把 Raft 结果翻译成 core Effect。
 
-第一版重点：
+正式 v1 基线：
 
 - `RawNode + MemoryStorage`；
 - 三个普通 voter；
@@ -420,6 +438,7 @@ modelfuzz-ng/
 - 可选的应用层 `SnapshotPolicy`，按 applied entry 数确定性调用
   `CreateSnapshot`/`Compact`；策略默认关闭；
 - Snapshot Data 保存确定性 committed-prefix 摘要，日志压缩后 Oracle 仍可比较逻辑前缀；
+- Raft Oracle 检查 snapshot/applied/commit/log 边界、压缩覆盖关系，以及稳定状态跨重启不回退；
 - `MsgSnap` 不设置专用 Action，仍从 Ready.Messages 进入 Runtime 统一网络队列。
 
 ### 5.4 `internal/runtime`
@@ -431,6 +450,7 @@ modelfuzz-ng/
 - MessageID和LinkSequence分配；
 - 使用最新 Observation 检查节点运行状态；
 - Action前置条件校验；
+- 单个活动网络分区；跨组消息继续排队并标记 blocked，heal 后恢复投递；
 - Effect时间校验；
 - Trace追加；
 - 捕获同步 Adapter/SUT panic，保留已完成 Trace 前缀和结构化失败记录。
@@ -480,8 +500,9 @@ PlanStep 在执行时解析为零到多个 Concrete Action：
 在启动期展开完整 `Next`；`raft.cfg` 保留完整 Spec 供普通 TLC 使用。
 
 模型映射以实际 Effect 为准。例如 `ActionDeliver` 只有在 Adapter 成功接收消息并
-记录 `raft.message_delivered` 后才会变成 `DeliverMessage`。Drop 和 Duplicate
-只改变 Runtime 网络队列，因此可以映射为零条模型事件。
+记录 `raft.message_delivered` 后才会变成 `DeliverMessage`。Duplicate 和普通
+Drop 映射为零条模型事件；Drop `MsgSnap` 产生的 status Effect 在
+storage-snapshot profile 映射为 `HandleSnapshotStatus(success=false)`。
 
 ### 5.7 `internal/engine`
 
@@ -523,7 +544,8 @@ committed-prefix 摘要的日志一致性检查放在 `oracle/raft`。日志进�
 - 保存和加载；
 - 严格重放；
 - Effect和状态比较；
-- 失败轨迹缩减。
+
+失败 Plan 缩减由独立的 `internal/minimize` 实现，避免把多次 Engine 执行和 checkpoint 状态混入 Trace 比较包。
 
 ## 6. 主要数据流
 
@@ -635,9 +657,11 @@ core
 2. Partition/FairDeliver/RunUntilLeader等宏；
 3. 在已有TLA+执行链路上增加模型引导策略；
 4. 多worker并行执行；
-5. Trace minimization；
-6. Snapshot/日志压缩已完成 Adapter、Runtime、Oracle 和基础模型 stutter 支持；
-   PreVote、CheckQuorum、动态 membership 以及完整 InstallSnapshot TLA+ 模型仍属后续扩展。
+5. 已完成 Plan minimization、稳定失败签名、候选缓存和中断恢复；
+6. Snapshot/日志压缩已完成 Adapter、Runtime、Oracle，以及固定 voter 下的
+   Storage/Leader/Follower端到端模型；自然 FastForward 和 MsgSnapStatus
+   成功/失败重试已验证，异常 payload、PreVote、CheckQuorum、动态 membership
+   仍属后续扩展。
 
 ## 9. 维护规则
 

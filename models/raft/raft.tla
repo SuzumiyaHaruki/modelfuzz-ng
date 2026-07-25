@@ -150,8 +150,10 @@ HandleNilAppendEntriesRequest(i, j, pLogIndex, pLogTerm, term, cIndex) ==
     LET acceptable == /\ term >= currentTerm[i]
                        /\ LogMatches(i, pLogIndex, pLogTerm)
         newTerm == IF term > currentTerm[i] THEN term ELSE currentTerm[i]
+        \* Delayed AppendEntries may carry an older leaderCommit. Raft never
+        \* moves a follower's committed index backwards.
         newCommit == IF acceptable
-                     THEN Min({cIndex, Len(log[i])})
+                     THEN Max({commitIndex[i], Min({cIndex, Len(log[i])})})
                      ELSE commitIndex[i]
     IN
     /\ i \in currentActive
@@ -177,7 +179,7 @@ HandleAppendEntriesRequest(i, j, pLogIndex, pLogTerm,
                   THEN log[i]
                   ELSE IF same THEN log[i] ELSE Append(prefix, entry)
         newCommit == IF acceptable
-                     THEN Min({cIndex, Len(newLog)})
+                     THEN Max({commitIndex[i], Min({cIndex, Len(newLog)})})
                      ELSE commitIndex[i]
     IN
     /\ i \in currentActive
@@ -198,15 +200,16 @@ HandleAppendEntriesResponse(i, j, term, success, mIndex) ==
         newer == term > currentTerm[i]
         canUse == /\ current
                   /\ state[i] = Leader
+        newMatch == Max({matchIndex[i][j], mIndex})
         updatedMatch == IF canUse /\ success
-                        THEN [matchIndex EXCEPT ![i][j] = mIndex]
+                        THEN [matchIndex EXCEPT ![i][j] = newMatch]
                         ELSE matchIndex
         updatedNext == IF ~canUse
                        THEN nextIndex
                        ELSE IF success
-                            THEN [nextIndex EXCEPT ![i][j] = mIndex + 1]
+                            THEN [nextIndex EXCEPT ![i][j] = newMatch + 1]
                             ELSE [nextIndex EXCEPT
-                                      ![i][j] = Max({1, nextIndex[i][j] - 1})]
+                                      ![i][j] = matchIndex[i][j] + 1]
         Agree(index) == {i} \cup {k \in Server : updatedMatch[i][k] >= index}
         agreed == {index \in 1..Len(log[i]) : Agree(index) \in Quorum}
         newCommit == IF /\ canUse

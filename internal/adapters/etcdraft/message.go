@@ -40,6 +40,11 @@ func deliveredMessageEffect(at core.LogicalTime, message *raftpb.Message) core.E
 		"reject":   message.GetReject(),
 		"entries":  entries,
 	}
+	if message.GetType() == raftpb.MsgSnap {
+		snapshot := message.GetSnapshot()
+		params["snapshot_index"] = snapshot.GetMetadata().GetIndex()
+		params["snapshot_term"] = snapshot.GetMetadata().GetTerm()
+	}
 	return core.Effect{
 		At:   at,
 		Kind: core.EffectModelEvent,

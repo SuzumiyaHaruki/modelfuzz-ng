@@ -14,7 +14,7 @@ type Transition struct {
 	After  core.Observation
 }
 
-// TransitionFromRecord 使用 Trace v2 中保存的节点快照重建模型映射输入。
+// TransitionFromRecord 使用 Trace 中保存的节点快照重建模型映射输入。
 // 消息队列不属于当前协议模型状态，因此无需恢复完整 Observation。
 func TransitionFromRecord(record core.StepRecord) (Transition, error) {
 	if len(record.NodesBefore) == 0 || len(record.NodesAfter) == 0 {

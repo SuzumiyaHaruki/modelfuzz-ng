@@ -3,6 +3,7 @@ package raft
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
 )
+
+const SemanticSchemaVersion = "raft-coverage-v1"
 
 var (
 	currentTermPattern = regexp.MustCompile(`currentTerm\s*=\s*<<([^>]*)>>`)
@@ -28,11 +31,15 @@ type CoverageProjection struct {
 
 // ProjectCoverage 将 controlled TLC 的初始状态和逐事件后继状态投影为稳定键。
 // TLC 返回 states[0] 为 Init，states[i+1] 为 events[i] 的后继。
-func ProjectCoverage(states []model.State, events []model.Event) CoverageProjection {
+func ProjectCoverage(states []model.State, events []model.Event) (CoverageProjection, error) {
 	projected := make([]string, len(states))
 	stateSet := make(map[int64]struct{}, len(states))
 	for index, state := range states {
-		projected[index] = projectState(state)
+		var err error
+		projected[index], err = projectState(state)
+		if err != nil {
+			return CoverageProjection{}, fmt.Errorf("state %d: %w", index, err)
+		}
 		stateSet[coverageKey(projected[index])] = struct{}{}
 	}
 	transitionSet := make(map[int64]struct{}, min(len(events), max(0, len(states)-1)))
@@ -42,45 +49,88 @@ func ProjectCoverage(states []model.State, events []model.Event) CoverageProject
 	return CoverageProjection{
 		StateKeys:      sortedCoverageKeys(stateSet),
 		TransitionKeys: sortedCoverageKeys(transitionSet),
-	}
+	}, nil
 }
 
-func projectState(state model.State) string {
+func projectState(state model.State) (string, error) {
 	if strings.TrimSpace(state.Text) == "" {
-		return "raw:" + strconv.FormatInt(state.Key, 10)
+		return "", fmt.Errorf("state text is empty (raw key %d)", state.Key)
 	}
 	assignments := stateAssignments(state.Text)
-	if assignments["currentActive"] == "" || assignments["state"] == "" || assignments["currentTerm"] == "" || assignments["log"] == "" {
-		return normalizeRelativeTerms(strings.Join(strings.Fields(state.Text), " "))
+	for _, name := range []string{"currentActive", "state", "currentTerm", "log", "commitIndex", "matchIndex", "votesGranted", "votedFor"} {
+		if assignments[name] == "" {
+			return "", fmt.Errorf("missing %s assignment", name)
+		}
+	}
+	currentTerms := parseUintTuple(assignments["currentTerm"])
+	if len(currentTerms) == 0 {
+		return "", fmt.Errorf("invalid currentTerm assignment")
 	}
 	terms := termRanks("currentTerm = " + assignments["currentTerm"] + " " + assignments["log"])
-	logShape, logLengths, ok := semanticLog(assignments["log"], terms)
+	logShape, logLengths, logTerms, ok := semanticLog(assignments["log"], terms)
 	if !ok {
-		return normalizeRelativeTerms(strings.Join(strings.Fields(state.Text), " "))
+		return "", fmt.Errorf("invalid log assignment")
+	}
+	roles, ok := parseStringTuple(assignments["state"])
+	if !ok || len(roles) != len(logLengths) || len(currentTerms) != len(logLengths) {
+		return "", fmt.Errorf("invalid state assignment")
+	}
+	for index, role := range roles {
+		if role != "follower" && role != "candidate" && role != "leader" {
+			return "", fmt.Errorf("invalid role for node %d", index+1)
+		}
+	}
+	active, ok := parseNodeSet(assignments["currentActive"], len(roles))
+	if !ok {
+		return "", fmt.Errorf("invalid currentActive assignment")
+	}
+	commit, err := commitShape(assignments["commitIndex"], logLengths)
+	if err != nil {
+		return "", err
+	}
+	replication, err := replicationShape(assignments["matchIndex"], roles, active, logLengths)
+	if err != nil {
+		return "", err
+	}
+	votes, err := voteShape(assignments["votesGranted"], roles, active)
+	if err != nil {
+		return "", err
+	}
+	votedFor, err := votedForShape(assignments["votedFor"], roles, currentTerms)
+	if err != nil {
+		return "", err
 	}
 	features := []string{
+		"schema=" + SemanticSchemaVersion,
 		"active=" + compact(assignments["currentActive"]),
 		"roles=" + compact(assignments["state"]),
 		"terms=" + replaceTerms(assignments["currentTerm"], terms),
 		"log=" + logShape,
-		"commit=" + commitShape(assignments["commitIndex"], logLengths),
-		"replication=" + replicationShape(assignments["matchIndex"], logLengths),
-		"votes=" + voteShape(assignments["votesGranted"]),
-		"votedFor=" + compact(assignments["votedFor"]),
+		"commit=" + commit,
+		"replication=" + replication,
+		"votes=" + votes,
+		"votedFor=" + votedFor,
 	}
-	return strings.Join(features, "|")
-}
-
-func normalizeRelativeTerms(text string) string {
-	terms := termRanks(text)
-	text = currentTermPattern.ReplaceAllStringFunc(text, func(value string) string {
-		return replaceTerms(value, terms)
-	})
-	return entryTermPattern.ReplaceAllStringFunc(text, func(value string) string {
-		match := entryTermPattern.FindStringSubmatch(value)
-		term, _ := strconv.ParseUint(match[1], 10, 64)
-		return "term |-> " + strconv.FormatUint(terms[term], 10)
-	})
+	storagePresent := false
+	for _, name := range []string{"appliedIndex", "snapshotIndex", "snapshotTerm", "firstIndex", "pendingSnapshot"} {
+		if assignments[name] != "" {
+			storagePresent = true
+			break
+		}
+	}
+	if storagePresent {
+		for _, name := range []string{"appliedIndex", "snapshotIndex", "snapshotTerm", "firstIndex", "pendingSnapshot", "nextIndex"} {
+			if assignments[name] == "" {
+				return "", fmt.Errorf("storage state is missing %s assignment", name)
+			}
+		}
+		storage, err := storageShape(assignments, roles, active, logLengths, logTerms)
+		if err != nil {
+			return "", err
+		}
+		features = append(features, "storage="+storage)
+	}
+	return strings.Join(features, "|"), nil
 }
 
 func termRanks(text string) map[uint64]uint64 {
@@ -140,41 +190,202 @@ func stateAssignments(text string) map[string]string {
 	return result
 }
 
-func semanticLog(value string, ranks map[uint64]uint64) (string, []int, bool) {
+func semanticLog(value string, ranks map[uint64]uint64) (string, []int, [][]uint64, bool) {
 	nodes, ok := splitTLATuple(value)
 	if !ok {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	shapes := make([]string, len(nodes))
 	lengths := make([]int, len(nodes))
+	terms := make([][]uint64, len(nodes))
+	valueRanks := make(map[uint64]uint64)
+	nextValueRank := uint64(1)
 	for index, node := range nodes {
 		entries, entryOK := splitTLATuple(node)
 		if !entryOK {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		lengths[index] = len(entries)
+		terms[index] = make([]uint64, 0, len(entries))
 		parts := make([]string, 0, len(entries))
 		for _, entry := range entries {
 			termMatch := entryTermPattern.FindStringSubmatch(entry)
 			valueMatch := entryValuePattern.FindStringSubmatch(entry)
 			if len(termMatch) != 2 || len(valueMatch) != 2 {
-				return "", nil, false
+				return "", nil, nil, false
 			}
-			term, _ := strconv.ParseUint(termMatch[1], 10, 64)
-			parts = append(parts, strconv.FormatUint(ranks[term], 10)+":"+valueMatch[1])
+			term, termErr := strconv.ParseUint(termMatch[1], 10, 64)
+			entryValue, valueErr := strconv.ParseUint(valueMatch[1], 10, 64)
+			if termErr != nil || valueErr != nil {
+				return "", nil, nil, false
+			}
+			terms[index] = append(terms[index], term)
+			valueClass := "nil"
+			if entryValue != 0 {
+				rank, seen := valueRanks[entryValue]
+				if !seen {
+					rank = nextValueRank
+					valueRanks[entryValue] = rank
+					nextValueRank++
+				}
+				valueClass = "v" + strconv.FormatUint(rank, 10)
+			}
+			parts = append(parts, strconv.FormatUint(ranks[term], 10)+":"+valueClass)
 		}
 		shapes[index] = "[" + strings.Join(parts, ",") + "]"
 	}
-	return strings.Join(shapes, ";"), lengths, true
+	return strings.Join(shapes, ";"), lengths, terms, true
 }
 
-func commitShape(value string, logLengths []int) string {
+func storageShape(assignments map[string]string, roles []string, active map[int]bool, logLengths []int, logTerms [][]uint64) (string, error) {
+	applied := parseUintTuple(assignments["appliedIndex"])
+	snapshots := parseUintTuple(assignments["snapshotIndex"])
+	snapshotTerms := parseUintTuple(assignments["snapshotTerm"])
+	first := parseUintTuple(assignments["firstIndex"])
+	commit := parseUintTuple(assignments["commitIndex"])
+	nextRows, nextOK := splitTLATuple(assignments["nextIndex"])
+	matchRows, matchOK := splitTLATuple(assignments["matchIndex"])
+	pendingRows, pendingOK := splitTLATuple(assignments["pendingSnapshot"])
+	n := len(logLengths)
+	if len(applied) != n || len(snapshots) != n || len(snapshotTerms) != n || len(first) != n || len(commit) != n ||
+		!nextOK || !matchOK || !pendingOK || len(nextRows) != n || len(matchRows) != n || len(pendingRows) != n {
+		return "", fmt.Errorf("invalid storage tuple dimensions")
+	}
+
+	nodes := make([]string, n)
+	progress := make([]string, 0)
+	for index := 0; index < n; index++ {
+		if applied[index] > uint64(logLengths[index]) || snapshots[index] > applied[index] || first[index] == 0 {
+			return "", fmt.Errorf("invalid storage boundary for node %d", index+1)
+		}
+		appliedClass := "behind-commit"
+		if applied[index] > commit[index] {
+			return "", fmt.Errorf("invalid commit/applied relationship for node %d", index+1)
+		}
+		switch {
+		case applied[index] == 0:
+			appliedClass = "zero"
+		case applied[index] == snapshots[index] && applied[index] == commit[index]:
+			appliedClass = "at-snapshot-commit"
+		case applied[index] == snapshots[index]:
+			appliedClass = "at-snapshot"
+		case applied[index] == commit[index]:
+			appliedClass = "at-commit"
+		}
+		snapshotClass := "behind-applied"
+		termClass := "matches-log"
+		switch snapshots[index] {
+		case 0:
+			snapshotClass = "none"
+			if snapshotTerms[index] != 0 {
+				termClass = "mismatch"
+			}
+		case applied[index]:
+			snapshotClass = "at-applied"
+		}
+		if snapshots[index] > 0 {
+			snapshotPosition := int(snapshots[index] - 1)
+			if snapshotPosition >= len(logTerms[index]) || logTerms[index][snapshotPosition] != snapshotTerms[index] {
+				termClass = "mismatch"
+			}
+		}
+		firstClass := "retained2+"
+		switch {
+		case first[index] == 1:
+			firstClass = "uncompacted"
+		case first[index] == snapshots[index]+1:
+			firstClass = "retain0"
+		case first[index] == snapshots[index]:
+			firstClass = "retain1"
+		case first[index] > snapshots[index]+1:
+			firstClass = "beyond-snapshot"
+		}
+		nodes[index] = strings.Join([]string{appliedClass, snapshotClass, termClass, firstClass}, "/")
+
+		if roles[index] != "leader" || !active[index+1] {
+			continue
+		}
+		next := parseUintTuple(nextRows[index])
+		matches := parseUintTuple(matchRows[index])
+		pending := parseUintTuple(pendingRows[index])
+		if len(next) != n || len(matches) != n || len(pending) != n {
+			return "", fmt.Errorf("invalid leader progress row for node %d", index+1)
+		}
+		for peer := 0; peer < n; peer++ {
+			if peer == index {
+				continue
+			}
+			nextClass := "available"
+			switch {
+			case next[peer] < first[index]:
+				nextClass = "below-first"
+			case next[peer] == uint64(logLengths[index]+1):
+				nextClass = "at-tip"
+			case next[peer] > uint64(logLengths[index]+1):
+				nextClass = "beyond-tip"
+			}
+			pendingClass := "none"
+			if pending[peer] > 0 {
+				pendingClass = "ahead-match"
+				if pending[peer] <= matches[peer] {
+					pendingClass = "matched"
+				}
+				if next[peer] <= pending[peer] {
+					pendingClass += ":next-not-after"
+				} else {
+					pendingClass += ":next-after"
+				}
+			}
+			progress = append(progress, fmt.Sprintf("%d>%d:%s:%s", index+1, peer+1, nextClass, pendingClass))
+		}
+	}
+	if len(progress) == 0 {
+		progress = append(progress, "none")
+	}
+	return "nodes=" + strings.Join(nodes, ",") + ";progress=" + strings.Join(progress, ","), nil
+}
+
+func parseStringTuple(value string) ([]string, bool) {
+	parts, ok := splitTLATuple(value)
+	if !ok {
+		return nil, false
+	}
+	for index := range parts {
+		parts[index] = strings.Trim(strings.TrimSpace(parts[index]), `"`)
+	}
+	return parts, true
+}
+
+func parseNodeSet(value string, nodeCount int) (map[int]bool, bool) {
+	result := make(map[int]bool)
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "{") || !strings.HasSuffix(value, "}") {
+		return nil, false
+	}
+	inside := strings.TrimSpace(value[1 : len(value)-1])
+	if inside == "" {
+		return result, true
+	}
+	for _, number := range strings.Split(inside, ",") {
+		parsed, err := strconv.Atoi(strings.TrimSpace(number))
+		if err != nil || parsed < 1 || parsed > nodeCount || result[parsed] {
+			return nil, false
+		}
+		result[parsed] = true
+	}
+	return result, true
+}
+
+func commitShape(value string, logLengths []int) (string, error) {
 	commits := parseUintTuple(value)
 	if len(commits) != len(logLengths) {
-		return compact(value)
+		return "", fmt.Errorf("invalid commitIndex assignment")
 	}
 	result := make([]string, len(commits))
 	for index, commit := range commits {
+		if commit > uint64(logLengths[index]) {
+			return "", fmt.Errorf("commitIndex exceeds log length for node %d", index+1)
+		}
 		lag := logLengths[index] - int(commit)
 		switch {
 		case commit == 0:
@@ -187,54 +398,104 @@ func commitShape(value string, logLengths []int) string {
 			result[index] = "lag2+"
 		}
 	}
-	return strings.Join(result, ",")
+	return strings.Join(result, ","), nil
 }
 
-func replicationShape(value string, logLengths []int) string {
+func replicationShape(value string, roles []string, active map[int]bool, logLengths []int) (string, error) {
 	rows, ok := splitTLATuple(value)
 	if !ok || len(rows) != len(logLengths) {
-		return compact(value)
+		return "", fmt.Errorf("invalid matchIndex assignment")
 	}
-	result := make([]string, len(rows))
+	result := make([]string, 0)
 	for rowIndex, row := range rows {
 		matches := parseUintTuple(row)
-		buckets := make([]string, len(matches))
+		if len(matches) != len(logLengths) {
+			return "", fmt.Errorf("invalid matchIndex row for node %d", rowIndex+1)
+		}
+		if roles[rowIndex] != "leader" || !active[rowIndex+1] {
+			continue
+		}
+		buckets := make([]string, 0, len(matches)-1)
 		for index, match := range matches {
+			if index == rowIndex {
+				continue
+			}
+			if match > uint64(logLengths[rowIndex]) {
+				return "", fmt.Errorf("leader matchIndex exceeds log length for node %d", rowIndex+1)
+			}
 			lag := logLengths[rowIndex] - int(match)
 			switch {
 			case match == 0:
-				buckets[index] = "zero"
+				buckets = append(buckets, fmt.Sprintf("%d:zero", index+1))
 			case lag <= 0:
-				buckets[index] = "full"
+				buckets = append(buckets, fmt.Sprintf("%d:full", index+1))
 			case lag == 1:
-				buckets[index] = "lag1"
+				buckets = append(buckets, fmt.Sprintf("%d:lag1", index+1))
 			default:
-				buckets[index] = "lag2+"
+				buckets = append(buckets, fmt.Sprintf("%d:lag2+", index+1))
 			}
 		}
-		result[rowIndex] = strings.Join(buckets, ",")
+		result = append(result, fmt.Sprintf("%d>%s", rowIndex+1, strings.Join(buckets, ",")))
 	}
-	return strings.Join(result, ";")
+	if len(result) == 0 {
+		return "none", nil
+	}
+	return strings.Join(result, ";"), nil
 }
 
-func voteShape(value string) string {
+func voteShape(value string, roles []string, active map[int]bool) (string, error) {
 	sets, ok := splitTLATuple(value)
-	if !ok {
-		return compact(value)
+	if !ok || len(sets) != len(roles) {
+		return "", fmt.Errorf("invalid votesGranted assignment")
 	}
-	result := make([]string, len(sets))
+	result := make([]string, 0)
+	quorum := len(roles)/2 + 1
 	for index, set := range sets {
-		inside := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(set), "{"), "}"))
+		votes, setOK := parseNodeSet(set, len(roles))
+		if !setOK {
+			return "", fmt.Errorf("invalid votesGranted set for node %d", index+1)
+		}
+		if roles[index] != "candidate" || !active[index+1] {
+			continue
+		}
+		class := "minority"
 		switch {
-		case inside == "":
-			result[index] = "0"
-		case !strings.Contains(inside, ","):
-			result[index] = "1"
+		case len(votes) >= quorum:
+			class = "quorum-reached"
+		case len(votes) == 1 && votes[index+1]:
+			class = "self-only"
+		case len(votes) == quorum-1:
+			class = "one-short-of-quorum"
+		}
+		result = append(result, fmt.Sprintf("%d:%s", index+1, class))
+	}
+	if len(result) == 0 {
+		return "none", nil
+	}
+	return strings.Join(result, ","), nil
+}
+
+func votedForShape(value string, roles []string, currentTerms []uint64) (string, error) {
+	votes := parseUintTuple(value)
+	if len(votes) != len(roles) || len(currentTerms) != len(roles) {
+		return "", fmt.Errorf("invalid votedFor assignment")
+	}
+	result := make([]string, len(votes))
+	for index, target := range votes {
+		switch {
+		case target == 0:
+			result[index] = "none"
+		case target > uint64(len(roles)):
+			return "", fmt.Errorf("votedFor target out of range for node %d", index+1)
+		case target == uint64(index+1):
+			result[index] = "self"
+		case roles[target-1] == "candidate" && currentTerms[target-1] == currentTerms[index]:
+			result[index] = "current-candidate"
 		default:
-			result[index] = "2+"
+			result[index] = "other"
 		}
 	}
-	return strings.Join(result, ",")
+	return strings.Join(result, ","), nil
 }
 
 func parseUintTuple(value string) []uint64 {

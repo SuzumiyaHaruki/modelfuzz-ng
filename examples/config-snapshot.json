@@ -13,6 +13,7 @@
     "verbose_logging": false
   },
   "model": {
+    "profile": "storage-snapshot",
     "max_value": 5,
     "max_log_index": 10,
     "largest_term": 10,

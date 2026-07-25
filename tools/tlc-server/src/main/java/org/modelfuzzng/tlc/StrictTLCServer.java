@@ -28,7 +28,7 @@ import util.SimpleFilenameToStream;
 
 /** 对 NG 模型事件执行严格、无跨请求状态的 controlled TLC 服务。 */
 public final class StrictTLCServer {
-    private static final String SERVER_VERSION = "2";
+    private static final String SERVER_VERSION = "1";
     private static final int VALIDATED_STATE_CACHE_SIZE = 100_000;
     private static final int DEFAULT_ACTION_CACHE_SIZE = 16_384;
     private static final Gson GSON = new Gson();
@@ -37,8 +37,7 @@ public final class StrictTLCServer {
     private final RaftEventMapper mapper;
     private final String model;
     private final String config;
-    private final Long maxLogIndex;
-    private final Long largestTerm;
+    private final ModelBounds bounds;
     private final TLCState initial;
     private final Action[] invariants;
     private final Map<Long, Boolean> validatedStates;
@@ -59,11 +58,8 @@ public final class StrictTLCServer {
         this.model = modelPath.toString();
         this.config = configPath.toString();
         String configText = Files.readString(configPath, StandardCharsets.UTF_8);
-        this.mapper = new RaftEventMapper(
-            fastTool, fastTool.getModule(modelName), ModelBounds.parse(configText), actionCacheSize
-        );
-        this.maxLogIndex = constant(configText, "MaxLogIndex");
-        this.largestTerm = constant(configText, "LargestTerm");
+        this.bounds = ModelBounds.parse(configText);
+        this.mapper = new RaftEventMapper(fastTool, fastTool.getModule(modelName), bounds, actionCacheSize);
         FP64.Init(0);
         this.invariants = tool.getInvariants();
         this.validatedStates = new LinkedHashMap<>(16, 0.75f, true) {
@@ -112,14 +108,24 @@ public final class StrictTLCServer {
         response.put("strict", true);
         response.put("model", model);
         response.put("config", config);
-        if (maxLogIndex != null) {
-            response.put("max_log_index", maxLogIndex);
+        if (bounds.maxLogIndex() != null) {
+            response.put("max_log_index", bounds.maxLogIndex());
         }
-        if (largestTerm != null) {
-            response.put("largest_term", largestTerm);
+        if (bounds.largestTerm() != null) {
+            response.put("largest_term", bounds.largestTerm());
+        }
+        if (!bounds.serverIDs().isEmpty()) {
+            response.put("server_ids", bounds.serverIDs());
+        }
+        if (bounds.maxValue() != null) {
+            response.put("max_value", bounds.maxValue());
+        }
+        if (bounds.nilValue() != null) {
+            response.put("nil_value", bounds.nilValue());
         }
         response.put("validated_state_cache_limit", VALIDATED_STATE_CACHE_SIZE);
         response.put("action_mode", "lazy");
+        response.put("model_profile", mapper.modelProfile());
         response.put("action_definitions", mapper.actionDefinitionCount());
         response.put("cached_actions", mapper.cachedActionCount());
         response.put("action_cache_limit", mapper.actionCacheLimit());
@@ -197,17 +203,23 @@ public final class StrictTLCServer {
                 throw new ProtocolException("disabled_action", index, event.externalName(), 422,
                     "mapped TLA+ action is disabled in the current model state");
             }
-            if (successors.size() != 1) {
+            Map<String, TLCState> uniqueSuccessors = new LinkedHashMap<>();
+            for (int successorIndex = 0; successorIndex < successors.size(); successorIndex++) {
+                TLCState successor = successors.elementAt(successorIndex);
+                if (successor == null) {
+                    throw new ProtocolException("null_successor", index, event.externalName(), 500,
+                        "TLC returned a null successor");
+                }
+                successor.execCallable();
+                successor.deepNormalize();
+                uniqueSuccessors.putIfAbsent(successor.toString(), successor);
+            }
+            if (uniqueSuccessors.size() != 1) {
                 throw new ProtocolException("ambiguous_successor", index, event.externalName(), 409,
-                    "mapped TLA+ action produced " + successors.size() + " successors");
+                    "mapped TLA+ action produced " + uniqueSuccessors.size()
+                        + " distinct successors");
             }
-            TLCState next = successors.elementAt(0);
-            if (next == null) {
-                throw new ProtocolException("null_successor", index, event.externalName(), 500,
-                    "TLC returned a null successor");
-            }
-            next.execCallable();
-            next.deepNormalize();
+            TLCState next = uniqueSuccessors.values().iterator().next();
             long validationStarted = System.nanoTime();
             try {
                 validateState(next, index, event.externalName());

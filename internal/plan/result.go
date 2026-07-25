@@ -40,6 +40,10 @@ const (
 	ReasonTimeOverflow         ResolutionReasonCode = "time_overflow"
 	ReasonNodeAlreadyCrashed   ResolutionReasonCode = "node_already_crashed"
 	ReasonNodeAlreadyRunning   ResolutionReasonCode = "node_already_running"
+	ReasonLinkPartitioned      ResolutionReasonCode = "link_partitioned"
+	ReasonPartitionActive      ResolutionReasonCode = "partition_already_active"
+	ReasonPartitionInactive    ResolutionReasonCode = "partition_not_active"
+	ReasonPartitionNodes       ResolutionReasonCode = "partition_nodes_mismatch"
 	ReasonMultipleDecisions    ResolutionReasonCode = "multiple_profile_decisions"
 )
 

@@ -1,0 +1,36 @@
+{
+  "actions": [
+    {"kind": "timeout", "node": 1},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 2}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 2}},
+    {"kind": "partition", "partition": {"groups": [[1], [2, 3]]}},
+    {"kind": "request", "node": 1, "request": "1"},
+    {"kind": "timeout", "node": 2},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 3}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 3, "to": 2}, "count": 1}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 3}, "count": 2}},
+    {"kind": "deliver", "messages": {"link": {"from": 3, "to": 2}, "count": 2}},
+    {"kind": "request", "node": 2, "request": "2"},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 3}, "count": 3}},
+    {"kind": "deliver", "messages": {"link": {"from": 3, "to": 2}, "count": 3}},
+    {"kind": "heal"},
+    {"kind": "advance_ticks", "ticks": 1},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 3}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 3, "to": 2}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 8}},
+    {"kind": "advance_ticks", "ticks": 1},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 3}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 3, "to": 2}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 2, "to": 1}, "count": 8}},
+    {"kind": "deliver", "messages": {"link": {"from": 1, "to": 2}, "count": 8}}
+  ],
+  "metadata": {
+    "description": "隔离旧leader，分区内重新选举并提交，合并后恢复跨组延迟消息投递"
+  }
+}

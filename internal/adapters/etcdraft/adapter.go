@@ -14,6 +14,8 @@ import (
 
 const proposalDroppedEvent = "raft.proposal_dropped"
 const voteQuorumFaultEvent = "raft.vote_quorum_fault_activated"
+const snapshotStatusMappingFaultEvent = "raft.snapshot_status_mapping_fault_activated"
+const restartHardStateFaultEvent = "raft.restart_hard_state_fault_activated"
 
 // Adapter 驱动一组内存中的 etcd-raft RawNode。逻辑时钟、网络队列和
 // MessageID 均由上层 Runtime 管理。
@@ -123,10 +125,134 @@ func (a *Adapter) Deliver(ctx context.Context, at core.LogicalTime, message core
 	if err != nil {
 		return nil, err
 	}
+	if payload.GetType() == raftpb.MsgSnap &&
+		!hasSnapshotDeliveryOutcome(deliveryEffects, effects) {
+		snapshot := payload.GetSnapshot()
+		index := snapshot.GetMetadata().GetIndex()
+		after := n.raw.BasicStatus()
+		if before.GetCommit() < index && after.GetCommit() >= index {
+			deliveryEffects = append(deliveryEffects, snapshotEvent(
+				at, "raft.snapshot_fast_forwarded", n.id, snapshot, map[string]any{
+					"commit_before": before.GetCommit(), "commit_after": after.GetCommit(),
+				},
+			))
+		} else {
+			reason := "ignored"
+			switch {
+			case payload.GetTerm() < before.GetTerm():
+				reason = "lower_term"
+			case index <= before.GetCommit() || index <= n.applied:
+				reason = "not_ahead_of_local_progress"
+			}
+			deliveryEffects = append(deliveryEffects, snapshotEvent(
+				at, "raft.snapshot_rejected_or_stale", n.id, snapshot,
+				map[string]any{"reason": reason},
+			))
+		}
+	}
 	// Action 中只有稳定的 MessageID。把实际交给 Raft 的消息语义记录下来，
 	// 后续模型映射即使只读取序列化后的 StepRecord，也不需要依赖 Payload。
 	deliveryEffects = append(deliveryEffects, faultEffects...)
-	return append(deliveryEffects, effects...), nil
+	result := append(deliveryEffects, effects...)
+	if payload.GetType() == raftpb.MsgSnap {
+		statusEffects, err := a.reportSnapshotStatus(at, message.From, message.To, raft.SnapshotFinish)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, statusEffects...)
+	}
+	return result, nil
+}
+
+// Drop reports application-layer snapshot transport failure back to the sender.
+// Other Raft messages need no local feedback when the controlled network drops them.
+func (a *Adapter) Drop(ctx context.Context, at core.LogicalTime, message core.Message) ([]core.Effect, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	payload, err := decodeMessage(message)
+	if err != nil {
+		return nil, err
+	}
+	if payload.GetType() != raftpb.MsgSnap {
+		return nil, nil
+	}
+	return a.reportSnapshotStatus(at, message.From, message.To, raft.SnapshotFailure)
+}
+
+func (a *Adapter) reportSnapshotStatus(
+	at core.LogicalTime, leaderID, followerID core.NodeID, status raft.SnapshotStatus,
+) ([]core.Effect, error) {
+	leader, err := a.node(leaderID)
+	if err != nil {
+		return nil, err
+	}
+	actualReject := status == raft.SnapshotFailure
+	reportedReject := actualReject
+	mappingFault := a.config.Faults.SnapshotStatusMap == SnapshotStatusMappingInvert
+	if mappingFault {
+		reportedReject = !reportedReject
+	}
+	params := map[string]any{
+		"from": uint64(followerID), "to": uint64(leaderID), "reject": reportedReject,
+		"handled": false, "pending_before": uint64(0), "pending_after": uint64(0),
+		"match_index": uint64(0), "next_before": uint64(0), "next_after": uint64(0),
+	}
+	statusEffects := func() []core.Effect {
+		effects := []core.Effect{modelEffect(at, "raft.snapshot_status_reported", leaderID, params)}
+		if mappingFault {
+			effects = append(effects, modelEffect(at, snapshotStatusMappingFaultEvent, leaderID, map[string]any{
+				"from": uint64(followerID), "actual_reject": actualReject, "reported_reject": reportedReject,
+			}))
+		}
+		return effects
+	}
+	if !leader.running || leader.raw == nil {
+		params["reason"] = "sender_not_running"
+		return statusEffects(), nil
+	}
+	before, exists := leader.raw.Status().Progress[uint64(followerID)]
+	if exists {
+		params["pending_before"] = before.PendingSnapshot
+		params["match_index"] = before.Match
+		params["next_before"] = before.Next
+		params["progress_before"] = before.State.String()
+	}
+	leader.raw.ReportSnapshot(uint64(followerID), status)
+	effects, err := a.drainReady(leader, at, true)
+	if err != nil {
+		return nil, fmt.Errorf("node %s report snapshot status for %s: %w", leaderID, followerID, err)
+	}
+	after, stillTracked := leader.raw.Status().Progress[uint64(followerID)]
+	if stillTracked {
+		params["pending_after"] = after.PendingSnapshot
+		params["next_after"] = after.Next
+		params["progress_after"] = after.State.String()
+	}
+	handled := exists && stillTracked && before.State.String() == "StateSnapshot" && before.PendingSnapshot > 0
+	params["handled"] = handled
+	if !exists || !stillTracked {
+		params["reason"] = "peer_not_tracked"
+	} else if !handled {
+		params["reason"] = "not_pending_snapshot"
+	}
+	return append(statusEffects(), effects...), nil
+}
+
+func hasSnapshotDeliveryOutcome(groups ...[]core.Effect) bool {
+	for _, effects := range groups {
+		for _, effect := range effects {
+			if effect.Kind != core.EffectModelEvent || effect.ModelEvent == nil {
+				continue
+			}
+			switch effect.ModelEvent.Name {
+			case "raft.snapshot_applied", "raft.snapshot_fast_forwarded",
+				"raft.snapshot_rejected_or_stale":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Adapter) ForceTimeout(ctx context.Context, at core.LogicalTime, id core.NodeID) ([]core.Effect, error) {
@@ -178,11 +304,31 @@ func (a *Adapter) Restart(ctx context.Context, at core.LogicalTime, id core.Node
 	if n.running {
 		return nil, fmt.Errorf("%w: node %s is already running", ErrNodeState, id)
 	}
+	var lostHardState *raftpb.HardState
+	if a.config.Faults.RestartLoseHardState {
+		hardState, _, err := n.storage.InitialState()
+		if err != nil {
+			return nil, fmt.Errorf("read node %s hard state before restart fault: %w", id, err)
+		}
+		lostHardState = hardState
+		if err := n.storage.SetHardState(&raftpb.HardState{}); err != nil {
+			return nil, fmt.Errorf("clear node %s hard state for restart fault: %w", id, err)
+		}
+	}
 	nextEpoch := n.epoch + 1
 	if err := n.restart(a.config, newNodeRand(a.seed, n.id, nextEpoch)); err != nil {
 		return nil, fmt.Errorf("restart node %s: %w", id, err)
 	}
-	return a.drainReady(n, at, true)
+	effects, err := a.drainReady(n, at, true)
+	if err != nil {
+		return nil, err
+	}
+	if lostHardState != nil {
+		effects = append([]core.Effect{modelEffect(at, restartHardStateFaultEvent, id, map[string]any{
+			"term": lostHardState.GetTerm(), "vote": lostHardState.GetVote(), "commit": lostHardState.GetCommit(),
+		})}, effects...)
+	}
+	return effects, nil
 }
 
 func (a *Adapter) Request(ctx context.Context, at core.LogicalTime, id core.NodeID, request []byte) ([]core.Effect, error) {

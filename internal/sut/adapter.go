@@ -30,14 +30,15 @@ type Capabilities struct {
 // 一个逻辑时间单位。AdvanceTime 由 Runtime 展开成多次 Tick，因此
 // 一次 Tick 内发生的自然超时和新消息都带有同一个 at。Adapter 刚
 // 产生的出站消息没有 MessageID 和链路序号，由 Runtime 注册后再写入 Trace。
-// Drop 和 Duplicate 只改变 Runtime 的消息队列，不需要进入被测系统，因而
-// 不属于这个接口。
+// Duplicate 只改变 Runtime 的消息队列。Drop 需要通知 Adapter，因为部分协议
+// （例如 etcd-raft 的 MsgSnap）要求应用层把传输失败反馈给状态机。
 type Adapter interface {
 	Capabilities() Capabilities
 
 	Reset(ctx context.Context, options ResetOptions) error
 	Tick(ctx context.Context, at core.LogicalTime) ([]core.Effect, error)
 	Deliver(ctx context.Context, at core.LogicalTime, message core.Message) ([]core.Effect, error)
+	Drop(ctx context.Context, at core.LogicalTime, message core.Message) ([]core.Effect, error)
 	ForceTimeout(ctx context.Context, at core.LogicalTime, node core.NodeID) ([]core.Effect, error)
 	Crash(ctx context.Context, at core.LogicalTime, node core.NodeID) ([]core.Effect, error)
 	Restart(ctx context.Context, at core.LogicalTime, node core.NodeID) ([]core.Effect, error)

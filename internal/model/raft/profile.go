@@ -25,10 +25,11 @@ const (
 	CodeMessageLogBound         model.DecisionCode = "message_log_bound"
 	CodeLeaderNoopLogBound      model.DecisionCode = "leader_noop_log_bound"
 	CodeMessageTypeNotModeled   model.DecisionCode = "message_type_not_modeled"
+	CodeLinkPartitioned         model.DecisionCode = "link_partitioned"
 )
 
-// ValidateAction 实现基础 Raft Profile 的执行前预检。Drop/Duplicate 只改变
-// Runtime 网络，因此即使消息语义未建模也允许执行。
+// ValidateAction 实现基础 Raft Profile 的执行前预检。Duplicate 只改变 Runtime
+// 网络；Drop MsgSnap 还会产生传输失败反馈，其一致性由执行后的 Mapper 严格检查。
 func (m *Mapper) ValidateAction(action core.Action, observation core.Observation) error {
 	if m == nil {
 		return model.UnsupportedCode(action, CodeProfileUnavailable, "raft mapper is nil")
@@ -87,6 +88,9 @@ func (m *Mapper) ValidateAction(action core.Action, observation core.Observation
 		if !ok {
 			return model.InapplicableCode(action, CodeMessageMissing, fmt.Sprintf("message %s is absent from observation", action.Message))
 		}
+		if message.Blocked {
+			return model.InapplicableCode(action, CodeLinkPartitioned, fmt.Sprintf("message %s crosses an active network partition", action.Message))
+		}
 		if err := m.validateMessageMetadataBounds(action, message); err != nil {
 			return err
 		}
@@ -136,15 +140,20 @@ func (m *Mapper) ValidateAction(action core.Action, observation core.Observation
 		default:
 			return model.UnsupportedCode(action, CodeMessageTypeNotModeled, "message type "+message.TypeHint+" is not represented")
 		}
+	case core.ActionPartition, core.ActionHeal:
+		// 网络拓扑由 Runtime 管理；基础 Raft TLA+ 模型没有网络变量，因而
+		// partition/heal 本身是 stutter，后续实际投递仍按消息事件映射。
+		return nil
 	}
 	return nil
 }
 
 func (m *Mapper) validateMessageMetadataBounds(action core.Action, message core.MessageObservation) error {
 	termFields := []string{"term"}
-	if message.TypeHint == "MsgVote" || message.TypeHint == "MsgApp" {
+	switch message.TypeHint {
+	case "MsgVote", "MsgApp":
 		termFields = append(termFields, "log_term")
-	} else if message.TypeHint == "MsgSnap" {
+	case "MsgSnap":
 		termFields = append(termFields, "snapshot_term")
 	}
 	for _, field := range termFields {

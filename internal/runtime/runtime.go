@@ -23,6 +23,8 @@ var (
 	ErrSUTPanic           = errors.New("SUT adapter panicked")
 	ErrIDExhausted        = errors.New("runtime ID exhausted")
 	ErrBudgetExceeded     = errors.New("runtime budget exceeded")
+	ErrNetworkPartitioned = errors.New("network link is partitioned")
+	ErrPartitionState     = errors.New("invalid network partition state")
 )
 
 // Limits 是一次执行的硬安全边界。零表示该项不设上限。Plan Resolver 的
@@ -52,7 +54,7 @@ func (c Config) validate() error {
 	return nil
 }
 
-// StepResult 同时返回具体步骤及其执行前后的全局可观察状态。Concrete Trace v2
+// StepResult 同时返回具体步骤及其执行前后的全局可观察状态。正式 Trace
 // 会在 Record 中保存前后节点快照；完整 Observation 仍主要供在线 Plan、模型映射
 // 和 Oracle 使用，避免每一步重复保存整个消息队列。
 type StepResult struct {
@@ -183,6 +185,7 @@ func (r *Runtime) collectObservation(ctx context.Context) (core.Observation, err
 	}
 
 	observation.Messages = r.network.observations()
+	observation.NetworkPartition = r.network.partitionObservation()
 	if r.lastAction != nil {
 		action := r.lastAction.Copy()
 		observation.LastAction = &action

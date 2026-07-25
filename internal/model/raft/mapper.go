@@ -14,6 +14,13 @@ import (
 const deliveredMessageEvent = "raft.message_delivered"
 const proposalDroppedEvent = "raft.proposal_dropped"
 const voteQuorumFaultEvent = "raft.vote_quorum_fault_activated"
+const snapshotStatusMappingFaultEvent = "raft.snapshot_status_mapping_fault_activated"
+const restartHardStateFaultEvent = "raft.restart_hard_state_fault_activated"
+
+const (
+	ProfileBasic           = "basic"
+	ProfileStorageSnapshot = "storage-snapshot"
+)
 
 var ErrUnsupportedSemantics = errors.New("transition is not represented by the raft model")
 
@@ -25,6 +32,9 @@ type Config struct {
 	MaxLogIndex    uint64        `json:"max_log_index"`
 	LargestTerm    uint64        `json:"largest_term"`
 	EmitLeaderNoOp bool          `json:"emit_leader_no_op"`
+	// Profile 为空时保持历史 basic 行为与旧 checkpoint JSON 指纹兼容。
+	// storage-snapshot 启用 Storage 边界和 Leader snapshot progress 事件。
+	Profile string `json:"profile,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -65,7 +75,18 @@ func (c Config) normalized() (Config, error) {
 	if c.MaxValue < 1 || c.MaxLogIndex < 1 || c.LargestTerm < 1 {
 		return Config{}, fmt.Errorf("raft model bounds must be positive")
 	}
+	if c.Profile != "" && c.Profile != ProfileBasic && c.Profile != ProfileStorageSnapshot {
+		return Config{}, fmt.Errorf("unknown raft model profile %q", c.Profile)
+	}
 	return c, nil
+}
+
+// EffectiveProfile 返回对外使用的稳定 profile 名。空值是历史 basic 配置的别名。
+func (c Config) EffectiveProfile() string {
+	if c.Profile == "" {
+		return ProfileBasic
+	}
+	return c.Profile
 }
 
 // Mapper 当前对齐 models/raft/raft.tla 以及原 ModelFuzz 的 RaftActionMapper。
@@ -138,10 +159,14 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 		}
 		// AddToActive 同时恢复活动成员并重置该节点的 Raft 易失状态。
 		events = append(events, model.NewEvent("Add", map[string]any{"i": uint64(action.Node)}))
+	case core.ActionPartition, core.ActionHeal:
+		// Runtime 拓扑变化不直接修改轻量 Raft 模型变量。
 	}
 
 	commitNodes := make([]core.NodeID, 0)
 	seenCommit := make(map[core.NodeID]struct{})
+	storageSnapshot := m.config.EffectiveProfile() == ProfileStorageSnapshot
+	storageEvents := make([]model.Event, 0)
 	for _, effect := range transition.Record.Effects {
 		switch effect.Kind {
 		case core.EffectTimerFired:
@@ -175,15 +200,60 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 					return nil, err
 				}
 				events = append(events, mapped...)
-			case proposalDroppedEvent, voteQuorumFaultEvent:
+			case proposalDroppedEvent, voteQuorumFaultEvent, snapshotStatusMappingFaultEvent, restartHardStateFaultEvent:
 				// Candidate、无已知 leader 的 follower 或关闭转发时，etcd-raft
-				// 明确丢弃 proposal；fault activation 只是 SUT 插桩记录。
-				// 两者都不直接改变轻量模型状态；异常的 BecomeLeader 会由
-				// 后续正确 quorum 前置条件拒绝。
+				// 明确丢弃 proposal；fault activation 只记录实验插桩。实际异常
+				// 由对应的状态变化或被篡改的 lifecycle 事件进入模型检查。
 				continue
-			case "raft.snapshot_created", "raft.snapshot_sent", "raft.snapshot_delivered",
-				"raft.snapshot_applied", "raft.snapshot_rejected_or_stale", "raft.log_compacted":
-				// 基础 raft.tla 没有 snapshot 变量；这些应用/存储层事件稳定地映射为 stutter。
+			case "raft.snapshot_created":
+				if !storageSnapshot {
+					continue
+				}
+				index, term, err := snapshotBoundaryParams(event)
+				if err != nil {
+					return nil, err
+				}
+				if index > m.config.MaxLogIndex || term > m.config.LargestTerm {
+					return nil, fmt.Errorf("%w: snapshot boundary index=%d term=%d exceeds model bounds", ErrUnsupportedSemantics, index, term)
+				}
+				storageEvents = append(storageEvents, model.NewEvent("CreateSnapshot", map[string]any{
+					"i": uint64(event.Node), "index": index, "term": term,
+				}))
+			case "raft.log_compacted":
+				if !storageSnapshot {
+					continue
+				}
+				index, ok := unsignedParam(event.Params["compact_index"])
+				if !ok || index == 0 || index > m.config.MaxLogIndex {
+					return nil, fmt.Errorf("%w: compact event has invalid compact_index", ErrUnsupportedSemantics)
+				}
+				storageEvents = append(storageEvents, model.NewEvent("CompactLog", map[string]any{
+					"i": uint64(event.Node), "index": index,
+				}))
+			case "raft.snapshot_sent":
+				if !storageSnapshot {
+					continue
+				}
+				params, err := m.snapshotSendParams(event)
+				if err != nil {
+					return nil, err
+				}
+				storageEvents = append(storageEvents, model.NewEvent("SendSnapshot", params))
+			case "raft.snapshot_status_reported":
+				if !storageSnapshot {
+					continue
+				}
+				params, handled, err := m.snapshotStatusParams(event)
+				if err != nil {
+					return nil, err
+				}
+				if handled {
+					storageEvents = append(storageEvents, model.NewEvent("HandleSnapshotStatus", params))
+				}
+			case "raft.snapshot_delivered", "raft.snapshot_applied", "raft.snapshot_fast_forwarded",
+				"raft.snapshot_rejected_or_stale":
+				// 第三阶段在对应的 MsgSnap delivery 上原子映射 follower outcome。
+				// 独立 lifecycle marker 只作为观测证据，stutter 可避免重复执行。
 				continue
 			case "raft.config_changed":
 				return nil, fmt.Errorf("%w: model event %s", ErrUnsupportedSemantics, event.Name)
@@ -193,6 +263,15 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 						seenCommit[event.Node] = struct{}{}
 						commitNodes = append(commitNodes, event.Node)
 					}
+				}
+				if storageSnapshot {
+					index, ok := unsignedParam(event.Params["index"])
+					if !ok || index == 0 || index > m.config.MaxLogIndex {
+						return nil, fmt.Errorf("%w: committed entry has invalid index", ErrUnsupportedSemantics)
+					}
+					storageEvents = append(storageEvents, model.NewEvent("ApplyCommitted", map[string]any{
+						"i": uint64(event.Node), "index": index,
+					}))
 				}
 			}
 		}
@@ -210,10 +289,116 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 			}))
 		}
 	}
+	// Adapter 的 Ready 可能在同一 Concrete Action 中依次成为 Leader、追加 no-op、
+	// 推进 commit、应用 entry 并创建 snapshot。模型必须先完成角色/日志/commit
+	// 转换，再重放应用与 Storage 边界，不能照 Effect 收集时机提前执行。
 	for _, node := range commitNodes {
 		events = append(events, model.NewEvent("AdvanceCommitIndex", map[string]any{"i": uint64(node)}))
 	}
+	if storageSnapshot {
+		events = append(events, storageEvents...)
+	}
 	return events, nil
+}
+
+func snapshotBoundaryParams(event *core.ModelEvent) (uint64, uint64, error) {
+	if event == nil || !event.Node.Valid() {
+		return 0, 0, fmt.Errorf("%w: snapshot event has invalid node", ErrUnsupportedSemantics)
+	}
+	index, indexOK := unsignedParam(event.Params["index"])
+	term, termOK := unsignedParam(event.Params["term"])
+	if !indexOK || index == 0 || !termOK {
+		return 0, 0, fmt.Errorf("%w: snapshot event has invalid index or term", ErrUnsupportedSemantics)
+	}
+	return index, term, nil
+}
+
+func (m *Mapper) snapshotSendParams(event *core.ModelEvent) (map[string]any, error) {
+	index, term, err := snapshotBoundaryParams(event)
+	if err != nil {
+		return nil, err
+	}
+	to, toOK := unsignedParam(event.Params["to"])
+	match, matchOK := unsignedParam(event.Params["match_index"])
+	next, nextOK := unsignedParam(event.Params["next_index"])
+	pending, pendingOK := unsignedParam(event.Params["pending_snapshot"])
+	state, stateOK := event.Params["progress_state"].(string)
+	if !toOK || !matchOK || !nextOK || !pendingOK || !stateOK {
+		return nil, fmt.Errorf("%w: snapshot send has invalid progress metadata", ErrUnsupportedSemantics)
+	}
+	if _, exists := m.nodes[event.Node]; !exists {
+		return nil, fmt.Errorf("%w: snapshot sender %s is outside model Server", ErrUnsupportedSemantics, event.Node)
+	}
+	if _, exists := m.nodes[core.NodeID(to)]; !exists || to == uint64(event.Node) {
+		return nil, fmt.Errorf("%w: snapshot target %d is invalid", ErrUnsupportedSemantics, to)
+	}
+	if index > m.config.MaxLogIndex || term > m.config.LargestTerm ||
+		match > m.config.MaxLogIndex || next == 0 || next > m.config.MaxLogIndex+1 ||
+		pending > m.config.MaxLogIndex {
+		return nil, fmt.Errorf("%w: snapshot send exceeds model bounds", ErrUnsupportedSemantics)
+	}
+	if state != "StateSnapshot" || pending != index || next != pending+1 {
+		return nil, fmt.Errorf(
+			"%w: snapshot send progress state=%q index=%d pending=%d next=%d is inconsistent",
+			ErrUnsupportedSemantics, state, index, pending, next,
+		)
+	}
+	return map[string]any{
+		"i":       uint64(event.Node),
+		"j":       to,
+		"index":   index,
+		"term":    term,
+		"match":   match,
+		"next":    next,
+		"pending": pending,
+	}, nil
+}
+
+func (m *Mapper) snapshotStatusParams(event *core.ModelEvent) (map[string]any, bool, error) {
+	if event == nil || !event.Node.Valid() {
+		return nil, false, fmt.Errorf("%w: snapshot status has invalid reporting node", ErrUnsupportedSemantics)
+	}
+	from, fromOK := unsignedParam(event.Params["from"])
+	to, toOK := unsignedParam(event.Params["to"])
+	reject, rejectOK := event.Params["reject"].(bool)
+	handled, handledOK := event.Params["handled"].(bool)
+	pendingBefore, pendingBeforeOK := unsignedParam(event.Params["pending_before"])
+	pendingAfter, pendingAfterOK := unsignedParam(event.Params["pending_after"])
+	match, matchOK := unsignedParam(event.Params["match_index"])
+	nextAfter, nextAfterOK := unsignedParam(event.Params["next_after"])
+	if !fromOK || !toOK || !rejectOK || !handledOK || !pendingBeforeOK ||
+		!pendingAfterOK || !matchOK || !nextAfterOK {
+		return nil, false, fmt.Errorf("%w: snapshot status has invalid progress metadata", ErrUnsupportedSemantics)
+	}
+	if to != uint64(event.Node) || from == to {
+		return nil, false, fmt.Errorf("%w: snapshot status endpoints do not match reporter", ErrUnsupportedSemantics)
+	}
+	if _, exists := m.nodes[core.NodeID(from)]; !exists {
+		return nil, false, fmt.Errorf("%w: snapshot status follower n%d is outside model Server", ErrUnsupportedSemantics, from)
+	}
+	if _, exists := m.nodes[core.NodeID(to)]; !exists {
+		return nil, false, fmt.Errorf("%w: snapshot status leader n%d is outside model Server", ErrUnsupportedSemantics, to)
+	}
+	if !handled {
+		return nil, false, nil
+	}
+	if pendingBefore == 0 || pendingBefore > m.config.MaxLogIndex || pendingAfter != 0 ||
+		match > m.config.MaxLogIndex || nextAfter == 0 || nextAfter > m.config.MaxLogIndex+1 {
+		return nil, false, fmt.Errorf("%w: handled snapshot status has inconsistent bounds", ErrUnsupportedSemantics)
+	}
+	expectedNext := match + 1
+	if !reject && pendingBefore+1 > expectedNext {
+		expectedNext = pendingBefore + 1
+	}
+	if nextAfter != expectedNext {
+		return nil, false, fmt.Errorf(
+			"%w: snapshot status reject=%v pending=%d match=%d produced next=%d, want %d",
+			ErrUnsupportedSemantics, reject, pendingBefore, match, nextAfter, expectedNext,
+		)
+	}
+	return map[string]any{
+		"i": to, "j": from, "success": !reject, "next": nextAfter,
+	}, true, nil
 }
 
 // electionTimerTerms 优先读取 Effect 记录的单次 timeout 边界。一次 AdvanceTime
@@ -246,10 +431,15 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effec
 	}
 
 	switch messageType {
-	case "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp", "MsgSnap":
+	case "MsgHeartbeatResp", "MsgReadIndex", "MsgReadIndexResp":
 		// 当前配置关闭 CheckQuorum，且轻量模型不包含只读请求状态；这些消息
 		// 对模型变量是明确的 stutter，而不是泛化的“未知消息忽略”。
 		return nil, nil
+	case "MsgSnap":
+		if m.config.EffectiveProfile() != ProfileStorageSnapshot {
+			return nil, nil
+		}
+		return m.mapDeliveredSnapshot(params, effects)
 	case "MsgHeartbeat":
 		normalized, err := m.normalizeMessage(params, "from", "to", "term", "commit")
 		if err != nil {
@@ -387,6 +577,57 @@ func (m *Mapper) mapDeliveredMessage(params map[string]any, effects []core.Effec
 	}
 }
 
+func (m *Mapper) mapDeliveredSnapshot(params map[string]any, effects []core.Effect) ([]model.Event, error) {
+	normalized, err := m.normalizeMessage(
+		params, "from", "to", "term", "snapshot_index", "snapshot_term",
+	)
+	if err != nil {
+		return nil, err
+	}
+	index := normalized["snapshot_index"].(uint64)
+	snapshotTerm := normalized["snapshot_term"].(uint64)
+	if index == 0 {
+		return nil, fmt.Errorf("%w: MsgSnap carries an empty snapshot", ErrUnsupportedSemantics)
+	}
+	outcome := ""
+	for _, effect := range effects {
+		if effect.Kind != core.EffectModelEvent || effect.ModelEvent == nil {
+			continue
+		}
+		name := effect.ModelEvent.Name
+		mappedName := ""
+		switch name {
+		case "raft.snapshot_applied":
+			mappedName = "InstallSnapshot"
+		case "raft.snapshot_fast_forwarded":
+			mappedName = "FastForwardSnapshot"
+		case "raft.snapshot_rejected_or_stale":
+			mappedName = "RejectSnapshot"
+		default:
+			continue
+		}
+		eventIndex, eventTerm, boundaryErr := snapshotBoundaryParams(effect.ModelEvent)
+		if boundaryErr != nil || uint64(effect.ModelEvent.Node) != normalized["to"].(uint64) ||
+			eventIndex != index || eventTerm != snapshotTerm {
+			return nil, fmt.Errorf("%w: MsgSnap lifecycle outcome does not match delivered snapshot", ErrUnsupportedSemantics)
+		}
+		if outcome != "" && outcome != mappedName {
+			return nil, fmt.Errorf("%w: MsgSnap has conflicting lifecycle outcomes", ErrUnsupportedSemantics)
+		}
+		outcome = mappedName
+	}
+	if outcome == "" {
+		return nil, fmt.Errorf("%w: MsgSnap delivery has no recorded lifecycle outcome", ErrUnsupportedSemantics)
+	}
+	return []model.Event{model.NewEvent(outcome, map[string]any{
+		"i":             normalized["from"],
+		"j":             normalized["to"],
+		"index":         index,
+		"snapshot_term": snapshotTerm,
+		"term":          normalized["term"],
+	})}, nil
+}
+
 func appendResponse(effects []core.Effect, from, to uint64) (rejected, found bool, err error) {
 	for _, effect := range effects {
 		if effect.Kind != core.EffectSendMessage || effect.Message == nil ||
@@ -422,11 +663,11 @@ func (m *Mapper) normalizeMessage(params map[string]any, names ...string) (map[s
 			if _, exists := m.nodes[core.NodeID(value)]; !exists {
 				return nil, fmt.Errorf("%w: message %s node n%d is outside model Server", ErrUnsupportedSemantics, name, value)
 			}
-		case "term", "log_term":
+		case "term", "log_term", "snapshot_term":
 			if value > m.config.LargestTerm {
 				return nil, fmt.Errorf("%w: %s %d exceeds LargestTerm %d", ErrUnsupportedSemantics, name, value, m.config.LargestTerm)
 			}
-		case "index", "commit":
+		case "index", "commit", "snapshot_index":
 			if value > m.config.MaxLogIndex {
 				return nil, fmt.Errorf("%w: %s %d exceeds MaxLogIndex %d", ErrUnsupportedSemantics, name, value, m.config.MaxLogIndex)
 			}

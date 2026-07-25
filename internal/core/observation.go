@@ -63,6 +63,7 @@ type MessageObservation struct {
 	TypeHint      string            `json:"type_hint,omitempty"`
 	PayloadDigest string            `json:"payload_digest,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
+	Blocked       bool              `json:"blocked,omitempty"`
 }
 
 func (m MessageObservation) Validate() error {
@@ -88,11 +89,12 @@ func (m MessageObservation) Validate() error {
 // 记录它的稳定摘要以检查重放分歧。Semantic 由 Adapter 可选提供，
 // core 不解释其协议语义。
 type Observation struct {
-	Time       LogicalTime          `json:"time"`
-	Nodes      []NodeObservation    `json:"nodes,omitempty"`
-	Messages   []MessageObservation `json:"messages,omitempty"`
-	LastAction *Action              `json:"last_action,omitempty"`
-	Semantic   map[string]any       `json:"semantic,omitempty"`
+	Time             LogicalTime          `json:"time"`
+	Nodes            []NodeObservation    `json:"nodes,omitempty"`
+	Messages         []MessageObservation `json:"messages,omitempty"`
+	LastAction       *Action              `json:"last_action,omitempty"`
+	Semantic         map[string]any       `json:"semantic,omitempty"`
+	NetworkPartition *NetworkPartition    `json:"network_partition,omitempty"`
 }
 
 func (o Observation) Validate() error {
@@ -120,6 +122,29 @@ func (o Observation) Validate() error {
 		}
 		seenMessages[message.ID] = struct{}{}
 	}
+	if o.NetworkPartition != nil {
+		if err := o.NetworkPartition.Validate(); err != nil {
+			return err
+		}
+		nodes := make([]NodeID, len(o.Nodes))
+		for index, node := range o.Nodes {
+			nodes[index] = node.ID
+		}
+		if !o.NetworkPartition.Covers(nodes) {
+			return invalidValue("observation", "network_partition", "must cover every observed node exactly once")
+		}
+		for _, message := range o.Messages {
+			if message.Blocked != o.NetworkPartition.Blocks(LinkID{From: message.From, To: message.To}) {
+				return invalidValue("observation", "messages", "blocked flag does not match network partition")
+			}
+		}
+	} else {
+		for _, message := range o.Messages {
+			if message.Blocked {
+				return invalidValue("observation", "messages", "message is blocked without an active partition")
+			}
+		}
+	}
 
 	if o.LastAction != nil {
 		if err := o.LastAction.Validate(); err != nil {
@@ -145,12 +170,20 @@ func (o Observation) Copy() Observation {
 		copy.LastAction = &action
 	}
 	copy.Semantic = cloneAnyMap(o.Semantic)
+	if o.NetworkPartition != nil {
+		partition := o.NetworkPartition.Copy()
+		copy.NetworkPartition = &partition
+	}
 	return copy
 }
 
 // Normalized 返回经过稳定排序的副本，用于 hash 和比较。
 func (o Observation) Normalized() Observation {
 	copy := o.Copy()
+	if copy.NetworkPartition != nil {
+		partition := copy.NetworkPartition.Normalized()
+		copy.NetworkPartition = &partition
+	}
 	sort.Slice(copy.Nodes, func(i, j int) bool { return copy.Nodes[i].ID < copy.Nodes[j].ID })
 	sort.Slice(copy.Messages, func(i, j int) bool { return copy.Messages[i].ID < copy.Messages[j].ID })
 	return copy

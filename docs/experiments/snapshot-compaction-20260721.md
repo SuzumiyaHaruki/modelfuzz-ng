@@ -75,3 +75,28 @@ checkpoint 实验在第6条后收到 SIGTERM，随后恢复到100条，并与未
 删除时长/吞吐字段后的 report SHA-256 完全一致：
 `58c5036e9cf161ee4777b4bcfcf8e97876674f3722863f698a78f8841bde0c16`。
 checkpoint 约50KiB，SnapshotPolicy 已进入 config 指纹，resume 禁止通过 CLI 修改。
+
+## 2026-07-22 第一阶段扩展
+
+本轮在已有 snapshot 生命周期基础上补强恢复 Oracle，并增加“较新 snapshot 已安装后才到达的旧 snapshot”端到端场景。节点先安装 index=2 的 snapshot，同时在 Runtime 队列保留其确定性副本；Leader 随后提交更多日志并压缩到 index=4，落后节点安装 index=4 snapshot 后再接收 index=2 副本。旧副本记录 `raft.snapshot_rejected_or_stale`，节点的 snapshot index、applied 和 committed prefix 均不变化；节点随后再次 crash/restart，snapshot index/term、first index、commit、applied 和 committed-prefix digests 均保持一致。
+
+新增 Oracle 检查如下：
+
+| 关系 | 违规码 |
+|---|---|
+| snapshot 不得越过 applied、commit 或 last index | `snapshot_exceeds_applied`、`snapshot_exceeds_commit`、`snapshot_exceeds_log` |
+| 已压缩日志窗口必须由 snapshot 覆盖且连续 | `compacted_without_covering_snapshot`、`log_window_discontinuous` |
+| 非空 snapshot 必须有合法 term，且不得越过节点当前 term | `snapshot_term_missing`、`snapshot_term_exceeds_term` |
+| term、commit、applied、snapshot index 和 first index 跨 restart 不得回退 | `term_regressed`、`commit_regressed`、`applied_regressed`、`snapshot_index_regressed`、`first_index_regressed` |
+
+验证结果：
+
+| 验证 | 结果 |
+|---|---|
+| `go test ./...` | 全部通过 |
+| 新增旧 snapshot 晚到 + 新 snapshot + restart 回归，`-count=100` | 100/100 通过 |
+| 三条固定 snapshot Plan | 11/28/20 Action，全部 completed，Oracle finding=0 |
+| 无 TLC 随机反馈，100条 × 120 Action | succeeded=100，failed=0，Oracle finding=0 |
+| 随机反馈 snapshot 生命周期 | created=549，sent=117，delivered=96，applied=60，rejected/stale=6，compacted=549 |
+
+随机反馈产物位于 `runs/snapshot-phase1-feedback-100-20260722`，三条固定轨迹位于 `runs/snapshot-phase1-normal-20260722`、`runs/snapshot-phase1-catchup-20260722` 和 `runs/snapshot-phase1-duplicate-20260722`。这些实验不连接 TLC，作用是验证 Concrete snapshot/压缩/恢复语义和 Oracle 不产生假阳性；完整 InstallSnapshot 的 TLA+ 状态仍属于后续工作。

@@ -56,3 +56,36 @@ func TestObservationRejectsNonJSONSemanticState(t *testing.T) {
 		t.Fatalf("non-JSON semantic error = %v, want ErrInvalidValue", err)
 	}
 }
+
+func TestObservationValidatesAndCopiesNetworkPartition(t *testing.T) {
+	partition := NetworkPartition{Groups: [][]NodeID{{3, 2}, {1}}}
+	observation := Observation{
+		Nodes: []NodeObservation{
+			{ID: 1, Epoch: 1, Status: NodeRunning},
+			{ID: 2, Epoch: 1, Status: NodeRunning},
+			{ID: 3, Epoch: 1, Status: NodeRunning},
+		},
+		Messages: []MessageObservation{
+			{ID: 1, From: 1, To: 2, SenderEpoch: 1, LinkSequence: 1, Blocked: true},
+			{ID: 2, From: 2, To: 3, SenderEpoch: 1, LinkSequence: 1},
+		},
+		NetworkPartition: &partition,
+	}
+	if err := observation.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	normalized := observation.Normalized()
+	if normalized.NetworkPartition.Groups[0][0] != 1 || normalized.NetworkPartition.Groups[1][0] != 2 {
+		t.Fatalf("normalized partition = %+v", normalized.NetworkPartition)
+	}
+	normalized.NetworkPartition.Groups[0][0] = 9
+	if observation.NetworkPartition.Groups[1][0] != 1 {
+		t.Fatal("partition copy aliases original")
+	}
+
+	invalid := observation.Copy()
+	invalid.Messages[0].Blocked = false
+	if err := invalid.Validate(); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("invalid blocked flag error = %v", err)
+	}
+}

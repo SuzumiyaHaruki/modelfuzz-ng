@@ -7,9 +7,9 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
 )
 
-// Version 7 在 v6 的紧凑 Corpus 水位上增加语义状态与语义转移覆盖，确保
-// 中断恢复后 Corpus 准入决策与不中断执行一致。
-const CheckpointVersion uint32 = 7
+// CheckpointVersion 是正式 v1 实验 checkpoint schema。pre-v1 checkpoint
+// 不提供兼容迁移，恢复时必须同时匹配版本、实验配置和完整配置指纹。
+const CheckpointVersion uint32 = 1
 
 type EventKind string
 
