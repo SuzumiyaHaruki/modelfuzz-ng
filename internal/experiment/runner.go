@@ -241,6 +241,10 @@ type Runner struct {
 	config Config
 }
 
+func feedbackChannelBuffers(config Config) (mutationRequests, mutationResults, executionResults int) {
+	return max(1, min(config.MaxReadyCandidates, 4096)), 1, max(1, config.Parallelism)
+}
+
 func New(config Config) (*Runner, error) {
 	if config.Runs <= 0 {
 		return nil, fmt.Errorf("experiment runs must be positive")
@@ -415,8 +419,12 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	mutationRequests := make(chan mutation.Request, r.config.Runs)
-	mutationResults := make(chan mutationDone, r.config.Runs)
+	// Channel 容量只需覆盖实际并发和候选背压，不能随总运行数增长。长时间
+	// 实验通常把 Runs 设为一个很大的上限；按 Runs 预分配会在开始时保留数
+	// GiB 内存，并在尚未接近运行上限前触发 OOM。
+	mutationRequestBuffer, mutationResultBuffer, executionResultBuffer := feedbackChannelBuffers(r.config)
+	mutationRequests := make(chan mutation.Request, mutationRequestBuffer)
+	mutationResults := make(chan mutationDone, mutationResultBuffer)
 	var mutationWorker sync.WaitGroup
 	mutationWorker.Add(1)
 	go func() {
@@ -436,7 +444,7 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 		}
 	}()
 
-	executionResults := make(chan executionDone, r.config.Runs)
+	executionResults := make(chan executionDone, executionResultBuffer)
 	var executionWorkers sync.WaitGroup
 	inFlight := make(map[int]ScheduledCandidate)
 	running := 0
@@ -980,15 +988,19 @@ func aggregate(report Report) Report {
 }
 
 func newReport(config Config, feedback bool) Report {
+	var runs []Run
+	if !feedback {
+		runs = make([]Run, config.Runs)
+	}
 	return Report{
-		Config: config, Runs: make([]Run, config.Runs), StatusCounts: make(map[string]int), Feedback: feedback,
+		Config: config, Runs: runs, StatusCounts: make(map[string]int), Feedback: feedback,
 		MutationErrors: make([]string, 0), ActionCounts: make(map[string]int), EffectCounts: make(map[string]int),
 		MessageTypeCounts: make(map[string]int),
 		ResolutionCounts:  make(map[string]int), DecisionCounts: make(map[string]int),
 		DecisionCountsBySource: make(map[string]map[string]int),
 		ModelEventCounts:       make(map[string]int), OracleCounts: make(map[string]int),
 		TimerFireCounts: make(map[string]int), FailureCounts: make(map[string]int), TerminationCounts: make(map[string]int),
-		CoverageTimeline:      make([]CoveragePoint, 0, config.Runs),
+		CoverageTimeline:      make([]CoveragePoint, 0, min(config.Runs, 4096)),
 		NoveltyBySource:       make(map[string]SourceNovelty),
 		CorpusAdmissionCounts: make(map[string]int),
 	}
@@ -1022,9 +1034,7 @@ func noveltyPer100Actions(states, transitions, actions int) float64 {
 }
 
 func newFeedbackReport(config Config) Report {
-	report := newReport(config, true)
-	report.Runs = nil
-	return report
+	return newReport(config, true)
 }
 
 func duplicateRatio(observed, unique int) float64 {

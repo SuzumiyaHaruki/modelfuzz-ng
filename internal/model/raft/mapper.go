@@ -14,6 +14,8 @@ import (
 const deliveredMessageEvent = "raft.message_delivered"
 const proposalDroppedEvent = "raft.proposal_dropped"
 const voteQuorumFaultEvent = "raft.vote_quorum_fault_activated"
+const snapshotStatusMappingFaultEvent = "raft.snapshot_status_mapping_fault_activated"
+const restartHardStateFaultEvent = "raft.restart_hard_state_fault_activated"
 
 const (
 	ProfileBasic           = "basic"
@@ -198,11 +200,10 @@ func (m *Mapper) Map(transition model.Transition) ([]model.Event, error) {
 					return nil, err
 				}
 				events = append(events, mapped...)
-			case proposalDroppedEvent, voteQuorumFaultEvent:
+			case proposalDroppedEvent, voteQuorumFaultEvent, snapshotStatusMappingFaultEvent, restartHardStateFaultEvent:
 				// Candidate、无已知 leader 的 follower 或关闭转发时，etcd-raft
-				// 明确丢弃 proposal；fault activation 只是 SUT 插桩记录。
-				// 两者都不直接改变轻量模型状态；异常的 BecomeLeader 会由
-				// 后续正确 quorum 前置条件拒绝。
+				// 明确丢弃 proposal；fault activation 只记录实验插桩。实际异常
+				// 由对应的状态变化或被篡改的 lifecycle 事件进入模型检查。
 				continue
 			case "raft.snapshot_created":
 				if !storageSnapshot {

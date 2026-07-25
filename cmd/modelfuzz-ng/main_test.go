@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/adapters/etcdraft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
@@ -462,6 +463,50 @@ func TestDirectedSnapshotFailureReportsAndRetries(t *testing.T) {
 	lagger := observedNode(t, result.Final, laggerID)
 	if semanticUint64(t, lagger, "snapshot_index") < 2 || semanticUint64(t, lagger, "applied") < 2 {
 		t.Fatalf("lagger did not recover after snapshot retry: %+v", lagger.Semantic)
+	}
+}
+
+func TestSnapshotStatusMappingFaultIsDetected(t *testing.T) {
+	config := defaultCLIConfig()
+	config.Raft.Snapshot.Threshold = 2
+	config.Raft.Snapshot.RetainEntries = 1
+	config.Raft.Faults.SnapshotStatusMap = etcdraft.SnapshotStatusMappingInvert
+	config.Model.Profile = raftmodel.ProfileStorageSnapshot
+	config.Model.MaxLogIndex = 10
+	config.Model.LargestTerm = 10
+	runner, err := buildEngine(config, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := randompolicy.NewSnapshotPartition(9461, randompolicy.SnapshotPartitionConfig{
+		NodeIDs: config.Raft.NodeIDs, MaxValue: config.Model.MaxValue, MaxLogIndex: config.Model.MaxLogIndex,
+		SnapshotThreshold: config.Raft.Snapshot.Threshold, RetainEntries: config.Raft.Snapshot.RetainEntries,
+		FailFirstSnapshot: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := runner.RunSource(context.Background(), policy, 400)
+	if runErr == nil || result.Status != engine.StatusMappingFailed ||
+		!strings.Contains(runErr.Error(), "snapshot status reject=false") {
+		t.Fatalf("mapping fault result/error = %+v/%v", result, runErr)
+	}
+}
+
+func TestRestartHardStateLossFaultIsDetected(t *testing.T) {
+	config := defaultCLIConfig()
+	config.Raft.Faults.RestartLoseHardState = true
+	runner, err := buildEngine(config, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := readPlan(filepath.Join("..", "..", "examples", "plans", "committed-log-restart.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := runner.Run(context.Background(), sequence)
+	if runErr == nil || (result.Status != engine.StatusOracleFailed && result.Status != engine.StatusRuntimeFailed) {
+		t.Fatalf("restart fault result/error = %+v/%v", result, runErr)
 	}
 }
 

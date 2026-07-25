@@ -522,6 +522,22 @@ func TestSnapshotPolicyDefaultsDisabled(t *testing.T) {
 	if config.Snapshot.Threshold != 0 || config.Snapshot.RetainEntries != 0 {
 		t.Fatalf("default snapshot policy = %+v", config.Snapshot)
 	}
+	if config.Faults.SnapshotStatusMap != SnapshotStatusMappingCorrect ||
+		config.Faults.RestartLoseHardState {
+		t.Fatalf("default fault policy = %+v", config.Faults)
+	}
+}
+
+func TestSnapshotStatusMappingFaultValidation(t *testing.T) {
+	config := DefaultConfig()
+	config.Faults.SnapshotStatusMap = SnapshotStatusMappingInvert
+	if _, err := New(config); err != nil {
+		t.Fatalf("invert snapshot status mapping: %v", err)
+	}
+	config.Faults.SnapshotStatusMap = "unknown"
+	if _, err := New(config); err == nil {
+		t.Fatal("unknown snapshot status mapping was accepted")
+	}
 }
 
 func TestAdapterCreatesSnapshotCompactsAndPreservesPrefixAcrossRestart(t *testing.T) {

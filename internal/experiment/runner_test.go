@@ -612,6 +612,20 @@ func TestFeedbackRunnerRefillsEveryAvailableExecutionSlot(t *testing.T) {
 	}
 }
 
+func TestFeedbackRunnerLargeRunLimitDoesNotPreallocatePerRunChannels(t *testing.T) {
+	config := Config{
+		Runs: 10_000_000, Parallelism: 4, MaxReadyCandidates: 1_000_000,
+	}
+	requests, results, executions := feedbackChannelBuffers(config)
+	if requests != 4096 || results != 1 || executions != 4 {
+		t.Fatalf("channel buffers = (%d, %d, %d), want (4096, 1, 4)", requests, results, executions)
+	}
+	report := newFeedbackReport(config)
+	if report.Runs != nil || cap(report.CoverageTimeline) != 4096 {
+		t.Fatalf("large feedback report preallocation: runs=%d timeline_cap=%d", len(report.Runs), cap(report.CoverageTimeline))
+	}
+}
+
 func TestFeedbackRunnerContinuesWithNewSeedAfterMutationFailure(t *testing.T) {
 	runner, _ := New(Config{Runs: 3, BaseSeed: 1, Parallelism: 1, InitialPopulation: 1})
 	report, _, err := runner.RunFeedback(context.Background(), FeedbackOptions{Mutator: failingMutator{}},
