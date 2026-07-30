@@ -25,6 +25,25 @@ type ActionSource interface {
 	Next(observation core.Observation) (action plan.PlanAction, more bool, err error)
 }
 
+// PrefixStep 是一次已完成 Concrete Action 的因果前缀视图。它只包含当前及
+// 过去已经发生的信息，供显式启用的在线分析器使用；默认 Run 不创建该视图。
+type PrefixStep struct {
+	PlanActionIndex     int
+	ConcreteActionIndex int
+	ActionIndex         int
+	Before              core.Observation
+	Record              core.StepRecord
+	After               core.Observation
+	ModelEvents         []model.Event
+}
+
+// PrefixObserver 允许实验性分析器在执行过程中按 Action 顺序观察真实前缀。
+// Observer 不能修改 Runtime、Observation 或模型事件。
+type PrefixObserver interface {
+	Reset(initial core.Observation) error
+	Observe(step PrefixStep) error
+}
+
 // Config 控制 best-effort Plan 的边界。默认允许 partial、skipped 和
 // empty_queue：这些状态会被记录，但不会终止整条 Plan。
 type Config struct {
@@ -77,6 +96,12 @@ func New(runtime *runtimepkg.Runtime, resolver Resolver, mapper model.Mapper, ex
 // Run 执行一条 PlanSequence。每个 PlanAction 都使用上一条 Concrete Action
 // 执行后的最新 Observation 解析，因此消息位置和相对时间不会提前固化。
 func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, error) {
+	return e.RunObserved(ctx, sequence, nil)
+}
+
+// RunObserved 与 Run 使用完全相同的执行路径，仅在显式提供 observer 时同步
+// 发布已完成的 Concrete Action。默认 fuzz 调用 Run，行为不变。
+func (e *Engine) RunObserved(ctx context.Context, sequence plan.PlanSequence, observer PrefixObserver) (Result, error) {
 	if err := sequence.Validate(); err != nil {
 		return fail(newResult(), StatusInvalidPlan, fmt.Errorf("%w: %v", ErrInvalidPlan, err))
 	}
@@ -86,7 +111,7 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 		maximum = e.config.MaxPlanActions
 		budgeted = true
 	}
-	return e.run(ctx, maximum, budgeted, false, nil, func(index int, _ core.Observation) (plan.PlanAction, bool, error) {
+	return e.run(ctx, maximum, budgeted, false, nil, observer, func(index int, _ core.Observation) (plan.PlanAction, bool, error) {
 		return sequence.Actions[index].Copy(), true, nil
 	})
 }
@@ -94,6 +119,17 @@ func (e *Engine) Run(ctx context.Context, sequence plan.PlanSequence) (Result, e
 // RunSource 使用在线策略执行至策略主动结束或达到 maxPlanActions。达到预算是
 // 正常完成，并通过 Result.BudgetExhausted 标记，不作为错误。
 func (e *Engine) RunSource(ctx context.Context, source ActionSource, maxPlanActions int) (Result, error) {
+	return e.RunSourceObserved(ctx, source, maxPlanActions, nil)
+}
+
+// RunSourceObserved is the explicit analysis variant of RunSource. Default
+// fuzz policies continue to call RunSource and do not construct an observer.
+func (e *Engine) RunSourceObserved(
+	ctx context.Context,
+	source ActionSource,
+	maxPlanActions int,
+	observer PrefixObserver,
+) (Result, error) {
 	if source == nil {
 		return fail(newResult(), StatusPolicyFailed, fmt.Errorf("%w: action source is nil", ErrPolicy))
 	}
@@ -103,7 +139,7 @@ func (e *Engine) RunSource(ctx context.Context, source ActionSource, maxPlanActi
 	if e != nil && e.config.MaxPlanActions > 0 && maxPlanActions > e.config.MaxPlanActions {
 		maxPlanActions = e.config.MaxPlanActions
 	}
-	return e.run(ctx, maxPlanActions, true, true, source.Reset, func(_ int, observation core.Observation) (plan.PlanAction, bool, error) {
+	return e.run(ctx, maxPlanActions, true, true, source.Reset, observer, func(_ int, observation core.Observation) (plan.PlanAction, bool, error) {
 		return source.Next(observation.Copy())
 	})
 }
@@ -111,7 +147,10 @@ func (e *Engine) RunSource(ctx context.Context, source ActionSource, maxPlanActi
 type sourceInitializer func(core.Observation) error
 type nextAction func(int, core.Observation) (plan.PlanAction, bool, error)
 
-func (e *Engine) run(ctx context.Context, maximum int, budgeted, online bool, initialize sourceInitializer, next nextAction) (Result, error) {
+func (e *Engine) run(
+	ctx context.Context, maximum int, budgeted, online bool,
+	initialize sourceInitializer, observer PrefixObserver, next nextAction,
+) (Result, error) {
 	result := newResult()
 	if e == nil || e.runtime == nil || e.resolver == nil || e.mapper == nil {
 		return fail(result, StatusRuntimeFailed, fmt.Errorf("%w: engine is not initialized", ErrInvalidConfig))
@@ -131,6 +170,12 @@ func (e *Engine) run(ctx context.Context, maximum int, budgeted, online bool, in
 	}
 	result.Initial = observation.Copy()
 	result.Final = observation.Copy()
+	if observer != nil {
+		if err := observer.Reset(observation.Copy()); err != nil {
+			e.capture(&result, observation)
+			return fail(result, StatusPolicyFailed, fmt.Errorf("%w: prefix observer reset: %v", ErrPolicy, err))
+		}
+	}
 	for _, checker := range e.oracles {
 		findings := checker.Reset(observation.Copy())
 		e.appendFindings(&result, findings, 0)
@@ -281,6 +326,22 @@ planLoop:
 					))
 				}
 				result.ModelEvents = append(result.ModelEvents, event.Copy())
+			}
+			if observer != nil {
+				prefixEvents := make([]model.Event, len(events))
+				for index, event := range events {
+					prefixEvents[index] = event.Copy()
+				}
+				if err := observer.Observe(PrefixStep{
+					PlanActionIndex: planIndex, ConcreteActionIndex: actionIndex,
+					ActionIndex: len(result.Actions.Actions) - 1,
+					Before:      step.BeforeObservation.Copy(), Record: step.Record.Copy(),
+					After: step.Observation.Copy(), ModelEvents: prefixEvents,
+				}); err != nil {
+					e.capture(&result, observation)
+					return fail(result, StatusPolicyFailed, fmt.Errorf(
+						"%w: prefix observer action %d: %v", ErrPolicy, planIndex, err))
+				}
 			}
 			for _, checker := range e.oracles {
 				e.appendFindings(&result, checker.Check(transition.Copy()), len(result.Actions.Actions))

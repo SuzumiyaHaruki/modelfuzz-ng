@@ -1,0 +1,33 @@
+{
+  "schema_version": "raft-breadth-depth-benchmark-v1",
+  "name": "breadth-depth-generalization-threshold5",
+  "phase": "snapshot-threshold-5-generalization",
+  "config": "config-facet-guidance-control.json",
+  "tlc_address": "http://127.0.0.1:2027",
+  "methods": [
+    "M1-local-only-depth",
+    "M5-facet-global-local"
+  ],
+  "goals": ["snapshot-catchup-after-partition", "restart-then-higher-term-message"],
+  "seeds": [9601, 9602, 9603, 9604, 9605],
+  "total_candidate_budget": 90,
+  "global_candidate_budget": 60,
+  "local_candidate_budget": 30,
+  "total_action_budget": 16200,
+  "global_action_budget": 10800,
+  "local_action_budget": 5400,
+  "max_actions_per_plan": 180,
+  "handoff_top_k": 1,
+  "handoff_diversity": true,
+  "handoff_fallback": true,
+  "fixed_energy": 2,
+  "coverage_corpus_limit": 128,
+  "initial_population": 4,
+  "max_ready_candidates": 256,
+  "snapshot_threshold": 5,
+  "retain_entries": 1,
+  "local_frontier_capacity": 1,
+  "save_all_runs": true,
+  "replay_verify": true,
+  "stop_on_target": true
+}

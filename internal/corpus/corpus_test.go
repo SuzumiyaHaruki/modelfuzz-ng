@@ -57,6 +57,30 @@ func TestCorpusCopiesRetainedInput(t *testing.T) {
 	}
 }
 
+func TestExternalAdmissionDoesNotChangeLegacyCoverageBookkeeping(t *testing.T) {
+	collection := NewWithConfig(Config{MinNewModelStates: 25, RequireSemanticNovelty: true})
+	input := Input{
+		RunIndex:          0,
+		Plan:              plan.PlanSequence{Actions: []plan.PlanAction{{Kind: plan.ActionTimeout, Node: 1}}},
+		States:            []model.State{{Key: 7}},
+		SemanticStateKeys: []int64{70},
+	}
+	rejected, retained, err := collection.ConsiderExternal(
+		input, false, AdmissionReason("rejected_no_guidance_novelty"))
+	if err != nil || retained || rejected.AdmissionReason != "rejected_no_guidance_novelty" ||
+		collection.CoverageLen() != 1 || collection.Len() != 0 {
+		t.Fatalf("external rejection = %+v retained=%v err=%v snapshot=%+v",
+			rejected, retained, err, collection.Snapshot())
+	}
+	input.RunIndex = 1
+	retainedEntry, retained, err := collection.ConsiderExternal(
+		input, true, AdmissionReason("admitted_random_without_coverage"))
+	if err != nil || !retained || retainedEntry.ID != "corpus-000000" ||
+		len(retainedEntry.NewStateKeys) != 0 || collection.Len() != 1 {
+		t.Fatalf("external admission = %+v retained=%v err=%v", retainedEntry, retained, err)
+	}
+}
+
 func TestRestoreRoundTrip(t *testing.T) {
 	collection := New()
 	input := Input{

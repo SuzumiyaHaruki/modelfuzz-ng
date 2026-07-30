@@ -1,0 +1,91 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "goal_id": "restart-then-higher-term-message",
+    "hint_strength": "weak",
+    "frontier_top_k": 1,
+    "total_frontier_capacity": 1,
+    "per_branch_minimum_capacity": 1,
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "distance_mode": "staged-distance",
+    "seeds": [
+      4101
+    ],
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 180,
+    "per_waypoint_budget": 20,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": true,
+    "stop_on_target": true,
+    "stop_on_failure": false
+  },
+  "campaigns": [
+    {
+      "id": "c2-diff-weak-operators",
+      "method": "goal-aware-operators-only",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 0,
+      "all_feasible_branches": true,
+      "prefix_preservation": false
+    },
+    {
+      "id": "c2-diff-realized-cap1",
+      "method": "diversity-aware-frontier",
+      "total_frontier_capacity": 1,
+      "all_feasible_branches": true,
+      "prefix_preservation": true
+    },
+    {
+      "id": "c2-diff-realized-cap2",
+      "method": "diversity-aware-frontier",
+      "frontier_top_k": 2,
+      "total_frontier_capacity": 2,
+      "all_feasible_branches": true,
+      "prefix_preservation": true
+    },
+    {
+      "id": "c2-diff-realized-cap4",
+      "method": "diversity-aware-frontier",
+      "frontier_top_k": 4,
+      "total_frontier_capacity": 4,
+      "all_feasible_branches": true,
+      "prefix_preservation": true
+    },
+    {
+      "id": "c2-diff-realized-cap8",
+      "method": "diversity-aware-frontier",
+      "frontier_top_k": 8,
+      "total_frontier_capacity": 8,
+      "all_feasible_branches": true,
+      "prefix_preservation": true
+    },
+    {
+      "id": "c2-diff-planned-only-cap4",
+      "method": "diversity-aware-frontier",
+      "frontier_top_k": 4,
+      "total_frontier_capacity": 4,
+      "branch_awareness": "planned-only",
+      "all_feasible_branches": true,
+      "prefix_preservation": true
+    },
+    {
+      "id": "c2-diff-strong-cap1",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true
+    }
+  ]
+}

@@ -169,6 +169,17 @@ func RestoreWithConfig(snapshot Snapshot, config Config) (*Corpus, error) {
 // Consider 原子地合并覆盖，并在满足准入门槛时保留输入。这样即使多个执行
 // worker 同时完成，同一个覆盖键也只会归属于最先完成的运行。
 func (c *Corpus) Consider(input Input) (Entry, bool, error) {
+	return c.consider(input, nil, "")
+}
+
+// ConsiderExternal records the same raw/v1 coverage bookkeeping as Consider,
+// while taking admission ownership from an explicitly enabled external
+// guidance policy. The legacy Consider path and its thresholds are unchanged.
+func (c *Corpus) ConsiderExternal(input Input, admit bool, reason AdmissionReason) (Entry, bool, error) {
+	return c.consider(input, &admit, reason)
+}
+
+func (c *Corpus) consider(input Input, externalAdmission *bool, externalReason AdmissionReason) (Entry, bool, error) {
 	if c == nil {
 		return Entry{}, false, fmt.Errorf("corpus is nil")
 	}
@@ -209,6 +220,17 @@ func (c *Corpus) Consider(input Input) (Entry, bool, error) {
 		NewStateKeys:              append([]int64(nil), newKeys...),
 		NewSemanticStateKeys:      append([]int64(nil), newSemanticStates...),
 		NewSemanticTransitionKeys: append([]int64(nil), newSemanticTransitions...),
+	}
+	if externalAdmission != nil {
+		entry.AdmissionReason = externalReason
+		if !*externalAdmission {
+			return entry, false, nil
+		}
+		entry.ID = fmt.Sprintf("corpus-%06d", len(c.entries))
+		entry.ParentID = input.ParentID
+		entry.Plan = input.Plan.Copy()
+		c.entries = append(c.entries, entry)
+		return copyEntry(entry), true, nil
 	}
 	semanticNovelty := len(newSemanticStates)+len(newSemanticTransitions) > 0
 	if len(newKeys) < c.config.MinNewModelStates {

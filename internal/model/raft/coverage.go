@@ -563,6 +563,13 @@ func coverageKey(value string) int64 {
 	return int64(binary.BigEndian.Uint64(digest[:8]))
 }
 
+// StableCoverageKey exposes the shared, version-independent hashing operation
+// used by v1, v2, Facet, and Interaction projections. Callers must still keep
+// those coverage collections separate.
+func StableCoverageKey(value string) int64 {
+	return coverageKey(value)
+}
+
 func sortedCoverageKeys(values map[int64]struct{}) []int64 {
 	result := make([]int64, 0, len(values))
 	for value := range values {

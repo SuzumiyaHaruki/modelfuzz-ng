@@ -1,0 +1,22 @@
+{
+  "schema": "facet-guidance-benchmark-v1",
+  "name": "facet-guidance-legacy-pilot",
+  "phase": "pilot-legacy-reference",
+  "config": "config-facet-guidance-control.json",
+  "tlc_address": "http://127.0.0.1:2027",
+  "modes": ["legacy-raw"],
+  "seeds": [710001, 710101, 710201, 710301, 710401],
+  "runs": 30,
+  "max_plan_actions": 80,
+  "initial_population": 4,
+  "parallelism": 1,
+  "fixed_energy": 2,
+  "fixed_parent_selection": "admission-fifo-once",
+  "coverage_corpus_limit": 128,
+  "max_ready_candidates": 256,
+  "artifact_policy": "all",
+  "record_all_coverage_metrics": true,
+  "offline_goal_evaluation": true,
+  "snapshot_threshold": 2,
+  "snapshot_retain_entries": 1
+}

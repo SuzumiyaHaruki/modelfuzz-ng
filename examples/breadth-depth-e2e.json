@@ -1,0 +1,40 @@
+{
+  "schema_version": "raft-breadth-depth-benchmark-v1",
+  "name": "breadth-depth-two-stage-e2e",
+  "phase": "two-stage-e2e",
+  "config": "config-facet-guidance-control.json",
+  "tlc_address": "http://127.0.0.1:2027",
+  "methods": [
+    "M0-facet-only-breadth",
+    "M1-local-only-depth",
+    "M2-random-global-local",
+    "M3-raw-global-local",
+    "M4-v2-global-local",
+    "M5-facet-global-local"
+  ],
+  "goals": [
+    "snapshot-catchup-after-partition",
+    "restart-then-higher-term-message"
+  ],
+  "seeds": [9201],
+  "total_candidate_budget": 12,
+  "global_candidate_budget": 8,
+  "local_candidate_budget": 4,
+  "total_action_budget": 2160,
+  "global_action_budget": 1440,
+  "local_action_budget": 720,
+  "max_actions_per_plan": 180,
+  "handoff_top_k": 4,
+  "handoff_diversity": true,
+  "handoff_fallback": true,
+  "fixed_energy": 2,
+  "coverage_corpus_limit": 128,
+  "initial_population": 4,
+  "max_ready_candidates": 256,
+  "snapshot_threshold": 3,
+  "retain_entries": 1,
+  "local_frontier_capacity": 1,
+  "save_all_runs": true,
+  "replay_verify": true,
+  "stop_on_target": true
+}

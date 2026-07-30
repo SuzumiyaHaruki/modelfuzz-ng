@@ -243,24 +243,38 @@ func shouldKeepCoveragePoint(existing []CoveragePoint, point CoveragePoint) bool
 }
 
 func validateCorpusAdmissions(report Report) error {
-	known := map[string]struct{}{
-		string(corpus.AdmissionRetainedRaw):                        {},
-		string(corpus.AdmissionRetainedSemanticState):              {},
-		string(corpus.AdmissionRetainedSemanticTransition):         {},
-		string(corpus.AdmissionRetainedSemanticStateAndTransition): {},
-		string(corpus.AdmissionRejectedRawThreshold):               {},
-		string(corpus.AdmissionRejectedNoSemanticNovelty):          {},
+	known := map[string]bool{
+		string(corpus.AdmissionRetainedRaw):                        true,
+		string(corpus.AdmissionRetainedSemanticState):              true,
+		string(corpus.AdmissionRetainedSemanticTransition):         true,
+		string(corpus.AdmissionRetainedSemanticStateAndTransition): true,
+		string(corpus.AdmissionRejectedRawThreshold):               false,
+		string(corpus.AdmissionRejectedNoSemanticNovelty):          false,
+		"admitted_random_without_coverage":                         true,
+		"admitted_new_raw":                                         true,
+		"admitted_new_v2":                                          true,
+		"admitted_new_facet":                                       true,
+		"admitted_new_facet_and_interaction":                       true,
+		"admitted_new_interaction":                                 true,
+		"rejected_no_guidance_novelty":                             false,
+		"rejected_unsuccessful_execution":                          false,
+		"rejected_empty_plan_key":                                  false,
+		"rejected_duplicate_plan":                                  false,
+		"rejected_corpus_limit":                                    false,
 	}
 	total := 0
+	retained := 0
 	for reason, count := range report.CorpusAdmissionCounts {
-		if _, exists := known[reason]; !exists || count < 0 {
+		admitted, exists := known[reason]
+		if !exists || count < 0 {
 			return fmt.Errorf("summary contains invalid corpus admission %q=%d", reason, count)
 		}
 		total += count
+		if admitted {
+			retained += count
+		}
 	}
 	counts := report.CorpusAdmissionCounts
-	retained := counts[string(corpus.AdmissionRetainedRaw)] + counts[string(corpus.AdmissionRetainedSemanticState)] +
-		counts[string(corpus.AdmissionRetainedSemanticTransition)] + counts[string(corpus.AdmissionRetainedSemanticStateAndTransition)]
 	state := counts[string(corpus.AdmissionRetainedSemanticState)] + counts[string(corpus.AdmissionRetainedSemanticStateAndTransition)]
 	transition := counts[string(corpus.AdmissionRetainedSemanticTransition)] + counts[string(corpus.AdmissionRetainedSemanticStateAndTransition)]
 	if total > report.Succeeded || retained != report.CorpusEntries ||

@@ -1,0 +1,133 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "seeds": [4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109, 4110],
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 180,
+    "per_waypoint_budget": 20,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": false,
+    "stop_on_target": true,
+    "stop_on_failure": false,
+    "distance_mode": "staged-distance",
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "per_branch_minimum_capacity": 1
+  },
+  "campaigns": [
+    {
+      "id": "m0-goal-a-unguided",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "frontier_top_k": 1,
+      "prefix_preservation": false
+    },
+    {
+      "id": "m1-goal-a-weak-operators",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "weak",
+      "frontier_top_k": 1,
+      "prefix_preservation": false,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m2-goal-a-weak-standard-k1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m3-goal-a-weak-standard-k4",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "frontier_top_k": 4,
+      "total_frontier_capacity": 4,
+      "prefix_preservation": true,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m4-goal-a-weak-diversity-k4",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "diversity-aware-frontier",
+      "hint_strength": "weak",
+      "frontier_top_k": 4,
+      "total_frontier_capacity": 4,
+      "prefix_preservation": true,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m5-goal-a-strong-standard-k1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true
+    },
+    {
+      "id": "m1-goal-b-weak-operators",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "weak",
+      "frontier_top_k": 1,
+      "prefix_preservation": false,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m2-goal-b-weak-standard-k1",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m3-goal-b-weak-standard-k4",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "frontier_top_k": 4,
+      "total_frontier_capacity": 4,
+      "prefix_preservation": true,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m4-goal-b-weak-diversity-k4",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "diversity-aware-frontier",
+      "hint_strength": "weak",
+      "frontier_top_k": 4,
+      "total_frontier_capacity": 4,
+      "prefix_preservation": true,
+      "all_feasible_branches": true
+    },
+    {
+      "id": "m5-goal-b-strong-standard-k1",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true
+    }
+  ]
+}

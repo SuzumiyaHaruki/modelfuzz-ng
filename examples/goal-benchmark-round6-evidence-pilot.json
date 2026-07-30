@@ -1,0 +1,98 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "hint_strength": "weak",
+    "frontier_top_k": 2,
+    "total_frontier_capacity": 2,
+    "per_branch_minimum_capacity": 1,
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "branch_evidence_mode": "partial",
+    "branch_budget_mode": "round-robin",
+    "stage_budget": {
+      "initial_quota": 5,
+      "supported_evidence_quota": 3,
+      "commitment_quota": 5,
+      "next_waypoint_quota": 5,
+      "per_branch_total_cap": 20
+    },
+    "evidence_ablation": "none",
+    "evidence_priority_multiplier": 16,
+    "formation_failure_report": true,
+    "prefix_preservation": true,
+    "distance_mode": "staged-distance",
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 180,
+    "per_waypoint_budget": 20,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": true,
+    "stop_on_target": true,
+    "stop_on_failure": false
+  },
+  "campaigns": [
+    {
+      "id": "pilot-goal-a-e0-standard",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "branch_template_ids": ["goal-a-delayed-delivery", "goal-a-drop-append"],
+      "branch_frontier_mode": "standard",
+      "micro_progress_policy": "off",
+      "seeds": [3101, 3102, 3103, 3104, 3105]
+    },
+    {
+      "id": "pilot-goal-a-e1-legacy-micro",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "diversity-aware-frontier",
+      "branch_template_ids": ["goal-a-delayed-delivery", "goal-a-drop-append"],
+      "branch_frontier_mode": "diversity",
+      "micro_progress_policy": "legacy",
+      "seeds": [3101, 3102, 3103, 3104, 3105]
+    },
+    {
+      "id": "pilot-goal-a-e2-evidence",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "evidence-aware-frontier",
+      "branch_template_ids": ["goal-a-delayed-delivery", "goal-a-drop-append"],
+      "branch_frontier_mode": "evidence-aware",
+      "micro_progress_policy": "necessary-only",
+      "seeds": [3101, 3102, 3103, 3104, 3105]
+    },
+    {
+      "id": "pilot-goal-b-e0-standard",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "branch_template_ids": ["goal-b-higher-term-vote", "goal-b-higher-term-msgapp"],
+      "branch_frontier_mode": "standard",
+      "micro_progress_policy": "off",
+      "seeds": [4101, 4102, 4103, 4104, 4105]
+    },
+    {
+      "id": "pilot-goal-b-e1-legacy-micro",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "diversity-aware-frontier",
+      "branch_template_ids": ["goal-b-higher-term-vote", "goal-b-higher-term-msgapp"],
+      "branch_frontier_mode": "diversity",
+      "micro_progress_policy": "legacy",
+      "seeds": [4101, 4102, 4103, 4104, 4105]
+    },
+    {
+      "id": "pilot-goal-b-e2-evidence",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "evidence-aware-frontier",
+      "branch_template_ids": ["goal-b-higher-term-vote", "goal-b-higher-term-msgapp"],
+      "branch_frontier_mode": "evidence-aware",
+      "micro_progress_policy": "necessary-only",
+      "seeds": [4101, 4102, 4103, 4104, 4105]
+    }
+  ]
+}

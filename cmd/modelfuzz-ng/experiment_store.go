@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/coverageguidance"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model/tlc"
@@ -21,21 +23,29 @@ import (
 )
 
 type experimentSettings struct {
-	ReleaseVersion   string                `json:"release_version"`
-	SemanticSchema   string                `json:"semantic_schema"`
-	LLMInit          bool                  `json:"llm_init"`
-	LLMMutate        bool                  `json:"llm_mutate"`
-	Initializer      string                `json:"initializer"`
-	OnlinePolicy     string                `json:"online_policy"`
-	Mutator          string                `json:"mutator"`
-	LLMProvider      llm.Provider          `json:"llm_provider,omitempty"`
-	LLMModel         string                `json:"llm_model,omitempty"`
-	LLMBaseURL       string                `json:"llm_base_url,omitempty"`
-	LLMAPIKeyEnv     string                `json:"llm_api_key_env,omitempty"`
-	LLMTimeoutMillis int64                 `json:"llm_timeout_millis,omitempty"`
-	RandomMutation   mutation.RandomConfig `json:"random_mutation"`
-	ArtifactPolicy   artifactPolicy        `json:"artifact_policy"`
-	CheckpointEvery  int                   `json:"checkpoint_every"`
+	ReleaseVersion         string                `json:"release_version"`
+	SemanticSchema         string                `json:"semantic_schema"`
+	LLMInit                bool                  `json:"llm_init"`
+	LLMMutate              bool                  `json:"llm_mutate"`
+	Initializer            string                `json:"initializer"`
+	OnlinePolicy           string                `json:"online_policy"`
+	Mutator                string                `json:"mutator"`
+	LLMProvider            llm.Provider          `json:"llm_provider,omitempty"`
+	LLMModel               string                `json:"llm_model,omitempty"`
+	LLMBaseURL             string                `json:"llm_base_url,omitempty"`
+	LLMAPIKeyEnv           string                `json:"llm_api_key_env,omitempty"`
+	LLMTimeoutMillis       int64                 `json:"llm_timeout_millis,omitempty"`
+	RandomMutation         mutation.RandomConfig `json:"random_mutation"`
+	ArtifactPolicy         artifactPolicy        `json:"artifact_policy"`
+	CheckpointEvery        int                   `json:"checkpoint_every"`
+	CoverageGuidanceMode   coverageguidance.Mode `json:"coverage_guidance_mode,omitempty"`
+	CoverageGuidanceSchema string                `json:"coverage_guidance_schema,omitempty"`
+	CoverageEnergyMode     string                `json:"coverage_energy_mode,omitempty"`
+	FixedEnergy            int                   `json:"fixed_energy,omitempty"`
+	FixedParentSelection   string                `json:"fixed_parent_selection,omitempty"`
+	CoverageCorpusLimit    int                   `json:"coverage_corpus_limit,omitempty"`
+	RecordAllCoverage      bool                  `json:"record_all_coverage_metrics,omitempty"`
+	OfflineGoalEvaluation  bool                  `json:"offline_goal_evaluation,omitempty"`
 }
 
 type tlcMetricsArtifact struct {
@@ -95,15 +105,65 @@ func (p artifactPolicy) saves(run experiment.Run) bool {
 }
 
 type experimentStore struct {
-	directory         string
-	policy            artifactPolicy
-	config            cliConfig
-	journal           *persistence.Journal
-	runs              *persistence.Journal
-	corpus            *persistence.Journal
-	corpusEntries     []corpus.Entry
-	lastEventSequence uint64
-	llmStats          func() llm.Stats
+	directory            string
+	policy               artifactPolicy
+	config               cliConfig
+	journal              *persistence.Journal
+	runs                 *persistence.Journal
+	corpus               *persistence.Journal
+	coverageObservations *persistence.Journal
+	corpusDecisions      *persistence.Journal
+	parentSelections     *persistence.Journal
+	corpusEntries        []corpus.Entry
+	lastEventSequence    uint64
+	llmStats             func() llm.Stats
+}
+
+func (s *experimentStore) enableCoverageGuidance(committedRuns int) error {
+	if s == nil {
+		return fmt.Errorf("experiment store is nil")
+	}
+	paths := []string{"coverage-observations.jsonl", "corpus-decisions.jsonl"}
+	for _, name := range paths {
+		if err := persistence.KeepJSONLines(filepath.Join(s.directory, name), committedRuns); err != nil {
+			return fmt.Errorf("calibrate %s: %w", name, err)
+		}
+	}
+	var err error
+	if s.coverageObservations, err = persistence.OpenJournal(filepath.Join(s.directory, paths[0])); err != nil {
+		return err
+	}
+	if s.corpusDecisions, err = persistence.OpenJournal(filepath.Join(s.directory, paths[1])); err != nil {
+		_ = s.coverageObservations.Close()
+		return err
+	}
+	// Parent selections are emitted only when an admitted parent still has
+	// execution budget. Trim any record written after the committed checkpoint.
+	parentPath := filepath.Join(s.directory, "parent-selection.jsonl")
+	keep := 0
+	data, readErr := os.ReadFile(parentPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var selection coverageguidance.ParentSelection
+		if err := json.Unmarshal(line, &selection); err != nil {
+			break // KeepJSONLines below repairs an incomplete or invalid tail.
+		}
+		if selection.Sequence > committedRuns {
+			break
+		}
+		keep++
+	}
+	if err := persistence.KeepJSONLines(parentPath, keep); err != nil {
+		return err
+	}
+	s.parentSelections, err = persistence.OpenJournal(parentPath)
+	return err
 }
 
 func openExperimentStore(directory string, policy artifactPolicy, committedRunSummaries, committedCorpusEntries int) (*experimentStore, error) {
@@ -178,6 +238,21 @@ func (s *experimentStore) hooks() experiment.Hooks {
 		OnCorpusEntry: func(entry corpus.Entry) error {
 			return s.corpus.Append(entry)
 		},
+		OnCoverageGuidance: func(observation coverageguidance.CoverageObservation, decision coverageguidance.Decision) error {
+			if s.coverageObservations == nil || s.corpusDecisions == nil {
+				return fmt.Errorf("coverage guidance journals are not enabled")
+			}
+			if err := s.coverageObservations.Append(observation); err != nil {
+				return err
+			}
+			return s.corpusDecisions.Append(decision)
+		},
+		OnParentSelection: func(selection coverageguidance.ParentSelection) error {
+			if s.parentSelections == nil {
+				return fmt.Errorf("parent selection journal is not enabled")
+			}
+			return s.parentSelections.Append(selection)
+		},
 		OnRunComplete: s.writeCompletion,
 	}
 }
@@ -212,5 +287,15 @@ func (s *experimentStore) Close() error {
 	if s == nil {
 		return nil
 	}
-	return errors.Join(s.journal.Close(), s.runs.Close(), s.corpus.Close())
+	var guidanceErr error
+	if s.coverageObservations != nil {
+		guidanceErr = errors.Join(guidanceErr, s.coverageObservations.Close())
+	}
+	if s.corpusDecisions != nil {
+		guidanceErr = errors.Join(guidanceErr, s.corpusDecisions.Close())
+	}
+	if s.parentSelections != nil {
+		guidanceErr = errors.Join(guidanceErr, s.parentSelections.Close())
+	}
+	return errors.Join(s.journal.Close(), s.runs.Close(), s.corpus.Close(), guidanceErr)
 }

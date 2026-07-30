@@ -1,0 +1,69 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "method": "diversity-aware-frontier",
+    "hint_strength": "strong",
+    "frontier_top_k": 1,
+    "total_frontier_capacity": 1,
+    "per_branch_minimum_capacity": 1,
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "prefix_preservation": true,
+    "distance_mode": "staged-distance",
+    "seeds": [5201, 5202, 5203],
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 18,
+    "action_budget": 2400,
+    "max_actions_per_plan": 160,
+    "per_waypoint_budget": 18,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": true,
+    "stop_on_target": true,
+    "stop_on_failure": false
+  },
+  "campaigns": [
+    {
+      "id": "pilot-a-drop-append",
+      "goal_id": "snapshot-catchup-after-partition",
+      "branch_template_ids": ["goal-a-drop-append"]
+    },
+    {
+      "id": "pilot-a-delayed-delivery",
+      "goal_id": "snapshot-catchup-after-partition",
+      "branch_template_ids": ["goal-a-delayed-delivery"]
+    },
+    {
+      "id": "pilot-a-snapshot-after-heal",
+      "goal_id": "snapshot-catchup-after-partition",
+      "branch_template_ids": ["goal-a-snapshot-after-heal"]
+    },
+    {
+      "id": "pilot-a-snapshot-failure-retry",
+      "goal_id": "snapshot-catchup-after-partition",
+      "branch_template_ids": ["goal-a-snapshot-failure-retry"]
+    },
+    {
+      "id": "pilot-b-heartbeat",
+      "goal_id": "restart-then-higher-term-message",
+      "branch_template_ids": ["goal-b-higher-term-heartbeat"]
+    },
+    {
+      "id": "pilot-b-msgapp",
+      "goal_id": "restart-then-higher-term-message",
+      "branch_template_ids": ["goal-b-higher-term-msgapp"]
+    },
+    {
+      "id": "pilot-b-vote",
+      "goal_id": "restart-then-higher-term-message",
+      "branch_template_ids": ["goal-b-higher-term-vote"]
+    }
+  ]
+}

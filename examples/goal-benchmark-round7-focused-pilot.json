@@ -1,0 +1,93 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "frontier_top_k": 1,
+    "per_branch_minimum_capacity": 1,
+    "all_feasible_branches": false,
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "branch_evidence_mode": "off",
+    "branch_frontier_mode": "standard",
+    "branch_budget_mode": "round-robin",
+    "stage_budget": {
+      "initial_quota": 2,
+      "supported_evidence_quota": 2,
+      "commitment_quota": 2,
+      "next_waypoint_quota": 1,
+      "per_branch_total_cap": 20
+    },
+    "evidence_ablation": "none",
+    "evidence_priority_multiplier": 16,
+    "micro_progress_policy": "off",
+    "formation_failure_report": false,
+    "distance_mode": "staged-distance",
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 30,
+    "action_budget": 4500,
+    "max_actions_per_plan": 180,
+    "per_waypoint_budget": 30,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": false,
+    "stop_on_target": true,
+    "stop_on_failure": false,
+    "focused_goal_a": true,
+    "focused_goal_b": true,
+    "advisor_priority_multiplier": 16,
+    "advisor_local_action_cap": 9,
+    "advisor_no_progress_cap": 8,
+    "advisor_queue_limit": 64,
+    "advisor_ablation": "none",
+    "advisor_record_only": false,
+    "branch_evidence_record_only": false
+  },
+  "campaigns": [
+    {
+      "id": "pilot-goal-a-legacy-standard-c1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true,
+      "mutation_advisor": "off",
+      "seeds": [5101, 5102, 5103, 5104, 5105]
+    },
+    {
+      "id": "pilot-goal-a-focused-standard-c1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true,
+      "mutation_advisor": "raft-focused",
+      "seeds": [5101, 5102, 5103, 5104, 5105]
+    },
+    {
+      "id": "pilot-goal-b-legacy-standard-c1",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true,
+      "mutation_advisor": "off",
+      "seeds": [6101, 6102, 6103, 6104, 6105]
+    },
+    {
+      "id": "pilot-goal-b-focused-standard-c1",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "total_frontier_capacity": 1,
+      "prefix_preservation": true,
+      "mutation_advisor": "raft-focused",
+      "seeds": [6101, 6102, 6103, 6104, 6105]
+    }
+  ]
+}

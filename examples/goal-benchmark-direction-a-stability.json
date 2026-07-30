@@ -1,0 +1,135 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "seeds": [4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109, 4110],
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 160,
+    "per_waypoint_budget": 20,
+    "frontier_top_k": 4,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:22061",
+    "replay_verify": true,
+    "save_all_runs": false,
+    "distance_mode": "staged-distance"
+  },
+  "campaigns": [
+    {
+      "id": "goal-a-unguided",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-operators-strong",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "strong",
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-frontier-strong-k4",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-directed-reference",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "snapshot-directed-reference",
+      "hint_strength": "none",
+      "frontier_top_k": 1,
+      "candidate_budget": 1,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-b-unguided",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-b-operators-strong",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "strong",
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-b-frontier-strong",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-b-operators-weak",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "weak",
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-b-frontier-weak",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "weak",
+      "prefix_preservation": true,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-frontier-strong-k1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "frontier_top_k": 1,
+      "prefix_preservation": true,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-frontier-strong-k2",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "frontier_top_k": 2,
+      "prefix_preservation": true,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-frontier-strong-k8",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "frontier_top_k": 8,
+      "prefix_preservation": true,
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-frontier-no-prefix",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "frontier-no-prefix-preservation",
+      "hint_strength": "strong",
+      "stop_on_target": true
+    },
+    {
+      "id": "goal-a-frontier-boolean",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "distance_mode": "boolean-only",
+      "stop_on_target": true
+    }
+  ]
+}

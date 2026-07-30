@@ -1,0 +1,22 @@
+{
+  "schema": "facet-guidance-benchmark-v1",
+  "name": "facet-guidance-mutant-quorum-control",
+  "phase": "mutant-quorum-control",
+  "config": "config-facet-guidance-quorum-control.json",
+  "tlc_address": "http://127.0.0.1:2027",
+  "modes": ["random", "raw-fixed", "v2-fixed", "facet-fixed", "facet-interaction-fixed"],
+  "seeds": [730001, 730101, 730201, 730301, 730401],
+  "runs": 60,
+  "max_plan_actions": 100,
+  "initial_population": 4,
+  "parallelism": 1,
+  "fixed_energy": 2,
+  "fixed_parent_selection": "admission-fifo-once",
+  "coverage_corpus_limit": 256,
+  "max_ready_candidates": 512,
+  "artifact_policy": "failures",
+  "record_all_coverage_metrics": true,
+  "offline_goal_evaluation": false,
+  "snapshot_threshold": 2,
+  "snapshot_retain_entries": 1
+}

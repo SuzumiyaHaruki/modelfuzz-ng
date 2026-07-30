@@ -1,0 +1,135 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "seeds": [4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109, 4110],
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 160,
+    "per_waypoint_budget": 20,
+    "frontier_top_k": 1,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:22061",
+    "replay_verify": true,
+    "save_all_runs": false,
+    "distance_mode": "staged-distance"
+  },
+  "campaigns": [
+    {
+      "id": "goal-a-control-unguided",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "config": "examples/config-snapshot-status-control.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-a-mutant-unguided",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "config": "examples/config-snapshot-status-mutant.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-a-control-operators",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "strong",
+      "config": "examples/config-snapshot-status-control.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-a-mutant-operators",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "strong",
+      "config": "examples/config-snapshot-status-mutant.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-a-control-frontier-k1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "config": "examples/config-snapshot-status-control.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-a-mutant-frontier-k1",
+      "goal_id": "snapshot-catchup-after-partition",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "config": "examples/config-snapshot-status-mutant.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-b-control-unguided",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "config": "examples/config-restart-hardstate-goal-control.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-b-mutant-unguided",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "unguided-local-mutation",
+      "hint_strength": "none",
+      "config": "examples/config-restart-hardstate-goal-mutant.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-b-control-operators",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "strong",
+      "config": "examples/config-restart-hardstate-goal-control.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-b-mutant-operators",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "goal-aware-operators-only",
+      "hint_strength": "strong",
+      "config": "examples/config-restart-hardstate-goal-mutant.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-b-control-frontier-k1",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "config": "examples/config-restart-hardstate-goal-control.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    },
+    {
+      "id": "goal-b-mutant-frontier-k1",
+      "goal_id": "restart-then-higher-term-message",
+      "method": "waypoint-frontier",
+      "hint_strength": "strong",
+      "prefix_preservation": true,
+      "config": "examples/config-restart-hardstate-goal-mutant.json",
+      "stop_on_target": false,
+      "stop_on_failure": true
+    }
+  ]
+}

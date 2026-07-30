@@ -1,0 +1,46 @@
+{
+  "schema_version": "raft-breadth-depth-benchmark-v1",
+  "name": "breadth-depth-stage1-local-only-30",
+  "phase": "three-node-stage1-handoff-diagnosis",
+  "config": "config-facet-guidance-control.json",
+  "tlc_address": "http://127.0.0.1:2027",
+  "methods": [
+    "M1-local-only-depth"
+  ],
+  "goals": [
+    "snapshot-catchup-after-partition",
+    "restart-then-higher-term-message"
+  ],
+  "seeds": [
+    9501,
+    9502,
+    9503,
+    9504,
+    9505,
+    9506,
+    9507,
+    9508,
+    9509,
+    9510
+  ],
+  "total_candidate_budget": 30,
+  "global_candidate_budget": 0,
+  "local_candidate_budget": 30,
+  "total_action_budget": 5400,
+  "global_action_budget": 0,
+  "local_action_budget": 5400,
+  "max_actions_per_plan": 180,
+  "handoff_top_k": 1,
+  "handoff_diversity": true,
+  "handoff_fallback": true,
+  "fixed_energy": 2,
+  "coverage_corpus_limit": 128,
+  "initial_population": 4,
+  "max_ready_candidates": 256,
+  "snapshot_threshold": 3,
+  "retain_entries": 1,
+  "local_frontier_capacity": 1,
+  "save_all_runs": true,
+  "replay_verify": true,
+  "stop_on_target": true
+}

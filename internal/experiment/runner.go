@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/coverageguidance"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/metrics"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/model"
@@ -54,12 +55,13 @@ const (
 )
 
 type Candidate struct {
-	ID       string             `json:"id"`
-	ParentID string             `json:"parent_id,omitempty"`
-	Kind     CandidateKind      `json:"kind"`
-	Source   string             `json:"source"`
-	Depth    int                `json:"depth"`
-	Plan     *plan.PlanSequence `json:"plan,omitempty"`
+	ID            string             `json:"id"`
+	ParentID      string             `json:"parent_id,omitempty"`
+	ParentPlanKey string             `json:"parent_plan_key,omitempty"`
+	Kind          CandidateKind      `json:"kind"`
+	Source        string             `json:"source"`
+	Depth         int                `json:"depth"`
+	Plan          *plan.PlanSequence `json:"plan,omitempty"`
 }
 
 type FeedbackExecution struct {
@@ -78,6 +80,10 @@ type FeedbackOptions struct {
 	Initializer       Initializer
 	Mutator           mutation.Mutator
 	CoverageProjector func(states []model.State, events []model.Event) (corpus.Projection, error)
+	// Guidance is nil for the frozen legacy Corpus path. New fixed-energy modes
+	// must supply both Guidance and ObservationBuilder explicitly.
+	Guidance           coverageguidance.CoverageGuidance
+	ObservationBuilder func(index int, seed int64, candidate Candidate, execution FeedbackExecution) (coverageguidance.CoverageObservation, error)
 	// Resume 恢复一个此前由同一 Config 产生的反馈实验。
 	Resume *Checkpoint
 	// ResumeCorpusEntries 是 corpus.jsonl 中 checkpoint 水位以前的完整条目。
@@ -355,6 +361,9 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 	if options.Mutator == nil {
 		return Report{}, corpus.Checkpoint{}, fmt.Errorf("feedback mutator must not be nil")
 	}
+	if options.Guidance != nil && options.ObservationBuilder == nil {
+		return Report{}, corpus.Checkpoint{}, fmt.Errorf("coverage guidance requires an observation builder")
+	}
 	if options.InitializerName == "" {
 		if options.Initializer == nil {
 			options.InitializerName = "random_init"
@@ -584,7 +593,94 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 			case CandidateInitial:
 				accumulator.report.InitialExecutions++
 			}
-			if run.Succeeded && len(done.execution.Result.ModelStates) > 0 {
+			if options.Guidance != nil {
+				projection := defaultCoverageProjection(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
+				if run.Succeeded && options.CoverageProjector != nil {
+					var projectionErr error
+					projection, projectionErr = options.CoverageProjector(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
+					if projectionErr != nil {
+						run.Error = joinErrorText(run.Error, "semantic coverage projection: "+projectionErr.Error())
+						run.Status = engine.StatusMappingFailed
+						run.Succeeded = false
+					}
+				}
+				observation, observationErr := options.ObservationBuilder(
+					done.index, done.seed, copyCandidate(done.candidate), done.execution)
+				if observationErr != nil {
+					run.Error = joinErrorText(run.Error, "coverage observation: "+observationErr.Error())
+					run.Status = engine.StatusMappingFailed
+					run.Succeeded = false
+				} else {
+					observation.ElapsedMillis =
+						(elapsedOffset + time.Since(started)).Milliseconds()
+					observation.Outcome.Succeeded = run.Succeeded
+					observation.Outcome.Status = string(run.Status)
+					if normalizeErr := coverageguidance.NormalizeObservation(&observation); normalizeErr != nil {
+						run.Error = joinErrorText(run.Error, "coverage observation: "+normalizeErr.Error())
+						run.Status = engine.StatusMappingFailed
+						run.Succeeded = false
+					} else {
+						decisionStarted := time.Now()
+						decision, decisionErr := options.Guidance.Observe(observation)
+						if decisionErr != nil {
+							return stopWithError(fmt.Errorf("coverage guidance decision: %w", decisionErr))
+						}
+						observation.Computation.CorpusDecisionNanos =
+							time.Since(decisionStarted).Nanoseconds()
+						if options.Hooks.OnCoverageGuidance != nil {
+							if err := options.Hooks.OnCoverageGuidance(observation, decision); err != nil {
+								return stopWithError(fmt.Errorf("persist coverage guidance: %w", err))
+							}
+						}
+						entry, retained, corpusErr := collection.ConsiderExternal(corpus.Input{
+							ParentID: done.candidate.ParentID, Source: done.candidate.Source,
+							Depth: done.candidate.Depth, RunIndex: done.index, Seed: done.seed,
+							Plan:                   done.execution.Plan,
+							States:                 done.execution.Result.ModelStates,
+							SemanticStateKeys:      projection.StateKeys,
+							SemanticTransitionKeys: projection.TransitionKeys,
+						}, decision.WasAdmitted, corpus.AdmissionReason(decision.AdmissionReason))
+						run.NewStateKeys = coverageValueKeys(decision.NewCoverageUnits.Raw)
+						run.NewRawStates = len(decision.NewCoverageUnits.Raw)
+						run.NewSemanticStates = len(entry.NewSemanticStateKeys)
+						run.NewSemanticTransitions = len(entry.NewSemanticTransitionKeys)
+						run.CorpusAdmission = decision.AdmissionReason
+						if corpusErr != nil {
+							run.Error = joinErrorText(run.Error, corpusErr.Error())
+							run.Succeeded = false
+						} else if retained {
+							if options.Hooks.OnCorpusEntry != nil {
+								if err := options.Hooks.OnCorpusEntry(entry); err != nil {
+									if rollbackErr := collection.RollbackLast(entry); rollbackErr != nil {
+										return stopWithError(fmt.Errorf("persist corpus entry: %w; rollback: %v", err, rollbackErr))
+									}
+									return stopWithError(fmt.Errorf("persist corpus entry: %w", err))
+								}
+							}
+							run.Retained, run.CorpusID = true, entry.ID
+							count := decision.FixedEnergy
+							if count > 0 && nextRunIndex < r.config.Runs {
+								if options.Hooks.OnParentSelection != nil {
+									selection := coverageguidance.ParentSelection{
+										Schema: coverageguidance.SchemaVersion, Sequence: completed,
+										CorpusID: entry.ID, ParentPlanKey: observation.PlanKey,
+										Policy: "admission-fifo-once", FixedEnergy: count,
+									}
+									if err := options.Hooks.OnParentSelection(selection); err != nil {
+										return stopWithError(fmt.Errorf("persist parent selection: %w", err))
+									}
+								}
+								request := mutation.Request{
+									Entry: entry, Count: count,
+									Seed: mutationSeed(r.config.BaseSeed, entry.RunIndex),
+								}
+								pending[entry.ID] = request
+								mutationRequests <- request
+							}
+						}
+					}
+				}
+			} else if run.Succeeded && len(done.execution.Result.ModelStates) > 0 {
 				projection := defaultCoverageProjection(done.execution.Result.ModelStates, done.execution.Result.ModelEvents)
 				if options.CoverageProjector != nil {
 					var projectionErr error
@@ -669,7 +765,8 @@ func (r *Runner) RunFeedback(ctx context.Context, options FeedbackOptions, execu
 				copy := sequence.Copy()
 				candidate := Candidate{
 					ID: fmt.Sprintf("candidate-%06d", nextCandidateID), ParentID: mutated.entry.ID,
-					Kind: CandidateMutation, Source: options.Mutator.Name(), Depth: mutated.entry.Depth + 1, Plan: &copy,
+					ParentPlanKey: digestPlan(mutated.entry.Plan),
+					Kind:          CandidateMutation, Source: options.Mutator.Name(), Depth: mutated.entry.Depth + 1, Plan: &copy,
 				}
 				if len(ready) == r.config.MaxReadyCandidates {
 					ready = ready[1:]
@@ -774,6 +871,14 @@ func mutationCount(newStates, perState, maximum int) int {
 		return maximum
 	}
 	return min(newStates*perState, maximum)
+}
+
+func coverageValueKeys(values []coverageguidance.CoverageValue) []int64 {
+	result := make([]int64, len(values))
+	for index := range values {
+		result[index] = values[index].Key
+	}
+	return result
 }
 
 func defaultCoverageProjection(states []model.State, _ []model.Event) corpus.Projection {

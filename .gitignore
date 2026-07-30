@@ -4,6 +4,11 @@
 /models/raft/states/
 /tools/tlc-server/.cache/
 /tools/tlc-server/build/
+.tmp/
+artifact-freeze/
+cleanup-candidates.json
+__pycache__/
+*.pyc
 *.out
 .env
 .env.*

@@ -1,0 +1,59 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "method": "evidence-aware-frontier",
+    "hint_strength": "weak",
+    "frontier_top_k": 2,
+    "total_frontier_capacity": 2,
+    "per_branch_minimum_capacity": 1,
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "branch_evidence_mode": "partial",
+    "branch_frontier_mode": "evidence-aware",
+    "branch_budget_mode": "round-robin",
+    "stage_budget": {
+      "initial_quota": 5,
+      "supported_evidence_quota": 3,
+      "commitment_quota": 5,
+      "next_waypoint_quota": 5,
+      "per_branch_total_cap": 20
+    },
+    "evidence_ablation": "none",
+    "evidence_priority_multiplier": 16,
+    "micro_progress_policy": "necessary-only",
+    "formation_failure_report": true,
+    "prefix_preservation": true,
+    "distance_mode": "staged-distance",
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 180,
+    "per_waypoint_budget": 20,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": true,
+    "stop_on_target": true,
+    "stop_on_failure": false
+  },
+  "campaigns": [
+    {
+      "id": "pilot2-goal-a-evidence",
+      "goal_id": "snapshot-catchup-after-partition",
+      "branch_template_ids": ["goal-a-delayed-delivery", "goal-a-drop-append"],
+      "seeds": [3101, 3102, 3103, 3104, 3105]
+    },
+    {
+      "id": "pilot2-goal-b-evidence",
+      "goal_id": "restart-then-higher-term-message",
+      "branch_template_ids": ["goal-b-higher-term-vote", "goal-b-higher-term-msgapp"],
+      "seeds": [4101, 4102, 4103, 4104, 4105]
+    }
+  ]
+}

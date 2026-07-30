@@ -1,0 +1,60 @@
+{
+  "schema_version": "raft-goal-benchmark-v1",
+  "defaults": {
+    "goal_id": "restart-then-higher-term-message",
+    "method": "diversity-aware-frontier",
+    "hint_strength": "weak",
+    "frontier_top_k": 4,
+    "per_branch_minimum_capacity": 1,
+    "all_feasible_branches": true,
+    "branch_awareness": "realized-aware",
+    "branch_dimension_ablation": "none",
+    "branch_budget_allocation": "round-robin",
+    "prefix_preservation": true,
+    "distance_mode": "staged-distance",
+    "seeds": [4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109, 4110],
+    "config": "examples/config-snapshot.json",
+    "node_count": 3,
+    "candidate_budget": 20,
+    "action_budget": 3000,
+    "max_actions_per_plan": 180,
+    "per_waypoint_budget": 20,
+    "snapshot_threshold": 3,
+    "retain_entries": 1,
+    "crash_quota": 2,
+    "partition_enabled": true,
+    "strict_tlc": true,
+    "tlc_address": "http://127.0.0.1:2023",
+    "replay_verify": true,
+    "save_all_runs": false,
+    "stop_on_target": true,
+    "stop_on_failure": false
+  },
+  "campaigns": [
+    {
+      "id": "ablation-planned-only-cap4",
+      "total_frontier_capacity": 4,
+      "branch_awareness": "planned-only"
+    },
+    {
+      "id": "ablation-realized-cap1",
+      "frontier_top_k": 1,
+      "total_frontier_capacity": 1
+    },
+    {
+      "id": "ablation-realized-cap2",
+      "frontier_top_k": 2,
+      "total_frontier_capacity": 2
+    },
+    {
+      "id": "ablation-realized-cap8",
+      "frontier_top_k": 8,
+      "total_frontier_capacity": 8
+    },
+    {
+      "id": "ablation-realized-cap4-no-key-message",
+      "total_frontier_capacity": 4,
+      "branch_dimension_ablation": "key-message"
+    }
+  ]
+}

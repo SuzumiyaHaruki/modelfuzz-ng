@@ -1,5 +1,3 @@
-检查一下实验状况检查一下实验状况检查一下实验状况
-
 # ModelFuzz-NG
 
 当前正式版本为 **v1.0.0**。
@@ -28,6 +26,11 @@ ModelFuzz-NG 是一个以进程内 etcd-raft 为首个完整目标的模型引�
 - `docs`：Timer 设计与目标目录结构。
 
 正式 v1 的 schema、能力边界和数据起点见[`docs/v1-baseline.md`](docs/v1-baseline.md)。pre-v1 实验记录索引见[`docs/experiments/README.md`](docs/experiments/README.md)。 系统执行流程、Raft 事件语义、典型实验结果、与原始 ModelFuzz 的双向能力对照，以及原论文所称两个 etcd bug 的证据边界见 [`docs/system-overview-and-modelfuzz-comparison.md`](docs/system-overview-and-modelfuzz-comparison.md)。
+
+当前研究方法已冻结为 **Facet + Waypoint Frontier + Protocol-Aware Local
+Mutation**。Branch、Evidence、Diversity Frontier 和 Stage Budgeting 仅为显式启用的
+历史实验/诊断能力。各轮报告、正式 manifest、accepted artifact 和排除实验的统一入口见
+[`docs/codebase-cleanup-and-method-freeze.md`](docs/codebase-cleanup-and-method-freeze.md)。
 
 ## 本地依赖
 
@@ -191,6 +194,202 @@ go run ./cmd/modelfuzz-ng experiment \
 
 `-runs` 现在表示闭环中的总执行次数，不再表示彼此独立的随机实验。默认配置下， 初始种子仍由在线随机策略逐步读取最新 Observation 产生，因此不会缓存容易失效的 MessageID。原始 TLC fingerprint 继续完整计入覆盖统计；默认只有一次成功执行至少 增加25个全局未见的 `State.Key`，并且同时增加归一化 Raft 语义状态或语义转移时， 才会携带 Plan 和增量覆盖键进入 Corpus。可用 `-min-new-model-states` 调整原始门槛， `-semantic-coverage=false` 仅用于对照实验。语义投影保留活动节点、角色、相对 term、 日志形状、提交/复制滞后和投票关系，同时忽略绝对 term 与 nextIndex 内部记账差异。 完整 Trace 由逐运行 产物策略单独保存，不再重复写入 Corpus 和 checkpoint。候选按 FIFO 继续执行。 当前默认每个新状态生成1个本地随机变异、每条 Corpus 最多2个；Ready 队列默认上限为4096，可用 `-max-ready-candidates` 调整。队列满时确定性淘汰最旧候选， 优先保留新候选。变异在独立 goroutine 中产生，可以和已经排队的 Plan 执行重叠。 每条新实验轨迹默认最多生成1000个 PlanAction；在线随机动作通常一对一解析为 Concrete Action，消息批量选择可能一对多展开，最终仍受 `runtime_limits.max_actions` 约束。短烟雾实验可显式传入较小的 `-max-plan-actions`。 离线随机 Mutation 还会主动用 `crash(node) ... restart(node)` 包围一段已有动作， 默认选择概率为5%，可用 `-crash-restart-pair-percent` 调整。 它也会默认以5%概率插入覆盖至少一个已有动作的 `partition ... heal` 对，可用 `-partition-heal-pair-percent` 调整；在线策略对应 `-partition-weight` 和 `-heal-weight`，默认2/8。 候选入队前会检查节点生命周期和同时停止节点上限，不会生成重复 crash 或未 crash 就 restart 的配对。 在线 balanced 随机策略会根据最新节点状态生成 crash/restart，默认 crash 权重为1， 同时最多停止1个节点且不会停止最后一个运行节点；每条轨迹最多4个 crash 周期， 相邻周期至少间隔48个 Action，Restart 不受 cooldown 限制。对应参数为 `-crash-weight`、`-restart-weight`、`-max-crash-episodes` 和 `-lifecycle-cooldown`。 发往停止节点的在途消息可在恢复后继续参与调度。 它也会向已知当前 Leader 的 Follower 生成客户端请求，并把产生的 `MsgProp` 作为 普通受控消息调度；Candidate 或尚不知道 Leader 的 Follower 不进入随机请求候选集， 避免把预算浪费在确定会被丢弃的 proposal 上。 默认动作权重将 Deliver 提高到60、强制 timeout 降到5；一次 timeout 后4个动作内 不再生成新的强制 timeout，已有 Leader 时其权重还会进一步降到四分之一。非空链路 上的过期消息 Start 会钳制到当前最后一个位置，并记录 `selector_start_clamped`；空链路 仍记录 `message_not_available`，Concrete Trace 始终保存最终 MessageID 和位置。
 
+实验性的粗粒度状态 `raft-coverage-v2-prototype` 与正式 v1 并行存在，但不参与当前
+Corpus 准入，也不是默认在线指标。它只能从保存了完整 TLC 状态文本的逐运行 artifact
+离线重算；分析命令只读输入，并要求输出报告位于原实验目录之外：
+
+```bash
+go run ./cmd/modelfuzz-ng coverage-compare \
+  -input runs/EXPERIMENT_WITH_ALL_ARTIFACTS \
+  -output /tmp/coverage-v2-comparison.json
+```
+
+只有 `runs.jsonl`、聚合 report 或 Trace 而没有 `model-states.json` 时，命令会明确
+拒绝分析。Schema、规范化方法和第一轮实测结果见
+[`docs/semantic-coverage-v2-prototype.md`](docs/semantic-coverage-v2-prototype.md)。
+
+第二轮新增只读的语义覆盖分解命令。它要求每个 run 同时保留
+`model-states.json`、`model-events.json`、`trace.json`、`config.json` 和
+`result.json`，用于确定性对齐模型状态与网络/恢复上下文：
+
+```bash
+go run ./cmd/modelfuzz-ng coverage-factorize \
+  -input runs/EXPERIMENT_WITH_ALL_ARTIFACTS \
+  -output /tmp/raft-coverage-factorization.json
+```
+
+该命令统计 v2 字段基数、单字段/字段组消融和条件分裂，并并行计算独立的 Election、
+Replication、Snapshot、Recovery、Network Facet 及少量二元 interaction。Facet schema
+为 `raft-coverage-facets-v1-prototype`，不参与默认 Corpus 准入，也不会重新拼成一个
+全局状态键。对齐规则、32 份真实 artifact 的结果和限制见
+[`docs/semantic-coverage-factorization.md`](docs/semantic-coverage-factorization.md)。
+
+第三轮新增显式的人工 Behavior Goal 原型 `raft-behavior-goals-v1-prototype`。
+它不会接管默认 fuzz、Corpus 准入、v1/v2 或 Facet；当前固定支持
+`snapshot-catchup-after-partition` 和
+`restart-then-higher-term-message`。三种对照模式是普通本地变异、
+只使用 Goal-aware operator，以及保存和重放最佳因果前缀的 Waypoint Frontier：
+
+```bash
+go run ./cmd/modelfuzz-ng goal-search \
+  -config examples/config-snapshot.json \
+  -goal snapshot-catchup-after-partition \
+  -mode waypoint-frontier \
+  -output runs/goal-a-frontier-seed-101 \
+  -seed 101 \
+  -candidate-budget 15 -action-budget 1500 \
+  -max-actions-per-plan 140 -per-waypoint-budget 15 \
+  -frontier-top-k 6 \
+  -strict-tlc=true -tlc http://127.0.0.1:2023 \
+  -goal-aware-mutation=true -prefix-preservation=true \
+  -save-all-runs=true \
+  -snapshot-threshold 3 -retain-entries 1 \
+  -workers 1 -replay-verify=true
+```
+
+普通变异模式要求
+`-goal-aware-mutation=false -prefix-preservation=false`；Goal-aware-only
+模式要求 `-goal-aware-mutation=true -prefix-preservation=false`。多个独立输出
+可按 Goal 和方法汇总：
+
+```bash
+go run ./cmd/modelfuzz-ng goal-compare \
+  -input runs/manual-goal-comparison \
+  -output runs/manual-goal-comparison/comparison-summary.json
+```
+
+每个输出包含版本化 Goal 定义与设置、在线/离线 progress、Frontier
+Plan/Trace、逐次 replay 校验、标准 Runtime/TLC/Oracle artifact 和最终报告。
+该原型不调用 LLM，也暂不支持 checkpoint/resume。设计、因果边界、小规模实验
+和限制见
+[`docs/manual-behavior-goals-and-waypoints.md`](docs/manual-behavior-goals-and-waypoints.md)。
+
+第四轮为方向 A 增加 hint strength、Frontier top-K、no-prefix、Distance 消融、
+Snapshot directed 参考以及可恢复的批量实验命令。正式矩阵由 manifest 明确列出，
+每个 Campaign/seed 使用独立 Frontier 和输出目录：
+
+```bash
+go run ./cmd/modelfuzz-ng goal-benchmark \
+  -manifest examples/goal-benchmark-direction-a-stability.json \
+  -output /tmp/modelfuzz-ng-direction-a-stability
+
+go run ./cmd/modelfuzz-ng goal-benchmark \
+  -manifest examples/goal-benchmark-direction-a-mutants.json \
+  -output /tmp/modelfuzz-ng-direction-a-mutants
+```
+
+`goal-search` 新增 `-hint-strength none|weak|strong`、
+`-distance-mode boolean-only|staged-distance`、`-stop-on-target` 和
+`-stop-on-failure`。另有 `frontier-no-prefix-preservation` 与仅供 Goal A 参考的
+`snapshot-directed-reference` 模式。批量输出包含逐 seed 原始报告、完整命令、
+环境、seed 多样性、Wilson 区间汇总和 figure-ready CSV。10-seed 结果、消融解释、
+mutant 检出与限制见
+[`docs/waypoint-frontier-validation-and-bug-detection.md`](docs/waypoint-frontier-validation-and-bug-detection.md)。
+
+第五轮新增版本化的人工 Behavior Branch 原型
+`raft-behavior-branches-v1-prototype`，用于在同一个 Goal 下显式区分多条因果路径。
+`PlannedBranchSignature` 记录准备尝试的语义策略，
+`RealizedBranchSignature` 只根据已经发生的 Action、Effect、消息类别、相对 term、
+网络和生命周期 evidence 递增形成；两者不相符时会记录偏离及首次可判定位置。
+Branch key 不包含节点 ID、MessageID、绝对 term/index、seed、时间戳或 Plan/Trace hash。
+
+新增搜索模式 `diversity-aware-frontier`。它的容量是全局总容量，而不是
+“分支数 × 每分支 K”；未判定前按 Planned Branch 隔离，判定后按真实
+Realized Branch 保留，并在明显 Goal progress 差距出现时应用一阶 waypoint
+progress guard。普通 `waypoint-frontier` 的历史语义保持不变；需要固定总容量对照时
+显式使用 `-total-frontier-capacity`。示例：
+
+```bash
+go run ./cmd/modelfuzz-ng goal-search \
+  -config examples/config-snapshot.json \
+  -goal snapshot-catchup-after-partition \
+  -mode diversity-aware-frontier \
+  -output runs/goal-a-branch-diversity \
+  -seed 4101 -candidate-budget 20 -action-budget 3000 \
+  -hint-strength weak -all-feasible-branches=true \
+  -total-frontier-capacity 4 -per-branch-minimum-capacity 1 \
+  -branch-awareness realized-aware \
+  -branch-dimension-ablation none \
+  -prefix-preservation=true -goal-aware-mutation=true \
+  -strict-tlc=true -tlc http://127.0.0.1:2023
+```
+
+每次运行会额外保存 `branch-catalog.json`、`branch-feasibility.json`、
+`branch-instances.jsonl`、`branch-progress.jsonl`、
+`branch-frontier-manifest.json`、`planned-realized-mapping.json` 和
+`branch-summary.json`。批量实验还生成 `per-seed-branches.csv` 与
+`per-branch-bug-detection.csv`。Pilot、M0–M5、公平容量对照、消融和 mutant
+矩阵见 `examples/goal-benchmark-branches-pilot.json`、
+`examples/goal-benchmark-branch-diversity-stability.json`、
+`examples/goal-benchmark-branch-diversity-ablations.json` 与
+`examples/goal-benchmark-branch-diversity-mutants.json`；设计和实测结论见
+[`docs/behavior-branch-diversity-and-frontier.md`](docs/behavior-branch-diversity-and-frontier.md)。
+
+第六轮在不放宽完整 Realized Branch 的前提下，增加了前缀可观察的
+Partial Evidence、Commitment 和确定性阶段预算。最小示例：
+
+```bash
+go run ./cmd/modelfuzz-ng goal-search \
+  -config examples/config-snapshot.json \
+  -goal restart-then-higher-term-message \
+  -mode evidence-aware-frontier \
+  -output runs/goal-b-evidence-stage \
+  -seed 4101 -candidate-budget 30 -action-budget 4500 \
+  -hint-strength weak -total-frontier-capacity 2 \
+  -branch-evidence-mode partial \
+  -branch-frontier-mode evidence-aware \
+  -branch-budget-mode stage-budgeted \
+  -branch-initial-quota 5 -branch-supported-quota 3 \
+  -branch-commitment-quota 5 -branch-next-waypoint-quota 5 \
+  -branch-total-cap 20 -evidence-priority-multiplier 16 \
+  -micro-progress-policy necessary-only \
+  -all-feasible-branches=true -prefix-preservation=true \
+  -strict-tlc=true -tlc http://127.0.0.1:2023
+```
+
+Evidence 模式新增 `branch-evidence-catalog.json`、
+`branch-evidence.jsonl`、`branch-commitments.jsonl`、
+`branch-evidence-summary.json`、`branch-formation-failures.jsonl`、
+`branch-budget-ledger.jsonl`、`branch-budget-summary.json`、
+`micro-progress-registry.json`、`micro-progress-utility.csv` 和
+`evidence-frontier-manifest.json`。`goal-compare` 还会从逐运行报告生成
+`single-branch-reachability.csv`、`per-evidence-result.csv`、
+`per-branch-budget.csv` 与 figure-ready CSV。C=2 个案可用
+`c2-differential-analysis` 离线生成逐 Action 对齐记录。正式、公平和 mutant
+manifest 分别见 `examples/goal-benchmark-round6-formal.json` 与
+`examples/goal-benchmark-round6-mutants.json`；设计和实验结论见
+[`docs/partial-branch-evidence-and-stage-budgeting.md`](docs/partial-branch-evidence-and-stage-budgeting.md)。
+
+第七轮冻结 Branch/Evidence 在线扩展，并增加可替换的协议专用局部 Mutation
+Advisor。普通弱 Standard Frontier 可显式启用 Raft focused 模式：
+
+```bash
+go run ./cmd/modelfuzz-ng goal-search \
+  -config examples/config-snapshot.json \
+  -goal snapshot-catchup-after-partition \
+  -mode waypoint-frontier \
+  -output runs/goal-a-focused \
+  -seed 7101 -candidate-budget 30 -action-budget 4500 \
+  -hint-strength weak -total-frontier-capacity 1 \
+  -mutation-advisor raft-focused \
+  -focused-goal-a on -focused-goal-b on \
+  -advisor-priority-multiplier 16 \
+  -advisor-local-action-cap 9 \
+  -advisor-no-progress-cap 8 -advisor-queue-limit 64 \
+  -advisor-ablation none \
+  -prefix-preservation=true \
+  -strict-tlc=true -tlc http://127.0.0.1:2023
+```
+
+Advisor 只读取当前 Observation 和合法动作，不读取未来 Trace，不把最终 MessageID
+写入 Plan，也不绕过 Runtime。`-advisor-record-only` 可只记录建议；
+`-branch-evidence-record-only` 保留 Branch/Evidence 诊断且不影响搜索。
+每个运行新增 `mutation-advisor-decisions.jsonl`、可重算 summary、stage/reason
+CSV、协议耦合报告和冻结 JSON。正式 M0–M4、消融、mutant/control 结果见
+[`docs/focused-protocol-aware-mutation-and-method-freeze.md`](docs/focused-protocol-aware-mutation-and-method-freeze.md)，
+Branch/Evidence 的兼容性与冻结边界见
+[`docs/branch-evidence-freeze.md`](docs/branch-evidence-freeze.md)。
+
 为避免反馈队列长期只围绕早期 Corpus 分支持续局部变异，可以按完成执行数周期性 注入新的在线随机种子：
 
 ```bash
@@ -228,6 +427,73 @@ go run ./cmd/modelfuzz-ng experiment -resume runs/random-local \
 ```
 
 恢复会继续使用原来的 run index、seed、Corpus 和候选队列；中断时尚未完成的候选 允许确定性重跑。`runs.jsonl` 或 `corpus.jsonl` 已写但未进入 checkpoint 的记录会先被 截去再重跑，不会形成重复 run index 或 Corpus ID。正式 v1 checkpoint schema 为1；检查点包含实验配置指纹，修改 SUT、Engine、Policy 或 Mutator 配置后不能误接着旧实验运行。JSONL 最后一条若因 进程崩溃只写入了一部分，重新打开时只截去该不完整尾记录。
+
+### Facet-Guided Corpus 公平比较
+
+普通 `experiment` 的默认 Corpus 语义保持不变。需要比较在线覆盖反馈时，必须显式选择
+guidance mode，并为 G0～G4 使用相同的固定 energy、FIFO-once 父 Plan 选择和 Corpus
+上限。例如：
+
+```bash
+go run ./cmd/modelfuzz-ng experiment \
+  -config examples/config-facet-guidance-control.json \
+  -tlc http://127.0.0.1:2027 \
+  -output runs/facet-fixed-example \
+  -runs 60 -max-plan-actions 80 \
+  -coverage-guidance-mode facet-fixed \
+  -coverage-energy-mode fixed -fixed-energy 2 \
+  -fixed-parent-selection admission-fifo-once \
+  -coverage-corpus-limit 128 \
+  -record-all-coverage-metrics=true \
+  -offline-goal-evaluation=true
+```
+
+G0 `random` 不查看任何 coverage novelty：每个成功且 Plan key 唯一的候选都会进入
+有界 Corpus，并在固定 FIFO 调度下恰好产生固定数量的子候选。G1 `raw-fixed`、G2
+`v2-fixed`、G3 `facet-fixed`、G4 `facet-interaction-fixed` 分别使用 Raw、v2、五个
+独立 Facet、Facet 或冻结 Interaction 的新颖性准入。兼容模式 `legacy-raw` 继续使用
+历史 Raw 阈值、energy 和队列行为，不属于 fixed-energy 公平矩阵。
+
+正式矩阵可由 manifest 可恢复地执行：
+
+```bash
+go run ./cmd/modelfuzz-ng coverage-benchmark \
+  -manifest examples/facet-guidance-formal.json \
+  -output runs/facet-guidance-formal
+```
+
+每个 mode/seed 目录保存完整 observation、准入决策、父 Plan 选择、各维度增长、
+Corpus 效率、离线 Goal 和交叉覆盖摘要。原始 JSONL 可以确定性重算：
+
+```bash
+go run ./cmd/modelfuzz-ng coverage-summarize \
+  -input runs/facet-guidance-formal/facet-fixed/seed-720001
+```
+
+Facet 在线投影与 `coverage-factorize` 复用同一组 CoverageFrame 和 Raft Facet
+实现；五个 Facet 分开维护，不拼接成新的完整状态。设计、公平性和正式实验结论见
+[`docs/facet-guided-corpus-and-breadth-evaluation.md`](docs/facet-guided-corpus-and-breadth-evaluation.md)。
+
+### 显式广度—深度两阶段实验
+
+`breadth-depth-benchmark` 将冻结的 Global Corpus、确定性 Handoff 和
+Waypoint+focused local search 严格隔离。普通 fuzz 和 goal-search 的默认行为不变；
+组合方法只通过版本化 manifest 显式启用：
+
+```bash
+go run ./cmd/modelfuzz-ng breadth-depth-benchmark \
+  -manifest examples/breadth-depth-formal.json \
+  -output runs/breadth-depth-formal
+```
+
+M0～M5 分别覆盖 Facet-only、Local-only 和 Random/Raw/v2/Facet→Local。正式配置
+使用总计 90 candidate、16,200 Action、60/30 两阶段拆分和 Handoff K=1。
+每个 Handoff seed 在进入局部 Frontier 前都会核对 Trace、Effect、Observation、
+MessageID、Goal、Facet 和 StableKey；已有完整目录可用 `-skip-completed=true`
+只重算根级统计。当前正式结论是：Facet→Local 在两阶段方法中广度最高，也增加了
+成功相对语义路径，但 Goal reach 和成本没有超过 Local-only，因此两种模式保持
+独立，不设组合默认值。完整矩阵、泛化、control/mutant、Replay/ddmin 和复现说明见
+[`docs/facet-waypoint-breadth-depth-combination.md`](docs/facet-waypoint-breadth-depth-combination.md)。
 
 两个 LLM 开关相互独立且默认关闭：
 

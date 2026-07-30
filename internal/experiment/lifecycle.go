@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/coverageguidance"
 )
 
 // CheckpointVersion 是正式 v1 实验 checkpoint schema。pre-v1 checkpoint
@@ -197,8 +198,10 @@ type Completion struct {
 // Hooks 将调度器与文件系统解耦。回调同步执行；返回错误会安全停止实验并
 // 尝试保存最后一个检查点。
 type Hooks struct {
-	OnEvent       func(Event) error
-	OnCorpusEntry func(corpus.Entry) error
-	OnRunComplete func(Completion) error
-	OnCheckpoint  func(Checkpoint) error
+	OnEvent            func(Event) error
+	OnCorpusEntry      func(corpus.Entry) error
+	OnCoverageGuidance func(coverageguidance.CoverageObservation, coverageguidance.Decision) error
+	OnParentSelection  func(coverageguidance.ParentSelection) error
+	OnRunComplete      func(Completion) error
+	OnCheckpoint       func(Checkpoint) error
 }

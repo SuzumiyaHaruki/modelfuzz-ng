@@ -20,6 +20,8 @@ import (
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/adapters/etcdraft"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/core"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/corpus"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/coverageanalysis"
+	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/coverageguidance"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/engine"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/experiment"
 	"github.com/SuzumiyaHaruki/modelfuzz-ng/internal/llm"
@@ -65,6 +67,28 @@ func runCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return minimizeCommand(ctx, args[1:], stdout, stderr)
 	case "experiment":
 		return experimentCommand(ctx, args[1:], stdout, stderr)
+	case "coverage-compare":
+		return coverageCompareCommand(args[1:], stdout, stderr)
+	case "coverage-factorize":
+		return coverageFactorizeCommand(args[1:], stdout, stderr)
+	case "coverage-benchmark":
+		return coverageBenchmarkCommand(ctx, args[1:], stdout, stderr)
+	case "coverage-summarize":
+		return coverageSummarizeCommand(args[1:], stdout, stderr)
+	case "breadth-depth-benchmark":
+		return breadthDepthBenchmarkCommand(ctx, args[1:], stdout, stderr)
+	case "handoff-probe-benchmark":
+		return handoffProbeBenchmarkCommand(ctx, args[1:], stdout, stderr)
+	case "handoff-diagnose":
+		return handoffDiagnoseCommand(ctx, args[1:], stdout, stderr)
+	case "goal-search":
+		return goalSearchCommand(ctx, args[1:], stdout, stderr)
+	case "goal-compare":
+		return goalCompareCommand(args[1:], stdout, stderr)
+	case "goal-benchmark":
+		return goalBenchmarkCommand(ctx, args[1:], stdout, stderr)
+	case "c2-differential-analysis":
+		return c2DifferentialAnalysisCommand(args[1:], stdout, stderr)
 	case "version":
 		if len(args) != 1 {
 			return fmt.Errorf("version 子命令不接受参数")
@@ -122,6 +146,19 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	llmBaseURL := flags.String("llm-base-url", "", "覆盖 provider 的 OpenAI-compatible API 基础地址")
 	llmAPIKeyEnv := flags.String("llm-api-key-env", "", "覆盖保存 API Key 的环境变量名称")
 	llmTimeout := flags.Duration("llm-timeout", 90*time.Second, "单次 LLM 请求超时")
+	coverageGuidanceModeText := flags.String(
+		"coverage-guidance-mode", string(coverageguidance.ModeLegacyRaw),
+		"显式覆盖引导模式: random、raw-fixed、v2-fixed、facet-fixed、facet-interaction-fixed、legacy-raw",
+	)
+	coverageEnergyMode := flags.String("coverage-energy-mode", "legacy", "覆盖引导能量模式: fixed 或 legacy")
+	fixedEnergy := flags.Int("fixed-energy", 2, "G0-G4 每个准入父 Plan 的固定变异数")
+	fixedParentSelection := flags.String(
+		"fixed-parent-selection", "admission-fifo-once",
+		"G0-G4 的固定父 Plan 调度；本版本仅支持 admission-fifo-once",
+	)
+	coverageCorpusLimit := flags.Int("coverage-corpus-limit", 4096, "G0-G4 Corpus 条目上限")
+	recordAllCoverage := flags.Bool("record-all-coverage-metrics", true, "为每个候选记录 Raw/v2/Facet/Interaction")
+	offlineGoalEvaluation := flags.Bool("offline-goal-evaluation", false, "实验后允许离线计算冻结 Goal；不参与在线决策")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -174,6 +211,39 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		if savedSettings.OnlinePolicy == "" {
 			return fmt.Errorf("原实验设置缺少 online_policy")
 		}
+		savedGuidanceMode := savedSettings.CoverageGuidanceMode
+		if savedGuidanceMode == "" {
+			savedGuidanceMode = coverageguidance.ModeLegacyRaw
+		}
+		resumeGuidanceValues := map[string][2]string{
+			"coverage-guidance-mode": {*coverageGuidanceModeText, string(savedGuidanceMode)},
+			"coverage-energy-mode":   {*coverageEnergyMode, savedSettings.CoverageEnergyMode},
+			"fixed-parent-selection": {*fixedParentSelection, savedSettings.FixedParentSelection},
+		}
+		for name, values := range resumeGuidanceValues {
+			if setFlags[name] && values[0] != values[1] {
+				return fmt.Errorf("恢复时 -%s=%s 与原实验中的 %s 不一致", name, values[0], values[1])
+			}
+		}
+		if setFlags["fixed-energy"] && *fixedEnergy != savedSettings.FixedEnergy {
+			return fmt.Errorf("恢复时 -fixed-energy=%d 与原实验中的 %d 不一致", *fixedEnergy, savedSettings.FixedEnergy)
+		}
+		if setFlags["coverage-corpus-limit"] && *coverageCorpusLimit != savedSettings.CoverageCorpusLimit {
+			return fmt.Errorf("恢复时 -coverage-corpus-limit=%d 与原实验中的 %d 不一致", *coverageCorpusLimit, savedSettings.CoverageCorpusLimit)
+		}
+		if setFlags["record-all-coverage-metrics"] && *recordAllCoverage != savedSettings.RecordAllCoverage {
+			return fmt.Errorf("恢复时 -record-all-coverage-metrics 与原实验不一致")
+		}
+		if setFlags["offline-goal-evaluation"] && *offlineGoalEvaluation != savedSettings.OfflineGoalEvaluation {
+			return fmt.Errorf("恢复时 -offline-goal-evaluation 与原实验不一致")
+		}
+		*coverageGuidanceModeText = string(savedGuidanceMode)
+		*coverageEnergyMode = savedSettings.CoverageEnergyMode
+		*fixedParentSelection = savedSettings.FixedParentSelection
+		*fixedEnergy = savedSettings.FixedEnergy
+		*coverageCorpusLimit = savedSettings.CoverageCorpusLimit
+		*recordAllCoverage = savedSettings.RecordAllCoverage
+		*offlineGoalEvaluation = savedSettings.OfflineGoalEvaluation
 		if err := persistence.ReadJSON(filepath.Join(resumeDirectory, "llm-stats.json"), &previousLLMStats); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("读取原 LLM 统计: %w", err)
 		}
@@ -327,6 +397,31 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	if *initialPolicy != "random" && config.Raft.Snapshot.Threshold == 0 {
 		return fmt.Errorf("-initial-policy=%s 要求启用 snapshot-threshold", *initialPolicy)
 	}
+	guidanceMode, err := coverageguidance.ParseMode(*coverageGuidanceModeText)
+	if err != nil {
+		return err
+	}
+	if guidanceMode == coverageguidance.ModeLegacyRaw {
+		if *coverageEnergyMode != "legacy" {
+			return fmt.Errorf("legacy-raw 必须使用 -coverage-energy-mode=legacy")
+		}
+	} else {
+		if *coverageEnergyMode != "fixed" {
+			return fmt.Errorf("%s 必须显式使用 -coverage-energy-mode=fixed，不能继承 legacy energy", guidanceMode)
+		}
+		if *fixedEnergy <= 0 {
+			return fmt.Errorf("-fixed-energy 必须为正数")
+		}
+		if *coverageCorpusLimit <= 0 {
+			return fmt.Errorf("-coverage-corpus-limit 必须为正数")
+		}
+		if *fixedParentSelection != "admission-fifo-once" {
+			return fmt.Errorf("未知 -fixed-parent-selection=%q；当前仅支持 admission-fifo-once", *fixedParentSelection)
+		}
+		if *llmInit || *llmMutate {
+			return fmt.Errorf("本轮 G0-G4 广度实验禁止 LLM；请关闭 -llm-init 和 -llm-mutate")
+		}
+	}
 	if config.TLC.Address != "" && *parallelism != 1 {
 		return fmt.Errorf("旧 controlled TLC 不保证请求隔离，连接 TLC 时 -parallelism 必须为1")
 	}
@@ -437,6 +532,26 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		projection, projectionErr := raftmodel.ProjectCoverage(states, events)
 		return corpus.Projection{StateKeys: projection.StateKeys, TransitionKeys: projection.TransitionKeys}, projectionErr
 	}
+	var guidanceController *coverageguidance.Controller
+	if guidanceMode != coverageguidance.ModeLegacyRaw {
+		guidanceController, err = coverageguidance.New(coverageguidance.Config{
+			Mode: guidanceMode, FixedEnergy: *fixedEnergy, CorpusLimit: *coverageCorpusLimit,
+		})
+		if err != nil {
+			return err
+		}
+		feedbackOptions.Guidance = guidanceController
+		feedbackOptions.ObservationBuilder = func(
+			index int, _ int64, candidate experiment.Candidate, execution experiment.FeedbackExecution,
+		) (coverageguidance.CoverageObservation, error) {
+			return coverageanalysis.BuildCoverageObservation(coverageanalysis.ObservationInput{
+				RunID:       fmt.Sprintf("%s-feedback-%04d", config.ExecutionID, index),
+				CandidateID: candidate.ID, ParentPlanKey: candidate.ParentPlanKey,
+				Source: candidate.Source, Plan: execution.Plan, Result: execution.Result,
+				ModelConfig: config.Model,
+			})
+		}
+	}
 	feedbackOptions.Resume = resumeCheckpoint
 	feedbackOptions.CheckpointEvery = *checkpointEvery
 	if resumeCheckpoint == nil {
@@ -451,6 +566,13 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		LLMInit: *llmInit, LLMMutate: *llmMutate, Initializer: feedbackOptions.InitializerName,
 		OnlinePolicy: *initialPolicy, Mutator: selectedMutator.Name(), RandomMutation: mutationConfig,
 		ArtifactPolicy: artifactPolicy, CheckpointEvery: *checkpointEvery,
+		CoverageGuidanceMode: guidanceMode, CoverageEnergyMode: *coverageEnergyMode,
+		FixedEnergy: *fixedEnergy, FixedParentSelection: *fixedParentSelection,
+		CoverageCorpusLimit: *coverageCorpusLimit, RecordAllCoverage: *recordAllCoverage,
+		OfflineGoalEvaluation: *offlineGoalEvaluation,
+	}
+	if guidanceMode != coverageguidance.ModeLegacyRaw {
+		settings.CoverageGuidanceSchema = coverageguidance.SchemaVersion
 	}
 	if *llmInit || *llmMutate {
 		settings.LLMProvider = effectiveLLMProvider
@@ -473,14 +595,21 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 	}
 	if resumeCheckpoint == nil {
-		for _, artifact := range []struct {
+		initialArtifacts := []struct {
 			name  string
 			value any
 		}{
 			{name: "config.json", value: config},
 			{name: "policy-config.json", value: policyConfig},
 			{name: "experiment-settings.json", value: settings},
-		} {
+		}
+		if guidanceController != nil {
+			initialArtifacts = append(initialArtifacts, struct {
+				name  string
+				value any
+			}{name: "coverage-guidance-settings.json", value: settings})
+		}
+		for _, artifact := range initialArtifacts {
 			if err := writeJSONFile(filepath.Join(*outputPath, artifact.name), artifact.value); err != nil {
 				return err
 			}
@@ -497,6 +626,41 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		return err
 	}
 	store.config = config
+	if guidanceController != nil {
+		if err := store.enableCoverageGuidance(committedRunSummaries); err != nil {
+			_ = store.Close()
+			return err
+		}
+		if committedRunSummaries > 0 {
+			observations, readErr := persistence.ReadJSONLines[coverageguidance.CoverageObservation](
+				filepath.Join(*outputPath, "coverage-observations.jsonl"), committedRunSummaries)
+			if readErr != nil {
+				_ = store.Close()
+				return fmt.Errorf("读取 coverage observations: %w", readErr)
+			}
+			savedDecisions, readErr := persistence.ReadJSONLines[coverageguidance.Decision](
+				filepath.Join(*outputPath, "corpus-decisions.jsonl"), committedRunSummaries)
+			if readErr != nil {
+				_ = store.Close()
+				return fmt.Errorf("读取 corpus decisions: %w", readErr)
+			}
+			for index, observation := range observations {
+				recomputed, recomputeErr := guidanceController.Observe(observation)
+				if recomputeErr != nil {
+					_ = store.Close()
+					return fmt.Errorf("恢复时重算 guidance decision %d: %w", index, recomputeErr)
+				}
+				if !reflect.DeepEqual(recomputed, savedDecisions[index]) {
+					_ = store.Close()
+					return fmt.Errorf("恢复时 guidance decision %d 与原始 artifact 不一致", index)
+				}
+			}
+			if guidanceController.Snapshot().Config.CorpusLimit < committedCorpusEntries {
+				_ = store.Close()
+				return fmt.Errorf("恢复时 guidance Corpus 超过配置上限")
+			}
+		}
+	}
 	if llmClient != nil {
 		store.llmStats = func() llm.Stats { return previousLLMStats.Add(llmClient.Stats()) }
 	}
@@ -561,6 +725,13 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 			return execution, engineErr
 		})
 	storeErr := store.Close()
+	var guidanceArtifactErr error
+	if guidanceController != nil {
+		_, _, guidanceArtifactErr = writeCoverageGuidanceArtifacts(
+			*outputPath, guidanceMode, report.CompletedRuns, report.ElapsedMillis,
+			*offlineGoalEvaluation, nil,
+		)
+	}
 	rootArtifacts := []struct {
 		name  string
 		value any
@@ -593,7 +764,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 	for _, artifact := range rootArtifacts {
 		if err := writeJSONFile(filepath.Join(*outputPath, artifact.name), artifact.value); err != nil {
-			return errors.Join(runErr, storeErr, err)
+			return errors.Join(runErr, storeErr, guidanceArtifactErr, err)
 		}
 	}
 	_, outputErr := fmt.Fprintf(stdout,
@@ -602,7 +773,7 @@ func experimentCommand(ctx context.Context, args []string, stdout, stderr io.Wri
 		report.ExecutedMutations, report.PeriodicSeedExecutions, report.TotalActions, report.TotalModelEvents,
 		report.UniqueModelStates, report.UniquePlans, report.UniqueTraces, report.UniqueModelStatePaths, *outputPath,
 	)
-	return errors.Join(runErr, storeErr, outputErr)
+	return errors.Join(runErr, storeErr, guidanceArtifactErr, outputErr)
 }
 
 type sequencedActionSource interface {
@@ -1048,6 +1219,16 @@ func printRootUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng replay -trace TRACE.json -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng minimize -plan PLAN.json -output RUN_DIR [选项]")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng experiment -output RUN_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng coverage-compare -input EXPERIMENT_DIR [-output REPORT.json]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng coverage-factorize -input EXPERIMENT_DIR [-output REPORT.json]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng coverage-benchmark -manifest MANIFEST.json -output OUTPUT_DIR")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng coverage-summarize -input CAMPAIGN_DIR")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng breadth-depth-benchmark -manifest MANIFEST.json -output OUTPUT_DIR")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng handoff-probe-benchmark -manifest MANIFEST.json -output OUTPUT_DIR")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng handoff-diagnose -source BENCHMARK_DIR -output OUTPUT_DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng goal-search -goal GOAL_ID -mode MODE -output DIR [选项]")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng goal-compare -input GOAL_RUN_ROOT -output SUMMARY.json")
+	_, _ = fmt.Fprintln(output, "  modelfuzz-ng goal-benchmark -manifest MANIFEST.json -output ROOT")
 	_, _ = fmt.Fprintln(output, "  modelfuzz-ng version")
 	_, _ = fmt.Fprintln(output)
 	_, _ = fmt.Fprintln(output, "使用 'modelfuzz-ng run -h' 查看 run 选项。")
