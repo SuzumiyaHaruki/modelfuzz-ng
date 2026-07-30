@@ -1,0 +1,79 @@
+{
+  "schema_id": "modelfuzz-ng-facet-fixture-v1",
+  "facet_id": "raft.snapshot_lifecycle_event",
+  "facet_version": 1,
+  "scope": "transition",
+  "expected_occurrence": {"kind": "transition_effect", "step_index": 0, "effect_index": 0},
+  "cases": [
+    {
+      "id": "log-compacted",
+      "marker": {"name": "raft.log_compacted", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16, "compact_index": 2, "compacted_entries": 2}},
+      "class_id": "log_compacted",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/log_compacted",
+      "digest": "358d8cafdf1719bc740a0c29bb0236ed6b0ec104cfe8121e2ac9984f02167c5c"
+    },
+    {
+      "id": "snapshot-applied",
+      "marker": {"name": "raft.snapshot_applied", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16}},
+      "class_id": "snapshot_applied",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_applied",
+      "digest": "c426ef4c148ff3860bae5000c18ca61f829622bf871189d79477a92013b6acaf"
+    },
+    {
+      "id": "snapshot-created",
+      "marker": {"name": "raft.snapshot_created", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16}},
+      "class_id": "snapshot_created",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_created",
+      "digest": "f64c5e18a5738d416cbbe86e761946eeb989e22435d1f1fac213f58873bfe5c2"
+    },
+    {
+      "id": "snapshot-delivered",
+      "marker": {"name": "raft.snapshot_delivered", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16}},
+      "class_id": "snapshot_delivered",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_delivered",
+      "digest": "ee45646c580c79b1e1e3278ccba585b38ad917e9be8a9cca8f966157fecc512f"
+    },
+    {
+      "id": "snapshot-fast-forwarded",
+      "marker": {"name": "raft.snapshot_fast_forwarded", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16, "commit_before": 1, "commit_after": 2}},
+      "class_id": "snapshot_fast_forwarded",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_fast_forwarded",
+      "digest": "e98a40ddc0d2abbc5f98af83bde5339f66650aa80aa0e8e6c707bba436047682"
+    },
+    {
+      "id": "snapshot-rejected",
+      "marker": {"name": "raft.snapshot_rejected_or_stale", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16, "reason": "stale"}},
+      "class_id": "snapshot_rejected_or_stale",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_rejected_or_stale",
+      "digest": "594dbc6a69aae93e0e183d6d623290a215ce10d124496c9909c7b052a3f7a4ae"
+    },
+    {
+      "id": "snapshot-sent",
+      "marker": {"name": "raft.snapshot_sent", "node": 1, "params": {"index": 2, "term": 1, "snapshot_bytes": 16, "to": 2, "match_index": 0, "next_index": 3, "pending_snapshot": 2, "progress_state": "StateSnapshot"}},
+      "class_id": "snapshot_sent",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_sent",
+      "digest": "f515248bd9f187ecab691ffab38c62dd5ccc35d24e16a60e01edeb07525ac4b6"
+    },
+    {
+      "id": "snapshot-status-failed",
+      "marker": {"name": "raft.snapshot_status_reported", "node": 1, "params": {"from": 2, "to": 1, "handled": true, "reject": true}},
+      "class_id": "snapshot_status_failed",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_status_failed",
+      "digest": "880ef559a121da434517b46035f7d7f9308376348889d5fb9992fd46c8c9758c"
+    },
+    {
+      "id": "snapshot-status-ignored",
+      "marker": {"name": "raft.snapshot_status_reported", "node": 1, "params": {"from": 2, "to": 1, "handled": false, "reject": true}},
+      "class_id": "snapshot_status_ignored",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_status_ignored",
+      "digest": "2b424c56ca979d78a1492f9ec079ec8a738288e1518c8f1803150005d5e1f9b9"
+    },
+    {
+      "id": "snapshot-status-succeeded",
+      "marker": {"name": "raft.snapshot_status_reported", "node": 1, "params": {"from": 2, "to": 1, "handled": true, "reject": false}},
+      "class_id": "snapshot_status_succeeded",
+      "key": "modelfuzz-ng-facet-key-v1/raft.snapshot_lifecycle_event/v1/transition/snapshot_status_succeeded",
+      "digest": "d15bc4e0685c5f6714630b7554a9540145bb2731776f56e8999af3f907591c6e"
+    }
+  ]
+}

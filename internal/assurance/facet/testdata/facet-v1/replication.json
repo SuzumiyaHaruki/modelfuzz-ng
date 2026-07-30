@@ -1,0 +1,65 @@
+{
+  "schema_id": "modelfuzz-ng-facet-fixture-v1",
+  "facet_id": "raft.replication_alignment_shape",
+  "facet_version": 1,
+  "scope": "state",
+  "expected_occurrence": {"kind": "explicit_initial_state"},
+  "cases": [
+    {
+      "id": "all-aligned",
+      "nodes": [[3, 3, 3], [3, 3, 3], [3, 3, 3]],
+      "class_id": "log_aligned_commit_aligned_applied_aligned",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_aligned_commit_aligned_applied_aligned",
+      "digest": "08aa38cadc25fc83b7e2df9981ce83af53c692058f43cfac03428b550ac3e440"
+    },
+    {
+      "id": "only-applied-diverged",
+      "nodes": [[5, 4, 4], [5, 4, 3], [5, 4, 4]],
+      "class_id": "log_aligned_commit_aligned_applied_diverged",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_aligned_commit_aligned_applied_diverged",
+      "digest": "76723f83b3c8ef064b8ef6318310b6d84d1ef5a940e684994ba1e76fbd4fc1f9"
+    },
+    {
+      "id": "only-commit-diverged",
+      "nodes": [[5, 4, 3], [5, 3, 3], [5, 4, 3]],
+      "class_id": "log_aligned_commit_diverged_applied_aligned",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_aligned_commit_diverged_applied_aligned",
+      "digest": "e5117e16fb9329581feb9c88e9bbfc1436ac981f4fe7f1601b3751019f7b7ca8"
+    },
+    {
+      "id": "commit-and-applied-diverged",
+      "nodes": [[5, 5, 5], [5, 4, 3], [5, 3, 2]],
+      "class_id": "log_aligned_commit_diverged_applied_diverged",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_aligned_commit_diverged_applied_diverged",
+      "digest": "8b6085ccdcf2d19b96e14987fd833aa0624a980fe39e601e7fb2d37a7f917cec"
+    },
+    {
+      "id": "only-log-diverged",
+      "nodes": [[5, 3, 3], [4, 3, 3], [3, 3, 3]],
+      "class_id": "log_diverged_commit_aligned_applied_aligned",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_diverged_commit_aligned_applied_aligned",
+      "digest": "46b8f01903dbb6f863f52127af7fc3e9217384403d9154e9ad07e6ab9c55edce"
+    },
+    {
+      "id": "log-and-applied-diverged",
+      "nodes": [[5, 3, 3], [4, 3, 2], [3, 3, 3]],
+      "class_id": "log_diverged_commit_aligned_applied_diverged",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_diverged_commit_aligned_applied_diverged",
+      "digest": "6176d3a3d1b3dd3f5d40c1b763787d34eb89e6ac5a69d36ede32508ce4d42b79"
+    },
+    {
+      "id": "log-and-commit-diverged",
+      "nodes": [[5, 4, 3], [4, 3, 3], [3, 3, 3]],
+      "class_id": "log_diverged_commit_diverged_applied_aligned",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_diverged_commit_diverged_applied_aligned",
+      "digest": "1e1c3ef5b21ad81670c87b218d821a38878b8530f50db3448bf3f1226c35e2de"
+    },
+    {
+      "id": "all-diverged",
+      "nodes": [[5, 5, 4], [4, 3, 2], [3, 2, 1]],
+      "class_id": "log_diverged_commit_diverged_applied_diverged",
+      "key": "modelfuzz-ng-facet-key-v1/raft.replication_alignment_shape/v1/state/log_diverged_commit_diverged_applied_diverged",
+      "digest": "9e7771f01d80838fbca59559ef6181544b03e2c19186415fd32b5f86e7c767e6"
+    }
+  ]
+}

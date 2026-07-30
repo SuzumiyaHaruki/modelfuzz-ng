@@ -1,0 +1,100 @@
+{
+  "schema_id": "modelfuzz-ng-facet-fixture-v1",
+  "facet_id": "raft.election_role_term_shape",
+  "facet_version": 1,
+  "scope": "state",
+  "expected_occurrence": {"kind": "explicit_initial_state"},
+  "cases": [
+    {
+      "id": "multiple-leaders-no-candidates-split",
+      "nodes": [["running", "leader", 1], ["running", "leader", 2], ["running", "follower", 1]],
+      "class_id": "leaders_multiple_candidates_none_terms_split",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_multiple_candidates_none_terms_split",
+      "digest": "f255e6d58a6c96ffda4f93834b5e9854e6f2c64cad325792ae3d8292fdc8f123"
+    },
+    {
+      "id": "multiple-leaders-no-candidates-uniform",
+      "nodes": [["running", "leader", 1], ["running", "leader", 1], ["running", "follower", 1]],
+      "class_id": "leaders_multiple_candidates_none_terms_uniform",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_multiple_candidates_none_terms_uniform",
+      "digest": "7c41290840e41d688a7e27ac54fdc14867ff767e91a5798ad286fe34f5b25792"
+    },
+    {
+      "id": "multiple-leaders-candidates-split",
+      "nodes": [["running", "leader", 1], ["running", "leader", 2], ["running", "candidate", 2]],
+      "class_id": "leaders_multiple_candidates_some_terms_split",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_multiple_candidates_some_terms_split",
+      "digest": "3ce86c0a2ed2ac107dc87e7c452bf722ab15dbaf96d67c1d1bdeb1b553c1e838"
+    },
+    {
+      "id": "multiple-leaders-candidates-uniform",
+      "nodes": [["running", "leader", 1], ["running", "leader", 1], ["running", "candidate", 1]],
+      "class_id": "leaders_multiple_candidates_some_terms_uniform",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_multiple_candidates_some_terms_uniform",
+      "digest": "48cf9117a64d147c5bfe84eb148df2ea67f302cb6374fef5400027e8d440e6b1"
+    },
+    {
+      "id": "no-leader-no-candidate-split",
+      "nodes": [["running", "follower", 1], ["running", "follower", 2], ["running", "follower", 1]],
+      "class_id": "leaders_none_candidates_none_terms_split",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_none_candidates_none_terms_split",
+      "digest": "2d9b161dc032933dbc7b8dabcc19f7c84ef98a9bb2db227cbbf7659967324d9b"
+    },
+    {
+      "id": "no-leader-no-candidate-uniform",
+      "nodes": [["running", "follower", 1], ["running", "follower", 1], ["running", "follower", 1]],
+      "class_id": "leaders_none_candidates_none_terms_uniform",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_none_candidates_none_terms_uniform",
+      "digest": "fa3d7023232f479ccaa15f07da568a0dec09cfefc8541a3d3ff36b9d6a819f04"
+    },
+    {
+      "id": "no-leader-candidate-split",
+      "nodes": [["running", "candidate", 2], ["running", "follower", 1], ["running", "follower", 1]],
+      "class_id": "leaders_none_candidates_some_terms_split",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_none_candidates_some_terms_split",
+      "digest": "1b0d206c8b84841b5bcd0be93555ae05707e4a774bc102c15bd070b0d167eb36"
+    },
+    {
+      "id": "no-leader-candidate-uniform",
+      "nodes": [["running", "candidate", 1], ["running", "follower", 1], ["running", "follower", 1]],
+      "class_id": "leaders_none_candidates_some_terms_uniform",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_none_candidates_some_terms_uniform",
+      "digest": "e77408c9665fd635d7c574dbdbf051b0e6f63f493789af7765f479dee0469974"
+    },
+    {
+      "id": "one-leader-no-candidate-split",
+      "nodes": [["running", "leader", 2], ["running", "follower", 1], ["running", "follower", 1]],
+      "class_id": "leaders_one_candidates_none_terms_split",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_one_candidates_none_terms_split",
+      "digest": "e3c0d73e7fb3156bd752e34d82aa6db78ce233d49a32222309aea22709b9247e"
+    },
+    {
+      "id": "one-leader-no-candidate-uniform",
+      "nodes": [["running", "leader", 1], ["running", "follower", 1], ["running", "follower", 1]],
+      "class_id": "leaders_one_candidates_none_terms_uniform",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_one_candidates_none_terms_uniform",
+      "digest": "4575e8f747771cd11d9b702d85afc88e6832302ee2f30dfeef732d1dacfb8a32"
+    },
+    {
+      "id": "one-leader-candidate-split",
+      "nodes": [["running", "leader", 2], ["running", "candidate", 1], ["running", "follower", 1]],
+      "class_id": "leaders_one_candidates_some_terms_split",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_one_candidates_some_terms_split",
+      "digest": "8aff9db6dbdb22879e0d0b8d9e5c7732d08e6d10f72792ec057b69927a685d2c"
+    },
+    {
+      "id": "one-leader-candidate-uniform",
+      "nodes": [["running", "leader", 1], ["running", "candidate", 1], ["running", "follower", 1]],
+      "class_id": "leaders_one_candidates_some_terms_uniform",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/leaders_one_candidates_some_terms_uniform",
+      "digest": "a3e986bedf9cac5c49cd20fc191e9f66d5b6fc2f14a6bdc6fee71a666df194e6"
+    },
+    {
+      "id": "all-crashed",
+      "nodes": [["crashed", "crashed", 1], ["crashed", "crashed", 2], ["crashed", "crashed", 3]],
+      "class_id": "no_running_nodes",
+      "key": "modelfuzz-ng-facet-key-v1/raft.election_role_term_shape/v1/state/no_running_nodes",
+      "digest": "94dcae2bc21f9896f1733b2531a20c4762eea10901adb97b0d0e5ff42c213bf9"
+    }
+  ]
+}

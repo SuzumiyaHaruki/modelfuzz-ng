@@ -1,0 +1,26 @@
+{
+  "schema_id": "modelfuzz-ng-facet-fixture-manifest-v1",
+  "fixture_schema_id": "modelfuzz-ng-facet-fixture-v1",
+  "fixture_count": 31,
+  "files": [
+    {
+      "path": "election.json",
+      "cases": 13,
+      "bytes": 5735,
+      "sha256": "9578912963c7fb6a65744fada39be41b320fe73ff83ac89cd706de298e1fb66e"
+    },
+    {
+      "path": "replication.json",
+      "cases": 8,
+      "bytes": 3224,
+      "sha256": "755270aeb9c76054c538e15a568cbfc763b060b815dbb582753c5f039a134aff"
+    },
+    {
+      "path": "snapshot.json",
+      "cases": 10,
+      "bytes": 4497,
+      "sha256": "3676bfb8d0087a34ce824395bb6afe4bbee32941ebdd82986399cf7df9829b84"
+    }
+  ],
+  "total_fixture_bytes": 13456
+}
