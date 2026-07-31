@@ -1,0 +1,44 @@
+{
+  "schema": "modelfuzz-ng-stage7-mutant-minimize-v1",
+  "preregistration_sha256": "62a386a2017e4f5bf7e8164e0478b73d7a2506914db9ffeb1701a4be1ffdbf9c",
+  "items": [
+    {
+      "mode": "current-baseline",
+      "seed": 4120408576676485977,
+      "lineage": "initial/2",
+      "original_plan_digest": "8789df64a89b6e22bb03c990db0935209bfd054aa373955d05c4bd49554d654a",
+      "original_actions": 40,
+      "minimized_actions": 18,
+      "signature": {
+        "status": "mapping_failed",
+        "mapping_code": "model mapping failed: plan action # concrete action #: transition is not represented by the raft model: snapshot status reject=true pending=# match=# produced next=#, want #"
+      },
+      "attempts": 136,
+      "stable_reproductions": 3,
+      "cache_hits": 20,
+      "one_minimal": true,
+      "concrete_replay_status": "completed",
+      "matched_steps": 18,
+      "final_signature_match": true
+    },
+    {
+      "mode": "facet-only",
+      "seed": 4120408576676485977,
+      "lineage": "initial/2",
+      "original_plan_digest": "8789df64a89b6e22bb03c990db0935209bfd054aa373955d05c4bd49554d654a",
+      "original_actions": 40,
+      "minimized_actions": 18,
+      "signature": {
+        "status": "mapping_failed",
+        "mapping_code": "model mapping failed: plan action # concrete action #: transition is not represented by the raft model: snapshot status reject=true pending=# match=# produced next=#, want #"
+      },
+      "attempts": 136,
+      "stable_reproductions": 3,
+      "cache_hits": 20,
+      "one_minimal": true,
+      "concrete_replay_status": "completed",
+      "matched_steps": 18,
+      "final_signature_match": true
+    }
+  ]
+}

@@ -1,0 +1,514 @@
+{
+  "blocks": {
+    "heldout-closed-tree": {
+      "executed_candidates": {
+        "equal_pairs": 3,
+        "facet_better_pairs": 6,
+        "facet_worse_pairs": 11,
+        "mean_difference": -7.5,
+        "median_difference": -4.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -15.6,
+          0.7
+        ]
+      },
+      "failure_candidate_ordinal": {
+        "equal_pairs": 20,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "failure_detected": {
+        "equal_pairs": 20,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "queue_exhaustion": {
+        "baseline_count": 15,
+        "facet_count": 20
+      },
+      "rare_classes_reached": {
+        "equal_pairs": 19,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 1,
+        "mean_difference": -0.05,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -0.15,
+          0.0
+        ]
+      },
+      "raw_model_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 6,
+        "facet_worse_pairs": 14,
+        "mean_difference": -66.0,
+        "median_difference": -43.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -115.65,
+          -20.04875000000002
+        ]
+      },
+      "semantic_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 6,
+        "facet_worse_pairs": 14,
+        "mean_difference": -54.15,
+        "median_difference": -34.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -99.05125,
+          -15.7
+        ]
+      },
+      "semantic_transitions": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 6,
+        "facet_worse_pairs": 14,
+        "mean_difference": -80.35,
+        "median_difference": -52.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -145.60125,
+          -23.45
+        ]
+      },
+      "unique_model_state_paths": {
+        "equal_pairs": 1,
+        "facet_better_pairs": 7,
+        "facet_worse_pairs": 12,
+        "mean_difference": -6.7,
+        "median_difference": -2.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -12.90125,
+          -0.7
+        ]
+      },
+      "unique_trace_digests": {
+        "equal_pairs": 2,
+        "facet_better_pairs": 6,
+        "facet_worse_pairs": 12,
+        "mean_difference": -8.75,
+        "median_difference": -5.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -16.9,
+          -0.8
+        ]
+      },
+      "unique_trace_ratio": {
+        "equal_pairs": 14,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 6,
+        "mean_difference": -0.030946172915566506,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -0.05714450672563514,
+          -0.009054487179487175
+        ]
+      }
+    },
+    "heldout-neutral-reseed": {
+      "executed_candidates": {
+        "equal_pairs": 20,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "failure_candidate_ordinal": {
+        "equal_pairs": 20,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "failure_detected": {
+        "equal_pairs": 20,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "queue_exhaustion": {
+        "baseline_count": 0,
+        "facet_count": 0
+      },
+      "rare_classes_reached": {
+        "equal_pairs": 11,
+        "facet_better_pairs": 7,
+        "facet_worse_pairs": 2,
+        "mean_difference": 0.55,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          0.05,
+          1.1
+        ]
+      },
+      "raw_model_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 20,
+        "facet_worse_pairs": 0,
+        "mean_difference": 1077.9,
+        "median_difference": 1099.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          969.7425000000001,
+          1194.5049999999999
+        ]
+      },
+      "semantic_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 20,
+        "facet_worse_pairs": 0,
+        "mean_difference": 956.35,
+        "median_difference": 966.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          868.2475,
+          1046.2525
+        ]
+      },
+      "semantic_transitions": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 20,
+        "facet_worse_pairs": 0,
+        "mean_difference": 1307.1,
+        "median_difference": 1334.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          1177.04125,
+          1446.30125
+        ]
+      },
+      "unique_model_state_paths": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 19,
+        "facet_worse_pairs": 1,
+        "mean_difference": 20.45,
+        "median_difference": 21.5,
+        "pairs": 20,
+        "percentile_95_interval": [
+          16.35,
+          24.35
+        ]
+      },
+      "unique_trace_digests": {
+        "equal_pairs": 14,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 6,
+        "mean_difference": -1.25,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -2.25,
+          -0.4
+        ]
+      },
+      "unique_trace_ratio": {
+        "equal_pairs": 14,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 6,
+        "mean_difference": -0.009765625,
+        "median_difference": 0.0,
+        "pairs": 20,
+        "percentile_95_interval": [
+          -0.017578125,
+          -0.003125
+        ]
+      }
+    },
+    "historical-configuration-replication": {
+      "executed_candidates": {
+        "equal_pairs": 2,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 8,
+        "mean_difference": -14.8,
+        "median_difference": -14.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -21.4,
+          -8.4
+        ]
+      },
+      "failure_candidate_ordinal": {
+        "equal_pairs": 10,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "failure_detected": {
+        "equal_pairs": 10,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "queue_exhaustion": {
+        "baseline_count": 2,
+        "facet_count": 8
+      },
+      "rare_classes_reached": {
+        "equal_pairs": 3,
+        "facet_better_pairs": 2,
+        "facet_worse_pairs": 5,
+        "mean_difference": -0.4,
+        "median_difference": -0.5,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -1.1,
+          0.4
+        ]
+      },
+      "raw_model_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 3,
+        "facet_worse_pairs": 7,
+        "mean_difference": -171.4,
+        "median_difference": -255.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -321.3,
+          -1.0900000000001457
+        ]
+      },
+      "semantic_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 2,
+        "facet_worse_pairs": 8,
+        "mean_difference": -155.3,
+        "median_difference": -236.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -273.5,
+          -12.1
+        ]
+      },
+      "semantic_transitions": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 2,
+        "facet_worse_pairs": 8,
+        "mean_difference": -217.5,
+        "median_difference": -332.5,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -396.2025,
+          -11.890000000000146
+        ]
+      },
+      "unique_model_state_paths": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 10,
+        "mean_difference": -9.8,
+        "median_difference": -9.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -14.5,
+          -5.5
+        ]
+      },
+      "unique_trace_digests": {
+        "equal_pairs": 2,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 8,
+        "mean_difference": -14.8,
+        "median_difference": -14.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -21.4,
+          -8.6
+        ]
+      },
+      "unique_trace_ratio": {
+        "equal_pairs": 10,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "mutant-snapshot-status-invert": {
+      "executed_candidates": {
+        "equal_pairs": 10,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "failure_candidate_ordinal": {
+        "equal_pairs": 5,
+        "facet_better_pairs": 4,
+        "facet_worse_pairs": 1,
+        "mean_difference": -15.9,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -41.3,
+          10.1
+        ]
+      },
+      "failure_detected": {
+        "equal_pairs": 7,
+        "facet_better_pairs": 3,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.3,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.6
+        ]
+      },
+      "queue_exhaustion": {
+        "baseline_count": 0,
+        "facet_count": 0
+      },
+      "rare_classes_reached": {
+        "equal_pairs": 5,
+        "facet_better_pairs": 4,
+        "facet_worse_pairs": 1,
+        "mean_difference": 0.4,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          -0.3,
+          1.1
+        ]
+      },
+      "raw_model_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 10,
+        "facet_worse_pairs": 0,
+        "mean_difference": 915.7,
+        "median_difference": 889.5,
+        "pairs": 10,
+        "percentile_95_interval": [
+          819.7,
+          1021.3024999999999
+        ]
+      },
+      "semantic_states": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 10,
+        "facet_worse_pairs": 0,
+        "mean_difference": 789.1,
+        "median_difference": 782.5,
+        "pairs": 10,
+        "percentile_95_interval": [
+          713.195,
+          876.705
+        ]
+      },
+      "semantic_transitions": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 10,
+        "facet_worse_pairs": 0,
+        "mean_difference": 1077.6,
+        "median_difference": 1070.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          970.5,
+          1201.3
+        ]
+      },
+      "unique_model_state_paths": {
+        "equal_pairs": 0,
+        "facet_better_pairs": 9,
+        "facet_worse_pairs": 1,
+        "mean_difference": 9.0,
+        "median_difference": 9.5,
+        "pairs": 10,
+        "percentile_95_interval": [
+          4.8,
+          13.3
+        ]
+      },
+      "unique_trace_digests": {
+        "equal_pairs": 10,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      },
+      "unique_trace_ratio": {
+        "equal_pairs": 10,
+        "facet_better_pairs": 0,
+        "facet_worse_pairs": 0,
+        "mean_difference": 0.0,
+        "median_difference": 0.0,
+        "pairs": 10,
+        "percentile_95_interval": [
+          0.0,
+          0.0
+        ]
+      }
+    }
+  },
+  "bootstrap_resamples": 10000,
+  "bootstrap_seed": 7070707,
+  "difference_direction": "facet-only minus current-baseline",
+  "heldout_seed_list_sha256": "00da18df2172eada4938315b3db2e1abf3b7413ba6a58a1a6c03d2d5cc4be6f6",
+  "preregistration_sha256": "62a386a2017e4f5bf7e8164e0478b73d7a2506914db9ffeb1701a4be1ffdbf9c",
+  "schema": "modelfuzz-ng-stage7-paired-analysis-v1"
+}

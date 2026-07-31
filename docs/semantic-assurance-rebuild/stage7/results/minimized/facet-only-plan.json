@@ -1,0 +1,187 @@
+{
+  "actions": [
+    {
+      "kind": "timeout",
+      "node": 1
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 2
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 2,
+          "to": 1
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 2
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 2,
+          "to": 1
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "request",
+      "node": 2,
+      "request": "4"
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 2,
+          "to": 1
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 3
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "drop",
+      "messages": {
+        "link": {
+          "from": 3,
+          "to": 1
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 3
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 3,
+          "to": 1
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 3
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "request",
+      "node": 1,
+      "request": "2"
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 3
+        },
+        "start": 0,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 3,
+          "to": 1
+        },
+        "start": 1,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 2
+        },
+        "start": 4,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 2,
+          "to": 1
+        },
+        "start": 6,
+        "count": 1
+      }
+    },
+    {
+      "kind": "deliver",
+      "messages": {
+        "link": {
+          "from": 1,
+          "to": 2
+        },
+        "start": 4,
+        "count": 1
+      }
+    }
+  ],
+  "metadata": {
+    "seed": "2158676858400798827",
+    "source": "stage7_50c07444f0f75d57"
+  }
+}
