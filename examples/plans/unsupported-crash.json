@@ -1,8 +1,0 @@
-{
-  "actions": [
-    {"kind": "crash", "node": 1}
-  ],
-  "metadata": {
-    "description": "最小crash示例；当前Raft Profile会映射为Remove事件"
-  }
-}

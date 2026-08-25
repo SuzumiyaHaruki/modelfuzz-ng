@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\..\..\Common\build.props" />
+  <PropertyGroup>
+    <AssemblyName>PetImages.Tests</AssemblyName>
+    <OutputPath>.\bin\</OutputPath>
+    <RunAnalyzersDuringBuild>false</RunAnalyzersDuringBuild>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PetImages\PetImages.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="7.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="7.0.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.4.0" />
+    <PackageReference Include="xunit" Version="2.4.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.5" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="xunit.runner.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <Target Name="CoyoteRewriteNuget" Condition="'$(UseNugetPackages)'=='true'" AfterTargets="AfterBuild" >
+    <Exec Command="coyote rewrite rewrite.coyote.json" />
+  </Target>
+  <Target Name="CoyoteRewriteLocalNuget" Condition="'$(UseLocalNugetPackages)'=='true'" AfterTargets="AfterBuild" >
+    <Exec Command="dotnet coyote rewrite rewrite.coyote.json" />
+  </Target>
+  <Target Name="CoyoteRewriteLocal" Condition="'$(UseLocalCoyote)'=='true'" AfterTargets="AfterBuild" >
+    <Exec Command="dotnet ../../../../bin/$(TargetFramework)/coyote.dll rewrite rewrite.coyote.json" />
+  </Target>
+</Project>

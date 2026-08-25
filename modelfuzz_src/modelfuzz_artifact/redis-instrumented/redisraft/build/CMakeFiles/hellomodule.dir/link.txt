@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC  -DHAVE_CRC32C -msse4.2 -D_POSIX_C_SOURCE=200112L -D_GNU_SOURCE -O2 -g  -shared  -o /home/snagendra/Fuzzing/redisraft-fuzzing/tests/integration/modules/hellomodule.so CMakeFiles/hellomodule.dir/tests/integration/modules/hellomodule.c.o 

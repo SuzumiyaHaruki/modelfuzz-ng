@@ -1,0 +1,1 @@
+/usr/bin/cc  -DHAVE_CRC32C -msse4.2 -D_POSIX_C_SOURCE=200112L -D_GNU_SOURCE -O2 -g  CMakeFiles/test_scenario.dir/tests/test_scenario.c.o CMakeFiles/test_scenario.dir/tests/CuTest.c.o CMakeFiles/test_scenario.dir/tests/linked_list_queue.c.o CMakeFiles/test_scenario.dir/tests/mock_send_functions.c.o -o test_scenario  libraft.a 

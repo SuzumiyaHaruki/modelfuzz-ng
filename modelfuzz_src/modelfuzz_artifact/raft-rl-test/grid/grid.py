@@ -1,0 +1,635 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import math
+
+
+class Position:
+    def __init__(self, x, y, z, grid):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.grid = grid
+
+    def __eq__(self, other):
+        return self.x == other.x and self.y == other.y and self.z == other.z and self.grid == other.grid
+
+    def __str__(self):
+        return f"({self.x}, {self.y}, {self.z}, {self.grid})"
+
+    def __repr__(self):
+        return f"({self.x}, {self.y}, {self.z}, {self.grid})"
+
+    def copy(self):
+        return Position(self.x, self.y, self.z, self.grid)
+
+    def __hash__(self):
+        return hash((self.x, self.y, self.z, self.grid))
+
+# the full environment?
+class Grid:
+    def __init__(self, grids, height, width, depth, doors = {}):
+        self.grids = grids # number of grids?
+        self.height = height
+        self.width = width
+        self.depth = depth
+        # (x, y, z, grid)
+        self._cur_pos = Position(0, 0, 0, 0)
+        self.doors = doors
+
+    def _is_door(self, pos):
+        if pos in self.doors:
+            return True
+
+    def move(self, direction):
+        pos = self._cur_pos
+        if direction == "up":
+            if pos.z < self.depth-1:
+                pos.z += 1
+        elif direction == "down":
+            if pos.z > 0:
+                pos.z -= 1
+        elif direction == "left":
+            if pos.y > 0:
+                pos.y -= 1
+        elif direction == "right":
+            if pos.y < self.width-1:
+                pos.y += 1
+        elif direction == "forward":
+            if pos.x < self.height-1:
+                pos.x += 1
+        elif direction == "backward":
+            if pos.x > 0:
+                pos.x -= 1
+        elif direction == "into" and self._is_door(self._cur_pos):
+            pos = self.doors[pos].copy()
+        elif direction == "reset_depth":
+            pos.z = 0
+
+        self._cur_pos = pos.copy()
+        return self._cur_pos.copy()
+    
+    # available actions
+    def directions(self, pos):
+        # directions = []
+        # if pos.z < self.depth-1:
+        #     directions.append("up")
+        # if pos.z > 0:
+        #     directions.append("down")
+        # if pos.y > 0:
+        #     directions.append("left")
+        # if pos.y < self.width-1:
+        #     directions.append("right")
+        # if pos.x < self.height-1:
+        #     directions.append("forward")
+        # if pos.x > 0:
+        #     directions.append("backward")
+        # if self._is_door(pos):
+        #     directions.append("into")
+        # return directions
+        return self.all_directions()
+    
+    def all_directions(self):
+        return ["up", "down", "left", "right", "forward", "backward", "into", "reset_depth"]
+        
+    def reset(self):
+        self._cur_pos = Position(0, 0, 0, 0)
+        return self._cur_pos.copy()
+
+class AbstractPosition:
+    def __init__(self, pos) -> None:
+        self.x = pos.x
+        self.y = pos.y
+        self.pos = pos
+        self.grid = pos.grid
+
+    def __eq__(self, other):
+        return self.x == other.x and self.y == other.y and self.grid == other.grid
+
+    def __hash__(self):
+        return hash((self.x, self.y, self.grid))
+
+    def __str__(self):
+        return f"{self.x}, {self.y}, {self.grid}"
+
+    def __repr__(self):
+        return f"{self.x}, {self.y}, {self.grid}"
+
+    def copy(self):
+        return AbstractPosition(self.pos)
+
+class AbstractGrid:
+    def __init__(self, grid) -> None:
+        self.grid = grid
+
+    def _is_door(self, pos):
+        return self.grid._is_door(pos)
+        
+    def move(self, direction):
+        pos = self.grid.move(direction)
+        a_pos = AbstractPosition(pos)
+        # if direction == "into" and self._is_door(a_pos):
+        #     self.grid._cur_pos = self.doors[a_pos]
+
+        return a_pos
+    
+    def directions(self, pos):
+        a_pos = AbstractPosition(pos)
+        directions = self.grid.directions(pos.pos)
+        # if self._is_door(a_pos) and "into" not in directions:
+        #     directions.append("into")
+        return directions
+
+    def all_directions(self):
+        return self.grid.all_directions()
+    
+    def reset(self):
+        return AbstractPosition(self.grid.reset())
+
+class Agent:
+    def __init__(self, name, env, policy) -> None:
+        self.env = env
+        self.policy = policy
+        self.name = name
+        self.traces = []
+    
+    def run(self, episodes, horizon):
+        for episode in range(episodes):
+            pos = self.env.reset()
+            trace = []
+            agent_trace = []
+            self.policy.reset_iter()
+            for step in range(horizon):
+                actions = self.env.directions(pos)
+                action = self.policy.pick(pos, actions)
+                next_pos = self.env.move(action)
+                self.policy.update_state(pos, action, next_pos, self.env, step == horizon-1)
+
+                # always append the real position (not the abstract one)
+                if isinstance(pos, AbstractPosition):
+                    trace.append((pos.pos.copy(), action, next_pos.pos.copy()))
+                else:
+                    trace.append((pos.copy(), action, next_pos.copy()))
+                
+                agent_trace.append((pos.copy(), action, next_pos.copy()))
+
+                print(f"\r{self.name} - Episode: {episode+1}/{episodes}, Step: {step+1}/{horizon}",end="")
+                pos = next_pos
+            self.policy.update_empty(agent_trace, self.env)
+            self.traces.append(trace)
+        print("")
+        return self.traces
+    
+
+class RandomPolicy:
+    def __init__(self) -> None:
+        pass
+
+    def reset_iter(self):
+        pass
+    
+    def pick(self, pos, actions):
+        return np.random.choice(actions)
+
+    def update(self, trace, env):
+        pass
+
+    def update_empty(self, trace, env):
+        pass
+
+    def update_state(self, pos, action, next_pos, env, last_step):
+        pass
+
+    def update_state_empty(self, pos, action, next_pos, env, horizon):
+        pass
+
+class NegRewardPolicy:
+    def __init__(self, alpha, gamma, actions) -> None:
+        self.alpha = alpha
+        self.gamma = gamma
+        self.actions = actions
+        self.q = {}
+        self.visits = {}
+
+    def reset_iter(self):
+        pass
+
+    def update_state(self, pos, action, next_pos):
+        pass
+
+    def pick(self, pos, actions):
+        q_values = [self.q.get((pos, a), 0) for a in actions]
+        # normalize q_values
+        norm_q_values = q_values + np.min(q_values)
+        exp_values = np.exp(norm_q_values)
+        sum_exp_values = np.sum(exp_values)
+        if sum_exp_values == 0:
+            return np.random.choice(actions)
+        
+        probs = exp_values / sum_exp_values
+        return np.random.choice(actions, p=probs)
+    
+    def update(self, trace, env):
+        for (pos, action, next_pos) in trace:
+            q_value = self.q.get((pos, action), 0)
+            t = self.visits.get((next_pos, action), 0) +1
+            self.visits[(next_pos, action)] = t
+            next_q_value = max([self.q.get((next_pos, a), 0) for a in env.directions(next_pos)])
+            self.q[(pos, action)] = (1-self.alpha)* q_value + self.alpha * ( -t + self.gamma * next_q_value)
+
+
+class BonusMaxPolicy:
+    def __init__(self, alpha, gamma, epsilon, actions) -> None:
+        self.alpha = alpha
+        self.gamma = gamma
+        self.actions = actions
+        self.epsilon = epsilon
+        self.visits = {}
+        self.q = {}
+    
+    def reset_iter(self):
+        pass
+
+    def update_state(self, pos, action, next_pos, env, last_step):
+        q_value = self.q.get((pos, action), 1)
+        t = self.visits.get((pos, action), 0) + 1
+        self.visits[(pos, action)] = t
+        next_q_value = max([self.q.get((next_pos, a), 1) for a in env.directions(next_pos)])
+        if last_step:
+            next_q_value = 0
+
+        self.q[(pos, action)] = (1-self.alpha)* q_value + self.alpha * max(1/t, self.gamma * next_q_value)
+
+    def update_state_empty(self, pos, action, next_pos, env, horizon):
+        pass
+
+    def pick(self, pos, actions):
+        if np.random.rand() < self.epsilon:
+            return np.random.choice(actions)
+        q_values = [self.q.get((pos, a), 1) for a in actions]
+        # max_actions = np.argwhere(q_values == np.max(q_values)).flatten()
+        max_q_value = np.max(q_values)
+        max_actions = [i for i in range(len(q_values)) if q_values[i] == max_q_value]
+        if len(max_actions) > 1:
+            max_a = actions[np.random.choice(max_actions)]
+            return max_a
+        else:
+            return actions[max_actions[0]]
+        # return actions[max_actions[0]]   
+    
+    def update(self, trace, env):
+        trace.reverse() # reverse the trace to update the q values backwards
+        for (i,(pos, action, next_pos)) in enumerate(trace):
+            q_value = self.q.get((pos, action), 1)
+            t = self.visits.get((pos, action), 0) + 1
+            self.visits[(pos, action)] = t
+            next_q_value = max([self.q.get((next_pos, a), 1) for a in env.directions(next_pos)])
+            if i == 0:
+                next_q_value = 0
+
+            self.q[(pos, action)] = (1-self.alpha)* q_value + self.alpha * max(1/t, self.gamma * next_q_value)
+
+    def update_empty(self, trace, env):
+        pass
+
+class Predicate:
+    def __init__(self, name, func) -> None:
+        self.name = name
+        self.func = func
+
+    def __call__(self, pos) -> bool:
+        return self.func(pos)
+
+class PredHRLPolicy:
+    def __init__(self, alpha, gamma, epsilon, actions, predicates, one_time = False) -> None:
+        predicates = [Predicate("init", lambda pos: True)] + predicates
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.actions = actions
+        self.predicates = predicates
+        self.one_time = one_time
+
+        self.q_tables = {}
+        for pred in predicates:
+            self.q_tables[pred.name] = {}
+
+        self.visit_tables = {}
+        for pred in predicates:
+            self.visit_tables[pred.name] = {}
+
+        self._cur_pred_name = predicates[0].name
+        self._cur_pred_index = 0
+        self._trace_segments = {pred.name: [] for pred in predicates}
+        self._target_reached = False
+
+    def reset_iter(self):
+        self._cur_pred_name = self.predicates[0].name
+        self._cur_pred_index = 0
+        self._trace_segments = {pred.name: [] for pred in self.predicates}
+        self._target_reached = False
+    
+    def pick(self, pos, actions):
+        if np.random.rand() < self.epsilon:
+            return np.random.choice(actions)
+        q_values = [self.q_tables[self._cur_pred_name].get((pos, a), 1) for a in actions]
+        max_actions = np.argwhere(q_values == np.max(q_values)).flatten()
+        if len(max_actions) > 1:
+            return actions[np.random.choice(max_actions)]
+        else:
+            return actions[max_actions[0]]
+        # return actions[max_actions[0]]    
+    
+    def update_state_empty(self, pos, action, next_pos, env, last_step):
+        reward = False
+        out_of_space = False
+        cur_pred = self._cur_pred_name
+        if not self._target_reached:
+            next_pred_index = 0
+            for index, pred in list(enumerate(self.predicates))[::-1]:
+                if pred(next_pos):
+                    next_pred_index = index
+                    break
+            if next_pred_index != self._cur_pred_index:
+                out_of_space = True
+            if next_pred_index > self._cur_pred_index:
+                reward = True
+            self._cur_pred_index = next_pred_index
+            self._cur_pred_name = self.predicates[self._cur_pred_index].name
+
+            if self.one_time and next_pred_index == len(self.predicates)-1:
+                self._target_reached = True
+        
+        self._trace_segments[cur_pred].append((pos, action, next_pos, reward, out_of_space))
+
+    # for this policy can't update at each step
+    def update_state(self, pos, action, next_pos, env, last_step):
+        reward = False
+        out_of_space = False
+        cur_pred = self._cur_pred_name
+        if not self._target_reached:
+            next_pred_index = 0
+            for index, pred in list(enumerate(self.predicates))[::-1]:
+                if pred(next_pos):
+                    next_pred_index = index
+                    break
+            if next_pred_index != self._cur_pred_index:
+                out_of_space = True
+            if next_pred_index > self._cur_pred_index:
+                reward = True
+            self._cur_pred_index = next_pred_index
+            self._cur_pred_name = self.predicates[self._cur_pred_index].name
+
+            if self.one_time and next_pred_index == len(self.predicates)-1:
+                self._target_reached = True
+        
+        self._trace_segments[cur_pred].append((pos, action, next_pos, reward, out_of_space))
+
+    def update(self, trace, env):
+        for pred in self.predicates:
+            trace_seg_len = len(self._trace_segments[pred.name])
+            self._trace_segments[pred.name].reverse()
+            for (i, (pos, action, next_pos, reward, out_of_space)) in enumerate(self._trace_segments[pred.name]):
+                q_value = self.q_tables[pred.name].get((pos, action), 1)
+                t = self.visit_tables[pred.name].get((next_pos, action), 0) + 1
+                self.visit_tables[pred.name][(next_pos, action)] = t
+                next_q_value = max([self.q_tables[pred.name].get((next_pos, a), 1) for a in env.directions(next_pos)])
+                if out_of_space or i == 0:
+                    next_q_value = 0
+                
+                r = 2+(1/t) if reward else 1/t
+                self.q_tables[pred.name][(pos, action)] = (1-self.alpha)* q_value + self.alpha * max(r, self.gamma * next_q_value)
+
+    # for this policy can't update at each step
+    def update_empty(self, trace, env):
+        for pred in self.predicates:
+            trace_seg_len = len(self._trace_segments[pred.name])
+            self._trace_segments[pred.name].reverse()
+            for (i, (pos, action, next_pos, reward, out_of_space)) in enumerate(self._trace_segments[pred.name]):
+                q_value = self.q_tables[pred.name].get((pos, action), 1)
+                t = self.visit_tables[pred.name].get((next_pos, action), 0) + 1
+                self.visit_tables[pred.name][(next_pos, action)] = t
+                next_q_value = max([self.q_tables[pred.name].get((next_pos, a), 1) for a in env.directions(next_pos)])
+                if out_of_space or i == 0:
+                    next_q_value = 0
+                
+                r = 2+(1/t) if reward else 1/t
+                self.q_tables[pred.name][(pos, action)] = (1-self.alpha)* q_value + self.alpha * max(r, self.gamma * next_q_value)
+
+class RewardBonusMaxPolicy:
+    def __init__(self, alpha, gamma, epsilon, actions, reward_func) -> None:
+        self.alpha = alpha
+        self.gamma = gamma
+        self.actions = actions
+        self.epsilon = epsilon
+        self.visits = {}
+        self.q = {}
+        self.reward_func = reward_func
+    
+    def reset_iter(self):
+        pass
+
+    def update_state(self, pos, action, next_pos, env, last_step):
+        q_value = self.q.get((pos, action), 1)
+        t = self.visits.get((next_pos, action), 0) + 1
+        self.visits[(next_pos, action)] = t
+        next_q_value = max([self.q.get((next_pos, a), 1) for a in env.directions(next_pos)])
+        if last_step:
+            next_q_value = 0
+        r = 1/t
+        if self.reward_func(pos):
+            r = 2+(1/t)
+        self.q[(pos, action)] = (1-self.alpha)* q_value + self.alpha * max(r, self.gamma * next_q_value)
+
+    def update_state_empty(self, pos, action, next_pos, env, last_step):
+        pass
+
+    def pick(self, pos, actions):
+        if np.random.rand() < self.epsilon:
+            return np.random.choice(actions)
+        q_values = [self.q.get((pos, a), 1) for a in actions]
+        max_actions = np.argwhere(q_values == np.max(q_values)).flatten()
+        if len(max_actions) > 1:
+            return actions[np.random.choice(max_actions)]
+        else:
+            return actions[max_actions[0]]
+        # return actions[max_actions[0]]     
+    
+    
+    def update(self, trace, env):
+        trace.reverse()
+        for (i,(pos, action, next_pos)) in enumerate(trace):
+            q_value = self.q.get((pos, action), 1)
+            t = self.visits.get((next_pos, action), 0) + 1
+            self.visits[(next_pos, action)] = t
+            next_q_value = max([self.q.get((next_pos, a), 1) for a in env.directions(next_pos)])
+            if i == 0:
+                next_q_value = 0
+            r = 1/t
+            if self.reward_func(pos):
+                r = 2+(1/t)
+            self.q[(pos, action)] = (1-self.alpha)* q_value + self.alpha * max(r, self.gamma * next_q_value)
+
+    def update_empty(self, trace, env):
+        pass
+
+class Experiment:
+    def __init__(self, name, env, policy) -> None:
+        self.env = env
+        self.name = name
+        self.agent = Agent(name, env, policy)
+        self.traces = []
+    
+    def run(self, episodes, horizon):
+        self.traces = self.agent.run(episodes, horizon)
+        return self.traces
+    
+    def plot(self, dimensions):
+        (height, width, depth, grids) = dimensions
+        # plot a heatmap for each grid viewed from the top. The color indicates the combined visits for all positions in that depth.
+        visits = np.zeros((height, width, depth, grids))
+        for trace in self.traces:
+            for (pos, action, next_pos) in trace:
+                visits[pos.x, pos.y, pos.z, pos.grid] = 1
+        visits = np.sum(visits, axis=2)
+
+        # use subplots to plot each grid with 3 grids in a row
+        rows = math.ceil(grids/3)
+        fig, axs = plt.subplots(rows, 3)
+        for i in range(grids):
+            x,y = int(i//3), i%3
+            axs[x,y].imshow(visits[:, :, i], cmap='Oranges', interpolation='nearest', vmin=0, vmax=depth)
+            axs[x,y].set_title(f"Cube {i}")
+        
+        plt.savefig(f"results/{self.name}.png")
+        plt.savefig(f"results/{self.name}.pdf", format="pdf")
+
+    def plot_grid(self, grid, dimensions):
+        (height, width, depth, grids) = dimensions
+        visits = np.zeros((height, width, depth))
+        for trace in self.traces:
+            for (pos, action, next_pos) in trace:
+                if pos.grid == grid:
+                    visits[pos.x, pos.y, pos.z] = 1
+        
+        rows = math.ceil(depth/3)
+        fig, axs = plt.subplots(rows, 3)
+        for i in range(depth):
+            x,y = int(i//3), i%3
+            if rows > 1:
+                axs[x,y].imshow(visits[:, :, i], cmap='Oranges', interpolation='nearest', vmin=0, vmax=1)
+                axs[x,y].set_title(f"Depth {i}")
+            else:
+                axs[y].imshow(visits[:, :, i], cmap='Oranges', interpolation='nearest', vmin=0, vmax=1)
+                axs[y].set_title(f"Depth {i}")
+
+        plt.savefig(f"results/{self.name}_grid_{grid}.png")
+        plt.savefig(f"results/{self.name}_grid_{grid}.pdf", format="pdf")
+
+def plot_test(dimensions):
+        (height, width, depth, grids) = dimensions
+        # plot a heatmap for each grid viewed from the top. The color indicates the combined visits for all positions in that depth.
+        visits = np.zeros((height, width, grids))
+
+        visits[0, 0, 0] = 1
+        visits[0, width - 1, 0] = 10
+
+        visits[0, 0, 1] = 1
+        visits[0, width - 1, 1] = 1
+
+        # use subplots to plot each grid with 3 grids in a row
+        rows = math.ceil(grids/3)
+        fig, axs = plt.subplots(rows, 3)
+        for i in range(grids):
+            x,y = int(i//3), i%3
+            axs[x,y].imshow(visits[:, :, i], cmap='Oranges', interpolation='nearest', vmin=0, vmax=10)
+            axs[x,y].set_title(f"Cube {i}")
+        
+        plt.savefig(f"results/test.png")
+
+def main():
+    grids = 6
+    height = 10
+    width = 10
+    depth = 6
+    dimensions = (height, width, depth, grids)
+    doors = {}
+    for i in range(depth):
+        doors[Position(5, 5, i, 0)] = Position(0, 0, 0, 1)
+        doors[Position(5, 5, i, 1)] = Position(0, 0, 0, 2)
+        doors[Position(5, 5, i, 2)] = Position(0, 0, 0, 3)
+        doors[Position(5, 5, i, 3)] = Position(0, 0, 0, 4)
+        doors[Position(5, 5, i, 4)] = Position(0, 0, 0, 5)
+
+
+    # doors = {
+    #     # Position(5, 5, depth - 1, 0): Position(0, 0, 0, 1), 
+    #     # Position(5, 5, depth - 1, 1): Position(0, 0, 0, 2),
+    #     # Position(5, 5, depth - 1, 2): Position(0, 0, 0, 3),
+
+    #     Position(5, 5, 0, 0): Position(0, 0, 0, 1), 
+    #     Position(5, 5, 0, 1): Position(0, 0, 0, 2),
+    #     Position(5, 5, 0, 2): Position(0, 0, 0, 3)
+    # }
+    env = Grid(grids, height, width, depth, doors)
+    abs_env = AbstractGrid(env)
+
+    episodes = 5000
+    horizon = 80
+
+    learning_rate = 0.3
+    discount_factor = 0.99
+    epsilon_exploration_rate = 0.05
+
+    # create a results folder, clear if it exists
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    else:
+        for file in os.listdir("results"):
+            os.remove(f"results/{file}")
+    
+    # plot_test(dimensions)
+
+    # policy = NegRewardPolicy(0.1, 0.99, env.all_directions())
+    # exp = Experiment("NegReward", env, policy)
+    # exp.run(10000, 100)
+    # exp.plot()
+
+    policy = BonusMaxPolicy(learning_rate, discount_factor, epsilon_exploration_rate, env.all_directions())
+    exp = Experiment("BonusMax", env, policy)
+    exp.run(episodes, horizon)
+    exp.plot(dimensions)
+    exp.plot_grid(3, dimensions)
+
+    policy = RandomPolicy()
+    exp = Experiment("Random", env, policy)
+    exp.run(episodes, horizon)
+    exp.plot(dimensions)
+
+    predicates = [
+        Predicate("Grid1", lambda pos: pos.grid == 1),
+        Predicate("Grid2", lambda pos: pos.grid == 2),
+        Predicate("Grid3", lambda pos: pos.grid == 3)
+    ]
+    policy = PredHRLPolicy(learning_rate, discount_factor, epsilon_exploration_rate, env.all_directions(), predicates, one_time=False)
+    exp = Experiment("WaypointRL", env, policy)
+    exp.run(episodes, horizon)
+    exp.plot(dimensions)
+    exp.plot_grid(3, dimensions)
+
+    reward_func = lambda pos: pos.grid == 3
+    policy = RewardBonusMaxPolicy(learning_rate, discount_factor, epsilon_exploration_rate, env.all_directions(), reward_func)
+    exp = Experiment("RewardBonusMax", env, policy)
+    exp.run(episodes, horizon)
+    exp.plot(dimensions)
+    exp.plot_grid(3, dimensions)
+
+    policy = BonusMaxPolicy(learning_rate, discount_factor, epsilon_exploration_rate, env.all_directions())
+    exp = Experiment("BonusMaxAbs", abs_env, policy)
+    exp.run(episodes, horizon)
+    exp.plot(dimensions)
+    exp.plot_grid(3, dimensions)
+    exp.plot_grid(1, dimensions)
+
+if __name__ == "__main__":
+    main()

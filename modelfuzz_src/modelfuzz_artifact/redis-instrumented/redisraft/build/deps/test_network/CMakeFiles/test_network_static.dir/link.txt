@@ -1,0 +1,2 @@
+/usr/bin/ar qc test_network_static.a CMakeFiles/test_network_static.dir/client.c.o CMakeFiles/test_network_static.dir/ds.c.o CMakeFiles/test_network_static.dir/http_client.c.o CMakeFiles/test_network_static.dir/mongoose.c.o CMakeFiles/test_network_static.dir/http_server.c.o CMakeFiles/test_network_static.dir/types.c.o
+/usr/bin/ranlib test_network_static.a

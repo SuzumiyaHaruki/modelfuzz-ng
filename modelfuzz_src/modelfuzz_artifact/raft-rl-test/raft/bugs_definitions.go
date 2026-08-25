@@ -1,0 +1,219 @@
+package raft
+
+import (
+	"bytes"
+
+	"github.com/zeu5/raft-rl-test/types"
+	pb "go.etcd.io/raft/v3/raftpb"
+)
+
+// this is a state of the partition environment --- file: types.partition_env.go
+// nextState := &Partition{
+// 	ReplicaColors: make(map[uint64]Color),
+// 	PartitionMap:  make(map[uint64]int),
+// 	ReplicaStates: make(map[uint64]ReplicaState), // this should contain the actual states of the replicas according to the protocol implementation
+// 	Partition:     make([][]Color, 0),
+// 	RepeatCount:   p.curPartition.RepeatCount,
+// }
+
+// what is a ReplicaState for Raft? Where is the Log?
+// ReplicaState["state"]: raft.Status
+// ReplicaState["log"]:	[]pb.Entry
+
+// checks if the log size of a replica decreases throughout an execution
+func ReducedLog() func(*types.Trace) (bool, int) {
+	return func(t *types.Trace) (bool, int) {
+		replicasLogs := make(map[uint64][]pb.Entry) // map of processID : Log (list of entries)
+
+		for i := 0; i < t.Len(); i++ { // foreach (state, action, new_state, reward) in the trace
+			s, _, _, _ := t.Get(i) // take state s
+			pS, ok := s.(*types.Partition)
+			if ok {
+				for replica_id, elem := range pS.ReplicaStates {
+					repState := elem.(RaftReplicaState)                  // cast into map
+					curLog := committedLog(repState.Log, repState.State) // cast "log" into list of pb.Entry
+
+					if _, ok := replicasLogs[replica_id]; !ok { // init empty list if previous replica log is not present
+						replicasLogs[replica_id] = make([]pb.Entry, 0)
+					}
+
+					if len(curLog) < len(replicasLogs[replica_id]) { // check if log size decreased
+						return true, i // BUG FOUND
+					}
+
+					replicasLogs[replica_id] = copyLog(curLog) // update previous state log with the current one for next iteration
+				}
+			}
+		}
+		return false, -1
+	}
+}
+
+// checks if a committed entry of a replica has been changed throughout an execution
+func ModifiedLog() func(*types.Trace) (bool, int) {
+	return func(t *types.Trace) (bool, int) {
+		replicasLogs := make(map[uint64][]pb.Entry) // map of processID : Log (list of entries)
+
+		for i := 0; i < t.Len(); i++ { // foreach (state, action, new_state, reward) in the trace
+			s, _, _, _ := t.Get(i) // take state s
+			pS, ok := s.(*types.Partition)
+			if ok {
+				for replica_id, elem := range pS.ReplicaStates {
+					repState := elem.(RaftReplicaState)                  // cast into map
+					curLog := committedLog(repState.Log, repState.State) // cast "log" into list of pb.Entry
+
+					if _, ok := replicasLogs[replica_id]; !ok { // init empty list if previous replica log is not present
+						replicasLogs[replica_id] = make([]pb.Entry, 0)
+					}
+
+					for j := 0; j < min(len(replicasLogs[replica_id]), len(curLog)); j++ { // for the size of the old log (ignore newly appended entries)
+						if !eq_entry(curLog[j], replicasLogs[replica_id][j]) { // check if they are equal
+							return true, i // BUG FOUND
+						}
+					}
+
+					replicasLogs[replica_id] = copyLog(curLog) // update previous state log with the current one for next iteration
+				}
+			}
+		}
+		return false, -1
+	}
+}
+
+// checks if any replica has an inconsistent log w.r.t. other replicas
+func InconsistentLogs() func(*types.Trace) (bool, int) {
+	return func(t *types.Trace) (bool, int) {
+		for i := 0; i < t.Len(); i++ { // foreach (state, action, new_state, reward) in the trace
+			s, _, _, _ := t.Get(i) // take state s
+			pS, ok := s.(*types.Partition)
+			if ok {
+				// make a list of logs, starting at index 0
+				logsList := make([][]pb.Entry, 0, len(pS.ReplicaStates))
+				for _, value := range pS.ReplicaStates {
+					state := value.(RaftReplicaState)
+					log := committedLog(state.Log, state.State)
+					logsList = append(logsList, log)
+				}
+
+				for j1 := 0; j1 < len(logsList); j1++ { // for each replica
+					for j2 := j1; j2 < len(logsList); j2++ { // for each other replica
+						minSize := min(len(logsList[j1]), len(logsList[j2])) // take the minimum length among the two logs
+
+						for k := 0; k < minSize; k++ { // for each entry
+							if !eq_entry(logsList[j1][k], logsList[j2][k]) { // check if they are equal
+								return true, i // BUG FOUND
+							}
+						}
+					}
+				}
+			}
+		}
+		return false, -1
+	}
+}
+
+// Check if there are more than one leader in the same term
+func MultipleLeaders() func(*types.Trace) (bool, int) {
+	return func(t *types.Trace) (bool, int) {
+		// processStates := make(map[uint64]RaftState)
+		// processLogs := make(map[uint64][]pb.Entry) // map of processID : Log (list of entries)
+		for i := 0; i < t.Len(); i++ { // foreach (state, action, new_state, reward) in the trace
+			s, _, _, _ := t.Get(i)         // take state s
+			pS, ok := s.(*types.Partition) // cast into partition
+			if ok {
+				leaders := make(map[int]int)             // map for leaders number, term : count
+				for _, state := range pS.ReplicaStates { // for each replica state
+					repState := state.(RaftReplicaState)
+					curState := repState.State                                              // cast into raft.Status
+					if curState.BasicStatus.SoftState.RaftState.String() == "StateLeader" { // if the current softState of the replica is "StateLeader"
+						curTerm := curState.BasicStatus.HardState.Term // take term
+						val := 0
+						if v, ok := leaders[int(curTerm)]; !ok { // read leaders count for the term
+							val = v
+						}
+						leaders[int(curTerm)] = val + 1 // increase it by one
+						if leaders[int(curTerm)] > 1 {  // if more than one leader => BUG FOUND
+							return true, i
+						}
+					}
+				}
+			}
+		}
+		return false, -1
+	}
+}
+
+// MADE TO CHECK TRACE RECORDING -- checks if the log size of any replica is not empty
+func DummyBug() func(*types.Trace) (bool, int) {
+	return func(t *types.Trace) (bool, int) {
+		for i := 0; i < t.Len(); i++ { // foreach (state, action, new_state, reward) in the trace
+			s, _, _, _ := t.Get(i) // take state s
+			pS, ok := s.(*types.Partition)
+			if ok {
+				for _, elem := range pS.ReplicaStates {
+					repState := elem.(RaftReplicaState)                  // cast into map
+					curLog := committedLog(repState.Log, repState.State) // cast "log" into list of pb.Entry
+
+					if len(curLog) > 0 {
+						if len(filterEntries(curLog)) > 0 { // check if log size decreased
+							filteredLog := filterEntries(curLog)
+							fl := filterEntriesNoElection(curLog)
+							if len(fl) > 0 {
+								fl = filterEntriesNoElection(curLog)
+							}
+							differentTerms := make(map[uint64]bool, 0)
+							for _, ent := range filteredLog {
+								differentTerms[ent.Term] = true
+							}
+							if len(differentTerms) > 1 {
+								ffilteredLog := filterEntriesNoElection(curLog)
+								ddifferentTerms := make(map[uint64]bool, 0)
+								for _, ent := range ffilteredLog {
+									ddifferentTerms[ent.Term] = true
+								}
+								if len(ddifferentTerms) > 1 {
+									return true, i // BUG FOUND
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return false, -1
+	}
+}
+
+// MADE TO CHECK TRACE RECORDING -- checks if the log size of any replica is not empty
+func DummyBug2() func(*types.Trace) (bool, int) {
+	return func(t *types.Trace) (bool, int) {
+		for i := 0; i < t.Len(); i++ { // foreach (state, action, new_state, reward) in the trace
+			s, _, _, _ := t.Get(i) // take state s
+			pS, ok := s.(*types.Partition)
+			if ok {
+				for _, elem := range pS.ReplicaStates {
+					repState := elem.(RaftReplicaState) // cast into map
+					// curLog := repState.Log    // cast "log" into list of pb.Entry
+					curSnapshot := repState.Snapshot
+
+					if curSnapshot.Index > 0 || curSnapshot.Term > 0 { // check if log size decreased
+						return true, i // BUG FOUND
+					}
+				}
+			}
+		}
+		return false, -1
+	}
+}
+
+// other functions / auxiliary
+func min(a, b int) int {
+	if a > b {
+		return b
+	}
+	return a
+}
+
+func eq_entry(a, b pb.Entry) bool {
+	return bytes.Equal(a.Data, b.Data) && a.Index == b.Index && a.Term == b.Term && a.Type == b.Type
+}

@@ -1,0 +1,9 @@
+{
+  "AssembliesPath": "../../../bin/$(TargetFramework)/Configurations",
+  "OutputPath": "../../../bin/$(TargetFramework)/Configurations",
+  "IsRewritingConcurrentCollections": false,
+  "Assemblies": [
+    "Test1.dll",
+    "Test2.dll"
+  ]
+}

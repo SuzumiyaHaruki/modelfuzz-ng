@@ -1,0 +1,1 @@
+#define REDISRAFT_GIT_SHA1 "b779b199"

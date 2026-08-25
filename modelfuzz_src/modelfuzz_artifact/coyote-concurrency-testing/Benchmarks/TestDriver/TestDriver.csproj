@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\Common\build.props" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <OutputPath>..\bin\</OutputPath>
+    <RootNamespace>TestDriver</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <EnableAnalyzers>false</EnableAnalyzers>
+    <RunAnalyzersDuringBuild>false</RunAnalyzersDuringBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Raft">
+      <HintPath>..\bin\net7.0\Raft.dll</HintPath>
+    </Reference>
+    <Reference Include="Raft.Azure">
+      <HintPath>..\bin\net7.0\Raft.Azure.dll</HintPath>
+    </Reference>
+    <Reference Include="Raft.Mocking">
+      <HintPath>..\bin\net7.0\Raft.Mocking.dll</HintPath>
+    </Reference>
+    <Reference Include="Raft.Nondeterminism">
+      <HintPath>..\bin\net7.0\Raft.Nondeterminism.dll</HintPath>
+    </Reference>
+
+    <Reference Include="TwoPhaseCommit">
+      <HintPath>..\bin\net7.0\TwoPhaseCommit.dll</HintPath>
+    </Reference>
+
+    <Reference Include="MicroBenchmark">
+      <HintPath>..\bin\net7.0\MicroBenchmark.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

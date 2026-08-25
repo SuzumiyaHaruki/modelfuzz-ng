@@ -1,0 +1,16 @@
+{
+  "maven.executable.path": "/home/nitro/.local/bin/mvn",
+  "java.import.maven.enabled": false,
+  "java.import.gradle.enabled": false,
+  "java.configuration.runtimes": [
+    {
+      "name": "JavaSE-11",
+      "path": "/home/nitro/.local/jdks/jdk-17.0.13+11"
+    },
+    {
+      "name": "JavaSE-17",
+      "path": "/home/nitro/.local/jdks/jdk-17.0.13+11",
+      "default": true
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC  -DHAVE_CRC32C -msse4.2 -D_POSIX_C_SOURCE=200112L -D_GNU_SOURCE -O2 -g  -shared -Wl,-soname,libraft_shared.so -o libraft_shared.so CMakeFiles/raft_shared.dir/src/raft_log.c.o CMakeFiles/raft_shared.dir/src/raft_server.c.o CMakeFiles/raft_shared.dir/src/raft_node.c.o CMakeFiles/raft_shared.dir/src/raft_server_properties.c.o 

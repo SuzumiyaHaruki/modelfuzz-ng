@@ -1,0 +1,19 @@
+{
+  "AssembliesPath": "../bin/net7.0",
+  "Assemblies": [
+    "AccountManager.dll",
+    "AccountManager.ETags.dll",
+    "BoundedBuffer.dll",
+    "CoffeeMachineActors.dll",
+    "CoffeeMachineTasks.dll",
+    "DrinksServingRobotActors.dll",
+    "HelloWorldActors.dll",
+    "Monitors.dll",
+    "Raft.dll",
+    "Raft.Mocking.dll",
+    "Raft.Nondeterminism.dll",
+    "PetImages.dll",
+    "PetImages.Tests.dll"
+  ],
+  "IsRewritingConcurrentCollections":"false"
+}

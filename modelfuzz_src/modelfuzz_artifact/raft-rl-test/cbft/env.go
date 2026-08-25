@@ -1,0 +1,260 @@
+package cbft
+
+import (
+	"context"
+	"fmt"
+	"math/rand"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/zeu5/raft-rl-test/types"
+)
+
+type CometRequest struct {
+	// One of "get|set"
+	Type string
+	// Key of the operation
+	Key string
+	// Value of the operation in the case of set
+	Value string
+}
+
+func (c CometRequest) Copy() CometRequest {
+	return CometRequest{
+		Type:  c.Type,
+		Key:   c.Key,
+		Value: c.Value,
+	}
+}
+
+type CometClusterState struct {
+	NodeStates map[uint64]*CometNodeState
+	Messages   map[string]Message
+	Requests   []CometRequest
+}
+
+func (r *CometClusterState) GetReplicaState(id uint64) types.ReplicaState {
+	s := r.NodeStates[id]
+	return s
+}
+
+func (r *CometClusterState) PendingMessages() map[string]types.Message {
+	out := make(map[string]types.Message)
+	for k, m := range r.Messages {
+		out[k] = m
+	}
+	return out
+}
+
+func (r *CometClusterState) CanDeliverRequest() bool {
+	return len(r.Requests) > 0
+}
+
+func (r *CometClusterState) PendingRequests() []types.Request {
+	out := make([]types.Request, len(r.Requests))
+	for i, r := range r.Requests {
+		out[i] = r.Copy()
+	}
+	return out
+}
+
+func (r *CometClusterState) Copy() *CometClusterState {
+	out := &CometClusterState{
+		NodeStates: make(map[uint64]*CometNodeState),
+		Messages:   make(map[string]Message),
+		Requests:   make([]CometRequest, len(r.Requests)),
+	}
+	for k, v := range r.NodeStates {
+		out.NodeStates[k] = v.Copy()
+	}
+	for k, v := range r.Messages {
+		out.Messages[k] = v.Copy()
+	}
+	for i, req := range r.Requests {
+		out.Requests[i] = req.Copy()
+	}
+	return out
+}
+
+var _ types.PartitionedSystemState = &CometClusterState{}
+
+type CometEnv struct {
+	clusterConfig *CometClusterConfig
+	network       *InterceptNetwork
+	cluster       *CometCluster
+	ctx           context.Context
+
+	curState *CometClusterState
+}
+
+var _ types.PartitionedSystemEnvironment = &CometEnv{}
+
+// For a given config, should only be instantiated once since it spins up a sever and binds the addr:port
+func NewCometEnv(ctx context.Context, clusterConfig *CometClusterConfig) *CometEnv {
+	e := &CometEnv{
+		clusterConfig: clusterConfig,
+		network:       NewInterceptNetwork(ctx, clusterConfig.InterceptListenPort),
+		cluster:       nil,
+		ctx:           ctx,
+	}
+	e.network.Start()
+	return e
+}
+
+func (r *CometEnv) BecomeByzantine(nodeID uint64) {
+	r.network.MakeNodeByzantine(nodeID)
+}
+
+func (r *CometEnv) Cleanup() {
+	if r.cluster != nil {
+		r.cluster.Destroy()
+		r.cluster = nil
+	}
+}
+
+func (r *CometEnv) Reset(epCtx *types.EpisodeContext) (types.PartitionedSystemState, error) {
+	if r.cluster != nil {
+		if err := r.cluster.Destroy(); err != nil {
+			return nil, err
+		}
+	}
+	r.network.Reset()
+	r.cluster, _ = NewCluster(r.clusterConfig)
+	if err := r.cluster.Start(); err != nil {
+		r.cluster.Destroy()
+		return nil, err
+	}
+
+	r.network.WaitForNodes(r.clusterConfig.NumNodes)
+
+	newState := &CometClusterState{
+		NodeStates: r.cluster.GetNodeStates(),
+		Messages:   r.network.GetAllMessages(),
+		Requests:   make([]CometRequest, r.clusterConfig.NumRequests),
+	}
+	for i := 0; i < r.clusterConfig.NumRequests; i++ {
+		if rand.Intn(2) == 0 {
+			newState.Requests[i] = CometRequest{
+				Type: "get",
+				Key:  "k",
+			}
+		} else {
+			newState.Requests[i] = CometRequest{
+				Type:  "set",
+				Key:   "k",
+				Value: strconv.Itoa(i + 1),
+			}
+		}
+	}
+	r.curState = newState
+	return newState, nil
+}
+
+func (r *CometEnv) Tick(ctx *types.EpisodeContext, _ int) (types.PartitionedSystemState, error) {
+	select {
+	case <-time.After(r.clusterConfig.TickDuration):
+	case <-ctx.Context.Done():
+	}
+	newState := &CometClusterState{
+		NodeStates: r.cluster.GetNodeStates(),
+		Messages:   r.network.GetAllMessages(),
+		Requests:   copyRequests(r.curState.Requests),
+	}
+	r.curState = newState
+	return newState, nil
+}
+
+func (r *CometEnv) DeliverMessages(messages []types.Message, epCtx *types.EpisodeContext) (types.PartitionedSystemState, error) {
+	newState := r.curState.Copy()
+
+	errs := []string{}
+	for _, m := range messages {
+		rm, ok := m.(Message)
+		if !ok {
+			continue
+		}
+		if err := r.network.SendMessage(epCtx.Context, rm.ID); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	// too many errors delivering messages
+	if len(errs) > 0 && len(errs) >= len(messages)/10 {
+		epCtx.Report.AddLog(r.cluster.GetLogs(), "logs")
+		return nil, fmt.Errorf("too many errors sending messages: %s", strings.Join(errs, "\n"))
+	}
+	newState.Messages = r.network.GetAllMessages()
+	r.curState = newState
+	return newState, nil
+}
+
+func (r *CometEnv) DropMessages(messages []types.Message, epCtx *types.EpisodeContext) (types.PartitionedSystemState, error) {
+	newState := &CometClusterState{
+		NodeStates: make(map[uint64]*CometNodeState),
+	}
+	for id, s := range r.curState.NodeStates {
+		newState.NodeStates[id] = s.Copy()
+	}
+	for _, m := range messages {
+		rm, ok := m.(Message)
+		if !ok {
+			continue
+		}
+		r.network.DeleteMessage(rm.ID)
+	}
+	newState.Messages = r.network.GetAllMessages()
+	newState.Requests = copyRequests(r.curState.Requests)
+	r.curState = newState
+
+	return newState, nil
+}
+
+func (r *CometEnv) ReceiveRequest(req types.Request, epCtx *types.EpisodeContext) (types.PartitionedSystemState, error) {
+	newState := r.curState.Copy()
+
+	cReq := req.(CometRequest)
+	queryString := ""
+	if cReq.Type == "get" {
+		queryString = fmt.Sprintf(`abci_query?data="%s"`, cReq.Key)
+	} else if cReq.Type == "set" {
+		queryString = fmt.Sprintf(`broadcast_tx_commit?tx="%s=%s"`, cReq.Key, cReq.Value)
+	}
+	if queryString == "" {
+		r.curState = newState
+		return newState, nil
+	}
+
+	r.cluster.Execute(queryString)
+	newState.Requests = copyRequests(newState.Requests[1:])
+
+	r.curState = newState
+	return newState, nil
+}
+
+func (r *CometEnv) Stop(nodeID uint64, epCtx *types.EpisodeContext) error {
+	if r.cluster == nil {
+		return nil
+	}
+	node, ok := r.cluster.GetNode(int(nodeID))
+	if !ok {
+		return nil
+	}
+	if !node.IsActive() {
+		return nil
+	}
+	return node.Stop()
+}
+
+func (r *CometEnv) Start(nodeID uint64, epCtx *types.EpisodeContext) (err error) {
+	if r.cluster == nil {
+		return
+	}
+	node, ok := r.cluster.GetNode(int(nodeID))
+	if !ok {
+		return
+	}
+	if node.IsActive() {
+		return
+	}
+	return node.Start()
+}
