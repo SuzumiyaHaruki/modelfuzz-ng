@@ -78,6 +78,7 @@ func PhaseACommand() *cobra.Command {
 	var tlcAddr string
 	var localizedMutation bool
 	var localMutationPercent int
+	var prefixPreservingMutation bool
 	cmd := &cobra.Command{
 		Use:   "phase-a",
 		Short: "Run the Phase A end-to-end attribution experiment",
@@ -97,6 +98,9 @@ func PhaseACommand() *cobra.Command {
 			if localMutationPercent < 0 || localMutationPercent > 100 {
 				return fmt.Errorf("local-mutation-percent must be in [0,100]")
 			}
+			if prefixPreservingMutation && (localizedMutation || localMutationPercent > 0) {
+				return fmt.Errorf("prefix-preserving-mutation cannot be combined with localized mutation flags")
+			}
 			if err := os.MkdirAll(savePath, 0755); err != nil {
 				return fmt.Errorf("create Phase A result directory: %w", err)
 			}
@@ -105,10 +109,13 @@ func PhaseACommand() *cobra.Command {
 			guider := NewTLCStateGuider(tlcAddr, tracePath, recordTraces).WithStateAttribution(true)
 			var mutator Mutator = NewGlobalModelFuzzMutator()
 			mutationMode := "global"
-			if localizedMutation {
+			if prefixPreservingMutation {
+				mutator = NewPrefixPreservingModelFuzzMutator()
+				mutationMode = "prefix-preserving-suffix"
+			} else if localizedMutation {
 				localMutationPercent = 100
 			}
-			if localMutationPercent > 0 {
+			if !prefixPreservingMutation && localMutationPercent > 0 {
 				mutator = NewMixedModelFuzzMutator(localMutationPercent)
 				if localMutationPercent == 100 {
 					mutationMode = "localized"
@@ -161,6 +168,7 @@ func PhaseACommand() *cobra.Command {
 					"model":                  "RAFT_5_3",
 					"mutation_mode":          mutationMode,
 					"local_mutation_percent": localMutationPercent,
+					"prefix_preserving":      prefixPreservingMutation,
 				},
 				Runtime:       runtime.String(),
 				RuntimeNanos:  runtime.Nanoseconds(),
@@ -185,6 +193,7 @@ func PhaseACommand() *cobra.Command {
 	cmd.Flags().StringVar(&tlcAddr, "tlc", "127.0.0.1:2023", "TLC server address")
 	cmd.Flags().BoolVar(&localizedMutation, "localized-mutation", false, "Limit the original three mutators to choices nearest new-state origins")
 	cmd.Flags().IntVar(&localMutationPercent, "local-mutation-percent", 0, "Percentage of mutation attempts using localized candidates (0 keeps original global behavior)")
+	cmd.Flags().BoolVar(&prefixPreservingMutation, "prefix-preserving-mutation", false, "Keep choices through the earliest new-state origin and mutate only the suffix")
 	return cmd
 }
 

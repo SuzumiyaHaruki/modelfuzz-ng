@@ -407,6 +407,14 @@ func (f *Fuzzer) Run() []CoverageStats {
 		f.stats["local_mutation_attempts"] = local
 		f.stats["global_mutation_attempts"] = global
 	}
+	if provider, ok := f.config.Mutator.(PrefixMutationStatsProvider); ok {
+		stats := provider.PrefixMutationStats()
+		f.stats["prefix_mutation_attempts"] = stats.Attempts
+		f.stats["prefix_guided_attempts"] = stats.Guided
+		f.stats["prefix_global_fallback_attempts"] = stats.GlobalFallback
+		f.stats["prefix_generated_attempts"] = stats.Generated
+		f.stats["prefix_rejected_attempts"] = stats.Rejected
+	}
 	return coverages
 }
 
@@ -635,6 +643,18 @@ type GuidanceAwareMutator interface {
 
 type MutationSelectionStatsProvider interface {
 	MutationSelectionStats() (local, global int)
+}
+
+type PrefixMutationStats struct {
+	Attempts       int
+	Guided         int
+	GlobalFallback int
+	Generated      int
+	Rejected       int
+}
+
+type PrefixMutationStatsProvider interface {
+	PrefixMutationStats() PrefixMutationStats
 }
 
 // RandomizedMutator 允许 Fuzzer 把自己的确定性随机源注入 Mutator。

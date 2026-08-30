@@ -222,6 +222,28 @@ MaxMessages = r + 1
 
 合法范围外的候选直接省略。该策略不改变固定 Step 和 FIFO 语义。
 
+## Phase B2：新状态前缀保持 + 后缀随机变异
+
+### 目标
+
+检验归因反馈是否可以避免随机变异破坏已经到达的新状态，同时保留后续搜索的随机性。
+该策略使用位置归因，但不再把随机候选限制在 Origin 附近的小窗口。
+
+### 第一版策略
+
+- 从本轮 `located` 的新状态中选择 step 最早的 Origin，以保留一个已知新状态并最大化
+  可继续探索的后缀；其他目标选择规则留作独立消融；
+- 保持所有 `step <= origin.step` 的 SchedulingChoice 不变；
+- 原始 crash-node、Node-order 和 MaxMessages 三个随机 Mutator 及交换次数不变，候选
+  只能来自 `step > origin.step` 的完整后缀；
+- 只有 initial state 或没有 located Origin 时回退原始全局候选；
+- 已有 located Origin 但后缀不足以执行原始组合 Mutator 时，本次变异失败，不允许回到
+  前缀或全局候选；
+- 不增加 child 数、SUT 执行数或 TLC 检查数。
+
+该策略只保证调度输入前缀静态不变。目标模型状态在 child 中的实际保持率必须通过重放
+结果测量，不能仅凭 Origin 推断为100%。
+
 ## Phase C：模型语义变异
 
 ### 目标
@@ -414,8 +436,12 @@ localized    38.6
 因此当前结果不支持“按 step 距离限制随机候选”这一位置局部性假设。该实现和混合参数
 保留为负基线，但不继续搜索窗口或混合比例，也不据此进入 AI 阶段。
 
-下一项候选实验应先更新本文档并单独实施：冻结首次进入新状态之前的执行前缀，继续在
-完整后缀中使用原始随机变异。关系感知变异作为后续独立消融，优先研究消息投递与 Tick、
+Phase B2 第一版已通过 `--prefix-preserving-mutation` 独立接入。30-iteration smoke 中
+72次 guided 尝试生成66个后缀 child、拒绝6次，未发生全局回退、归因失败或
+missing-origin；该 smoke 只验证实现可运行，不作为效果结论。下一步应使用与 M1 相同的
+5-seed、100-episode 配置做配对 pilot。
+
+关系感知变异作为后续独立消融，优先研究消息投递与 Tick、
 消息与消息、crash/restart 与关键消息、client request 与 leader 形成之间的先后关系。
 这些实验不把每个实现 action 改成新的原子控制单元，也不额外增加每个候选的 TLC 执行次数。
 

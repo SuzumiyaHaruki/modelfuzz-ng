@@ -420,6 +420,51 @@ func NewLocalizedModelFuzzMutator() Mutator {
 	}
 }
 
+// NewPrefixPreservingModelFuzzMutator keeps every scheduling choice through
+// the earliest newly covered state's step and applies the original ModelFuzz
+// operators only to the remaining suffix. If guidance has no located origin,
+// the scope is empty and the operators retain their original global behavior.
+func NewPrefixPreservingModelFuzzMutator() Mutator {
+	scope := &localMutationScope{preservePrefix: true}
+	crash := NewSwapCrashNodeMutator(2)
+	crash.scope = scope
+	node := NewSwapNodeMutator(20)
+	node.scope = scope
+	maxMessages := NewSwapMaxMessagesMutator(20)
+	maxMessages.scope = scope
+	return &prefixPreservingModelFuzzMutator{
+		combinedMutator: &combinedMutator{
+			mutators: []Mutator{crash, node, maxMessages},
+			scope:    scope,
+		},
+	}
+}
+
+type prefixPreservingModelFuzzMutator struct {
+	*combinedMutator
+	stats PrefixMutationStats
+}
+
+func (p *prefixPreservingModelFuzzMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
+	p.stats.Attempts++
+	if len(p.scope.steps) == 0 {
+		p.stats.GlobalFallback++
+	} else {
+		p.stats.Guided++
+	}
+	mutated, ok := p.combinedMutator.Mutate(trace, eventTrace)
+	if ok {
+		p.stats.Generated++
+	} else {
+		p.stats.Rejected++
+	}
+	return mutated, ok
+}
+
+func (p *prefixPreservingModelFuzzMutator) PrefixMutationStats() PrefixMutationStats {
+	return p.stats
+}
+
 type mixedModelFuzzMutator struct {
 	local          Mutator
 	global         Mutator
@@ -469,7 +514,8 @@ func (m *mixedModelFuzzMutator) MutationSelectionStats() (int, int) {
 }
 
 type localMutationScope struct {
-	steps []int
+	steps          []int
+	preservePrefix bool
 }
 
 func (s *localMutationScope) setGuidance(guidance Guidance) {
@@ -481,6 +527,7 @@ func (s *localMutationScope) setGuidance(guidance Guidance) {
 			s.steps = append(s.steps, hit.Origin.Step)
 		}
 	}
+	sort.Ints(s.steps)
 }
 
 type scopedChoice struct {
@@ -500,8 +547,11 @@ func mutationChoiceIndices(trace *List[*SchedulingChoice], choiceType Scheduling
 		if choice.Type != choiceType {
 			continue
 		}
+		if scope != nil && scope.preservePrefix && len(scope.steps) > 0 && step <= scope.steps[0] {
+			continue
+		}
 		distance := 0
-		if scope != nil && len(scope.steps) > 0 {
+		if scope != nil && !scope.preservePrefix && len(scope.steps) > 0 {
 			distance = abs(step - scope.steps[0])
 			for _, center := range scope.steps[1:] {
 				distance = min(distance, abs(step-center))
@@ -509,7 +559,7 @@ func mutationChoiceIndices(trace *List[*SchedulingChoice], choiceType Scheduling
 		}
 		candidates = append(candidates, scopedChoice{index: index, distance: distance})
 	}
-	if scope != nil && len(scope.steps) > 0 && len(candidates) > poolSize {
+	if scope != nil && !scope.preservePrefix && len(scope.steps) > 0 && len(candidates) > poolSize {
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return candidates[i].distance < candidates[j].distance
 		})
