@@ -482,10 +482,12 @@ B2-v2完成逐状态目标绑定、自适应后缀算子和在线目标保持统
 
 B2-v2 的每个新状态都获得3次独立尝试：579次尝试生成558个child，拒绝21次（3.6%）；
 实际执行360条mutation和40条random。345条带目标的child中，338条重现目标状态，7条
-未重现，在线保持率为98.0%。抽查丢失案例时，父子实现event前缀完全相同，TLC transition
-具有相同pre-state fingerprint和同名mapped action，却得到不同post-state fingerprint。
-因此这些丢失不是后缀越界，而暴露了参数化action映射或多后继选择不具有函数确定性；
-服务端当前只用Java `assert` 检查后继数并选择第一个后继，默认关闭assert时不能形成保证。
+未重现，在线保持率为98.0%。后续重复实验确认这些丢失不是后缀越界或TLA+动作多后继：
+完全相同的event前缀单独重复执行时后继稳定，但接上不同后缀后，早期transition的postKey
+会被改写。`SimulationTransition` 保存可变`TLCState`引用，直到HTTP响应序列化时才调用
+`fingerPrint()`；`statesVisited`也保存状态引用并在整条trace结束后才执行抽象。因此后续动作
+可以改变先前记录所引用的状态。这同时解释了早期前缀探测中的“出现、消失、再出现”。
+另外，TLC构造器默认随机选择`fpIndex`，同一状态的fingerprint数值跨JVM重启也不稳定。
 
 B2-v2仍未提高状态覆盖，而且比B2-v1更差；深层目标的短后缀以较弱变异消耗了执行预算。
 在解决模型执行确定性并重新定义不同深度目标的energy前，不继续调global/prefix比例，也不
