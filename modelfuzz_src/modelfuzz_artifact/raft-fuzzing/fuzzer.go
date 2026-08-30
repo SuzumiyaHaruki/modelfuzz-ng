@@ -423,6 +423,9 @@ func (f *Fuzzer) Run() []CoverageStats {
 						if target.Status == AttributionLocated && target.Origin != nil {
 							child.hasTargetState = true
 							child.targetStateKey = target.State.Key
+							if target.HasTransitionKey {
+								child.targetStateKey = target.TransitionKey
+							}
 							child.targetStep = target.Origin.Step
 						}
 						f.candidateTracesQueue.Push(child)

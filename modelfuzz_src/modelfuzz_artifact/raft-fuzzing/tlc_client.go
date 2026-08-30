@@ -23,14 +23,16 @@ type TLCTransition struct {
 // TLCResponse 同时兼容原始服务端和带 transition provenance 的服务端。
 // 指针用于区分“字段不存在的旧协议”和“存在但没有事件的新协议”。
 type TLCResponse struct {
-	States      []string         `json:"states"`
-	Keys        []int64          `json:"keys"`
-	Transitions *[]TLCTransition `json:"transitions"`
+	States            []string         `json:"states"`
+	Keys              []int64          `json:"keys"`
+	Transitions       *[]TLCTransition `json:"transitions"`
+	StateEventIndices *[]int           `json:"stateEventIndices"`
 }
 
 type TLCExecution struct {
 	States              []State
 	Transitions         []TLCTransition
+	StateEventIndices   []int
 	ProvenanceAvailable bool
 }
 
@@ -111,6 +113,14 @@ func (c *TLCClient) ExecuteTrace(trace *List[*Event]) (TLCExecution, error) {
 			len(*tlcResponse.Transitions), trace.Size())
 	}
 	execution.Transitions = append([]TLCTransition(nil), (*tlcResponse.Transitions)...)
+	if tlcResponse.StateEventIndices != nil {
+		if len(*tlcResponse.StateEventIndices) != len(result) {
+			return TLCExecution{}, fmt.Errorf(
+				"invalid provenance response: %d state origins for %d states",
+				len(*tlcResponse.StateEventIndices), len(result))
+		}
+		execution.StateEventIndices = append([]int(nil), (*tlcResponse.StateEventIndices)...)
+	}
 	execution.ProvenanceAvailable = true
 	return execution, nil
 }

@@ -82,6 +82,7 @@ func TestTLCClientReadsTransitionProvenance(t *testing.T) {
 		return testJSONResponse(`{
 			"states":["initial","after-remove"],
 			"keys":[1,2],
+			"stateEventIndices":[-1,0],
 			"transitions":[{
 				"eventIndex":0,
 				"inputName":"Remove",
@@ -104,6 +105,19 @@ func TestTLCClientReadsTransitionProvenance(t *testing.T) {
 	}
 	if len(execution.Transitions) != 1 || execution.Transitions[0].PostKey != 2 || execution.Transitions[0].EventIndex != 0 {
 		t.Fatalf("unexpected transitions: %#v", execution.Transitions)
+	}
+	if len(execution.StateEventIndices) != 2 || execution.StateEventIndices[0] != -1 || execution.StateEventIndices[1] != 0 {
+		t.Fatalf("unexpected state origins: %#v", execution.StateEventIndices)
+	}
+}
+
+func TestTLCClientRejectsMismatchedStateOriginCount(t *testing.T) {
+	client := NewTLCClient("http://tlc.test")
+	client.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return testJSONResponse(`{"states":["initial"],"keys":[1],"stateEventIndices":[],"transitions":[]}`), nil
+	})}
+	if _, err := client.ExecuteTrace(NewList[*Event]()); err == nil {
+		t.Fatal("ExecuteTrace accepted mismatched state origin count")
 	}
 }
 

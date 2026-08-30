@@ -40,12 +40,14 @@ const (
 // StateAttribution 描述一个本轮新增模型状态首次出现在哪个实现事件之后。
 // EventIndex 使用 0-based event trace 下标；初始状态和定位失败时为 -1。
 type StateAttribution struct {
-	State      State
-	EventIndex int
-	Origin     *EventOrigin
-	Status     string
-	Source     string `json:",omitempty"`
-	Error      string `json:",omitempty"`
+	State            State
+	EventIndex       int
+	Origin           *EventOrigin
+	Status           string
+	TransitionKey    int64  `json:",omitempty"`
+	HasTransitionKey bool   `json:",omitempty"`
+	Source           string `json:",omitempty"`
+	Error            string `json:",omitempty"`
 }
 
 // Guidance 保存一次 Guider.Check 产生的细粒度模型反馈。
@@ -349,6 +351,37 @@ func locateStateFromTransitions(state State, execution TLCExecution, trace *List
 		Status:     AttributionFailed,
 		Source:     AttributionSourceTransition,
 	}
+	if len(execution.StateEventIndices) == len(execution.States) {
+		for stateIndex, candidate := range execution.States {
+			if candidate.Key != state.Key {
+				continue
+			}
+			eventIndex := execution.StateEventIndices[stateIndex]
+			if eventIndex == -1 {
+				hit.Status = AttributionInitialState
+				return hit
+			}
+			if eventIndex < 0 || eventIndex >= trace.Size() || eventIndex >= len(execution.Transitions) {
+				hit.Error = fmt.Sprintf("TLC abstract state origin %d is outside trace of size %d",
+					eventIndex, trace.Size())
+				return hit
+			}
+			transition := execution.Transitions[eventIndex]
+			event, ok := trace.Get(eventIndex)
+			if !ok || (transition.InputName != "" && transition.InputName != event.Name) {
+				hit.Error = fmt.Sprintf("TLC abstract state origin %d does not match the local event", eventIndex)
+				return hit
+			}
+			hit.EventIndex = eventIndex
+			hit.Origin = event.Origin.Copy()
+			hit.TransitionKey = transition.PostKey
+			hit.HasTransitionKey = true
+			hit.Status = AttributionLocated
+			return hit
+		}
+		hit.Error = fmt.Sprintf("state key %d is absent from aligned TLC abstract states", state.Key)
+		return hit
+	}
 	if len(execution.States) > 0 && execution.States[0].Key == state.Key {
 		hit.Status = AttributionInitialState
 		return hit
@@ -374,6 +407,8 @@ func locateStateFromTransitions(state State, execution TLCExecution, trace *List
 		}
 		hit.EventIndex = transition.EventIndex
 		hit.Origin = event.Origin.Copy()
+		hit.TransitionKey = transition.PostKey
+		hit.HasTransitionKey = true
 		hit.Status = AttributionLocated
 		return hit
 	}
@@ -510,6 +545,7 @@ func (t *TLCStateGuider) recordTrace(trace *List[*SchedulingChoice], eventTrace 
 	}
 	if execution.ProvenanceAvailable {
 		data["tlc_transitions"] = execution.Transitions
+		data["tlc_state_event_indices"] = execution.StateEventIndices
 	}
 	dataB, err := json.MarshalIndent(data, "", "\t")
 	if err != nil {

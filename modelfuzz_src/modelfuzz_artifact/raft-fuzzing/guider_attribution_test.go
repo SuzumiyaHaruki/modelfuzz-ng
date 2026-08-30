@@ -100,16 +100,18 @@ func TestTLCStateGuiderPrefersServerTransitionProvenance(t *testing.T) {
 	client.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
 		transitions := []TLCTransition{
-			{EventIndex: 0, InputName: "Remove", MappedAction: "RemoveFromActive", Status: "executed", PreKey: 1, PostKey: 2},
-			{EventIndex: 1, InputName: "Timeout", MappedAction: "Timeout", Status: "executed", PreKey: 2, PostKey: 3},
-			{EventIndex: 2, InputName: "SendMessage", Status: "ignored", PreKey: 3, PostKey: 3},
-			{EventIndex: 3, InputName: "SendMessage", Status: "ignored", PreKey: 3, PostKey: 3},
-			{EventIndex: 4, InputName: "Remove", MappedAction: "RemoveFromActive", Status: "executed", PreKey: 3, PostKey: 4},
+			{EventIndex: 0, InputName: "Remove", MappedAction: "RemoveFromActive", Status: "executed", PreKey: 10, PostKey: 20},
+			{EventIndex: 1, InputName: "Timeout", MappedAction: "Timeout", Status: "executed", PreKey: 20, PostKey: 30},
+			{EventIndex: 2, InputName: "SendMessage", Status: "ignored", PreKey: 30, PostKey: 30},
+			{EventIndex: 3, InputName: "SendMessage", Status: "ignored", PreKey: 30, PostKey: 30},
+			{EventIndex: 4, InputName: "Remove", MappedAction: "RemoveFromActive", Status: "executed", PreKey: 30, PostKey: 40},
 		}
+		stateEventIndices := []int{-1, 0, 4}
 		response, err := json.Marshal(TLCResponse{
-			States:      []string{"A", "B", "C"},
-			Keys:        []int64{1, 2, 4},
-			Transitions: &transitions,
+			States:            []string{"A", "B", "C"},
+			Keys:              []int64{1, 2, 4},
+			Transitions:       &transitions,
+			StateEventIndices: &stateEventIndices,
 		})
 		if err != nil {
 			t.Fatalf("encode response: %v", err)
@@ -140,14 +142,14 @@ func TestTLCStateGuiderPrefersServerTransitionProvenance(t *testing.T) {
 	if hit := hits[1]; hit.Status != AttributionInitialState || hit.Source != AttributionSourceTransition {
 		t.Fatalf("initial state attribution=%#v", hit)
 	}
-	if hit := hits[2]; hit.Status != AttributionLocated || hit.EventIndex != 0 || hit.Source != AttributionSourceTransition {
+	if hit := hits[2]; hit.Status != AttributionLocated || hit.EventIndex != 0 || hit.Source != AttributionSourceTransition || !hit.HasTransitionKey || hit.TransitionKey != 20 {
 		t.Fatalf("state B attribution=%#v", hit)
 	}
-	if hit := hits[4]; hit.Status != AttributionLocated || hit.EventIndex != 4 || hit.Source != AttributionSourceTransition {
+	if hit := hits[4]; hit.Status != AttributionLocated || hit.EventIndex != 4 || hit.Source != AttributionSourceTransition || !hit.HasTransitionKey || hit.TransitionKey != 40 {
 		t.Fatalf("state C attribution=%#v", hit)
 	}
-	if !guider.LastExecutionContainsState(3) {
-		t.Fatal("transition-only state 3 was not retained for target-survival checks")
+	if !guider.LastExecutionContainsState(30) {
+		t.Fatal("transition-only state 30 was not retained for target-survival checks")
 	}
 	if guider.LastExecutionContainsState(99) {
 		t.Fatal("absent state 99 unexpectedly appeared in the last execution")

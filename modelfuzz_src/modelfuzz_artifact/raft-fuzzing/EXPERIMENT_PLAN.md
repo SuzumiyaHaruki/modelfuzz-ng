@@ -489,6 +489,22 @@ B2-v2 的每个新状态都获得3次独立尝试：579次尝试生成558个chil
 可以改变先前记录所引用的状态。这同时解释了早期前缀探测中的“出现、消失、再出现”。
 另外，TLC构造器默认随机选择`fpIndex`，同一状态的fingerprint数值跨JVM重启也不稳定。
 
+在继续任何变异策略实验前，controlled TLC server只做以下测量正确性修复：
+
+1. 每一步把当前`TLCState`深拷贝后再加入`statesVisited`，避免后缀修改历史状态；
+2. `SimulationTransition`在事件执行当下保存不可变的pre/post fingerprint，不在HTTP响应
+   序列化阶段重新读取状态对象；
+3. controlled server默认使用固定`fpIndex`，保证相同状态key跨JVM重启可比较；
+4. 回归必须验证同一前缀`P`、`P+S1`和`P+S2`返回完全相同的transition前缀；
+5. 修复后先重新运行global 5-seed基线，不混入任何定向Mutator。
+
+修复后的回归结果：同一前缀重复10次、同一前缀连接两个不同后缀，以及JVM重启后的
+transition key均完全一致。抽象覆盖状态通过新增的`stateEventIndices`与输入event直接对齐，
+逐事件transition继续保留原始不可变pre/post key。修复后global 5-seed覆盖曲线与修复前
+逐iteration完全一致：最终状态`56/55/72/30/46`、AUC总和14218、unique state traces
+总和146；254个非初始新状态全部located，failed和missing-origin均为0。总运行时间从
+25.52s增加到26.43s（+3.5%），这是深拷贝历史状态的当前测量开销。
+
 B2-v2仍未提高状态覆盖，而且比B2-v1更差；深层目标的短后缀以较弱变异消耗了执行预算。
 在解决模型执行确定性并重新定义不同深度目标的energy前，不继续调global/prefix比例，也不
 进入AI阶段。

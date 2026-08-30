@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Queue;
 
@@ -41,6 +42,9 @@ public class TLCServer extends TLC {
 
     public TLCServer() {
         super();
+        // Controlled executions use fingerprints as persistent coverage keys.
+        // TLC otherwise chooses a random polynomial for every JVM process.
+        this.fpIndex = 0;
     }
 
     public void init() {
@@ -55,17 +59,21 @@ public class TLCServer extends TLC {
         StateVec initStates = computeInitStates(this.tool);
 			List<TLCState> statesVisited = new ArrayList<TLCState>();
 			List<SimulationTransition> transitions = new ArrayList<SimulationTransition>();
+			IdentityHashMap<TLCState, Integer> stateEventIndices = new IdentityHashMap<TLCState, Integer>();
 
         StateVec nextStates = new StateVec(1);
         TLCState curState = randomState(initStates);
 
-        statesVisited.add(curState);
+        TLCState initialState = snapshotState(curState);
+        statesVisited.add(initialState);
+        stateEventIndices.put(initialState, -1);
         List<MappedAction> actionsToRun = this.mapper.mapListOfActionsWithProvenance(input);
         for (MappedAction mappedAction : actionsToRun) {
             ActionWrapper nextAction = mappedAction.getAction();
             if (mappedAction.isIgnored()) {
+                TLCState snapshot = snapshotState(curState);
                 transitions.add(SimulationTransition.ignored(
-                    mappedAction.getInputIndex(), mappedAction.getInputName(), curState));
+                    mappedAction.getInputIndex(), mappedAction.getInputName(), snapshot));
                 continue;
             }
             if(nextAction.isReset() || nextAction.isQuit() || nextAction.action.equals(Action.UNKNOWN)) {
@@ -73,26 +81,39 @@ public class TLCServer extends TLC {
             }
 
             nextStates.clear();
-            TLCState preState = curState;
+            TLCState preState = snapshotState(curState);
             nextStates = nextStates.addElements(tool.getNextStates(nextAction.action, curState));
             if(nextStates.empty()) {
-                statesVisited.add(curState);
+                TLCState snapshot = snapshotState(curState);
+                statesVisited.add(snapshot);
+                stateEventIndices.put(snapshot, mappedAction.getInputIndex());
                 transitions.add(SimulationTransition.disabled(
                     mappedAction.getInputIndex(), mappedAction.getInputName(),
-                    nextAction.action.getName().toString(), curState));
+                    nextAction.action.getName().toString(), snapshot));
                 continue;
             }
             assert(nextStates.size() == 1);
             final TLCState s1 = nextStates.elementAt(0);
             s1.execCallable();
             curState = s1;
-            statesVisited.add(curState);
+            TLCState postState = snapshotState(curState);
+            statesVisited.add(postState);
+            stateEventIndices.put(postState, mappedAction.getInputIndex());
             transitions.add(SimulationTransition.executed(
                 mappedAction.getInputIndex(), mappedAction.getInputName(),
-                nextAction.action.getName().toString(), preState, curState));
+                nextAction.action.getName().toString(), preState, postState));
         }
         List<TLCState> abstractStates = this.abstractor.doAbstraction(statesVisited);
-        return new SimulationResult(abstractStates, transitions);
+        List<Integer> abstractStateEventIndices = new ArrayList<Integer>(abstractStates.size());
+        for (TLCState state : abstractStates) {
+            Integer eventIndex = stateEventIndices.get(state);
+            abstractStateEventIndices.add(eventIndex == null ? -2 : eventIndex);
+        }
+        return new SimulationResult(abstractStates, transitions, abstractStateEventIndices);
+    }
+
+    private TLCState snapshotState(TLCState state) {
+        return state.deepCopy();
     }
 
     private TLCState randomState(StateVec states) {
@@ -169,8 +190,8 @@ public class TLCServer extends TLC {
         public final String inputName;
         public final String mappedAction;
         public final String status;
-        public final TLCState preState;
-        public final TLCState postState;
+        public final long preKey;
+        public final long postKey;
 
         private SimulationTransition(int eventIndex, String inputName, String mappedAction,
                 String status, TLCState preState, TLCState postState) {
@@ -178,8 +199,10 @@ public class TLCServer extends TLC {
             this.inputName = inputName;
             this.mappedAction = mappedAction;
             this.status = status;
-            this.preState = preState;
-            this.postState = postState;
+            // Capture immutable values now. Reading TLCState references during
+            // response serialization lets later suffix actions rewrite history.
+            this.preKey = preState.fingerPrint();
+            this.postKey = postState.fingerPrint();
         }
 
         public static SimulationTransition ignored(int eventIndex, String inputName, TLCState state) {
@@ -201,10 +224,13 @@ public class TLCServer extends TLC {
     public static class SimulationResult {
         public final List<TLCState> states;
         public final List<SimulationTransition> transitions;
+        public final List<Integer> stateEventIndices;
 
-        public SimulationResult(List<TLCState> states, List<SimulationTransition> transitions) {
+        public SimulationResult(List<TLCState> states, List<SimulationTransition> transitions,
+                List<Integer> stateEventIndices) {
             this.states = states;
             this.transitions = transitions;
+            this.stateEventIndices = stateEventIndices;
         }
     }
 
@@ -221,8 +247,8 @@ public class TLCServer extends TLC {
             this.inputName = transition.inputName;
             this.mappedAction = transition.mappedAction;
             this.status = transition.status;
-            this.preKey = transition.preState.fingerPrint();
-            this.postKey = transition.postState.fingerPrint();
+            this.preKey = transition.preKey;
+            this.postKey = transition.postKey;
         }
     }
 
@@ -233,11 +259,14 @@ public class TLCServer extends TLC {
 
         public List<TransitionResponse> transitions;
 
+        public List<Integer> stateEventIndices;
+
         public ServerResponse(List<String> states, List<Long> keys,
-                List<TransitionResponse> transitions) {
+                List<TransitionResponse> transitions, List<Integer> stateEventIndices) {
             this.states = states;
             this.keys = keys;
             this.transitions = transitions;
+            this.stateEventIndices = stateEventIndices;
         }
     }
 
@@ -309,7 +338,8 @@ public class TLCServer extends TLC {
                         String response = gson.toJson(new ServerResponse(
                             stringTrace,
                             fingerprintTrace,
-                            transitionTrace));
+                            transitionTrace,
+                            execution.stateEventIndices));
                         t.sendResponseHeaders(200, response.length());
                         OutputStream responseStream = t.getResponseBody();
                         responseStream.write(response.getBytes());

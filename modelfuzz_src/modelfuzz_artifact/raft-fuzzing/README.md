@@ -15,7 +15,10 @@ The scoped research questions, experiment variants, metrics, and decision rules 
 The artifact contains the modified controlled TLC server under
 `../tlc-controlled-with-benchmarks/tlc-controlled`. Its `/execute` response keeps the legacy `states` and `keys` fields
 and additionally returns one transition record per input event.  Records distinguish `executed`,
-`disabled`, and `ignored` events and preserve the original event index.
+`disabled`, and `ignored` events and preserve the original event index. `stateEventIndices` is aligned
+with the abstract `states/keys` arrays and identifies which input event produced each retained coverage
+state. The server snapshots every state before later events can mutate it and uses a fixed fingerprint
+polynomial, so transition history is suffix-independent and keys are stable across JVM restarts.
 
 From this directory, build and start it on port 2023 with:
 
@@ -44,6 +47,7 @@ the client falls back to event-prefix probing.  Attribution is opt-in for genera
 - `event_origins`: the step, phase, scheduling-choice index, and delivery ordinal for each event;
 - `new_state_attributions`: the new state, first event index, origin, and localization status.
 - `tlc_transitions`: input index/name, mapped TLA+ action, status, and pre/post key;
+- `tlc_state_event_indices`: event origins aligned with the abstract state trace;
 - `tlc_provenance_available`: whether direct server provenance was used.
 
 The current scheduling and mutation behavior is unchanged. `LastGuidance()` exposes the same

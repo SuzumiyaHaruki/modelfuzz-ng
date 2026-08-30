@@ -98,6 +98,9 @@ func TestLiveTLCIgnoredEventsPreserveEventIndex(t *testing.T) {
 	if !execution.ProvenanceAvailable || len(execution.Transitions) != events.Size() {
 		t.Fatalf("missing live transition provenance: %#v", execution)
 	}
+	if len(execution.StateEventIndices) != len(execution.States) {
+		t.Fatalf("abstract state origins=%d, states=%d", len(execution.StateEventIndices), len(execution.States))
+	}
 	wantStatuses := []string{"ignored", "ignored", "executed", "executed"}
 	for i, transition := range execution.Transitions {
 		if transition.EventIndex != i || transition.Status != wantStatuses[i] {
