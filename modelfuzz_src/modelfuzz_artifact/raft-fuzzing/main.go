@@ -111,7 +111,7 @@ func PhaseACommand() *cobra.Command {
 			mutationMode := "global"
 			if prefixPreservingMutation {
 				mutator = NewPrefixPreservingModelFuzzMutator()
-				mutationMode = "prefix-preserving-suffix"
+				mutationMode = "per-state-prefix-preserving-suffix"
 			} else if localizedMutation {
 				localMutationPercent = 100
 			}
@@ -193,7 +193,7 @@ func PhaseACommand() *cobra.Command {
 	cmd.Flags().StringVar(&tlcAddr, "tlc", "127.0.0.1:2023", "TLC server address")
 	cmd.Flags().BoolVar(&localizedMutation, "localized-mutation", false, "Limit the original three mutators to choices nearest new-state origins")
 	cmd.Flags().IntVar(&localMutationPercent, "local-mutation-percent", 0, "Percentage of mutation attempts using localized candidates (0 keeps original global behavior)")
-	cmd.Flags().BoolVar(&prefixPreservingMutation, "prefix-preserving-mutation", false, "Keep choices through the earliest new-state origin and mutate only the suffix")
+	cmd.Flags().BoolVar(&prefixPreservingMutation, "prefix-preserving-mutation", false, "Generate suffix mutations separately for each new-state origin")
 	return cmd
 }
 

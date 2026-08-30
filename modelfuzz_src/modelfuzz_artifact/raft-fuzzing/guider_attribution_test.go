@@ -146,6 +146,12 @@ func TestTLCStateGuiderPrefersServerTransitionProvenance(t *testing.T) {
 	if hit := hits[4]; hit.Status != AttributionLocated || hit.EventIndex != 4 || hit.Source != AttributionSourceTransition {
 		t.Fatalf("state C attribution=%#v", hit)
 	}
+	if !guider.LastExecutionContainsState(3) {
+		t.Fatal("transition-only state 3 was not retained for target-survival checks")
+	}
+	if guider.LastExecutionContainsState(99) {
+		t.Fatal("absent state 99 unexpectedly appeared in the last execution")
+	}
 	stats := guider.AttributionStats()
 	if requests != 1 || stats.PrefixRequests != 0 || stats.PrefixFallbackChecks != 0 {
 		t.Fatalf("transition attribution unexpectedly replayed prefixes: requests=%d stats=%#v", requests, stats)

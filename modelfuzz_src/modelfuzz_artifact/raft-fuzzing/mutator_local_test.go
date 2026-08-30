@@ -96,6 +96,38 @@ func TestPrefixPreservingModelFuzzMutatorOnlyChangesSuffix(t *testing.T) {
 	}
 }
 
+func TestPrefixPreservingModelFuzzMutatorUsesEachExplicitStateTarget(t *testing.T) {
+	trace := NewList[*SchedulingChoice]()
+	for step := 0; step < 70; step++ {
+		if step%5 == 0 {
+			trace.Append(&SchedulingChoice{Type: StopNode, Node: uint64(step%3 + 1), Step: step})
+		}
+		trace.Append(&SchedulingChoice{
+			Type: Node, From: uint64(step%3 + 1), To: uint64((step+1)%3 + 1), MaxMessages: step + 1,
+		})
+	}
+
+	mutator := NewPrefixPreservingModelFuzzMutator()
+	mutator.(RandomizedMutator).SetRandom(rand.New(rand.NewSource(37)))
+	targeted := mutator.(TargetedGuidanceMutator)
+	for _, targetStep := range []int{20, 35, 48, 65, 67} {
+		target := StateAttribution{
+			State:  State{Key: int64(targetStep)},
+			Status: AttributionLocated,
+			Origin: &EventOrigin{Step: targetStep},
+		}
+		mutated, ok := targeted.MutateForTarget(trace, NewList[*Event](), target)
+		if !ok {
+			t.Fatalf("target step %d did not produce a suffix child", targetStep)
+		}
+		assertSchedulingPrefixEqual(t, trace, mutated, targetStep)
+	}
+	stats := mutator.(PrefixMutationStatsProvider).PrefixMutationStats()
+	if stats.Attempts != 5 || stats.Guided != 5 || stats.Generated != 5 || stats.Rejected != 0 {
+		t.Fatalf("unexpected per-target stats: %#v", stats)
+	}
+}
+
 func TestPrefixPreservingModelFuzzMutatorDoesNotCrossBoundaryWhenSuffixIsTooShort(t *testing.T) {
 	trace := NewList[*SchedulingChoice]()
 	for step := 0; step < 40; step++ {
@@ -109,7 +141,7 @@ func TestPrefixPreservingModelFuzzMutatorDoesNotCrossBoundaryWhenSuffixIsTooShor
 	mutator.(RandomizedMutator).SetRandom(rand.New(rand.NewSource(29)))
 	mutator.(GuidanceAwareMutator).SetGuidance(Guidance{NewStates: []StateAttribution{{
 		Status: AttributionLocated,
-		Origin: &EventOrigin{Step: 35},
+		Origin: &EventOrigin{Step: 39},
 	}}})
 
 	if mutated, ok := mutator.Mutate(trace, NewList[*Event]()); ok || mutated != nil {
@@ -141,6 +173,25 @@ func TestPrefixPreservingModelFuzzMutatorFallsBackWithoutLocatedOrigin(t *testin
 	stats := mutator.(PrefixMutationStatsProvider).PrefixMutationStats()
 	if stats.Attempts != 1 || stats.GlobalFallback != 1 || stats.Generated != 1 || stats.Guided != 0 || stats.Rejected != 0 {
 		t.Fatalf("unexpected initial-only fallback stats: %#v", stats)
+	}
+}
+
+func assertSchedulingPrefixEqual(t *testing.T, original, mutated *List[*SchedulingChoice], throughStep int) {
+	t.Helper()
+	nodeStep := 0
+	for index, before := range original.Iter() {
+		step := before.Step
+		if before.Type == Node {
+			step = nodeStep
+			nodeStep++
+		}
+		if step > throughStep {
+			continue
+		}
+		after, _ := mutated.Get(index)
+		if *before != *after {
+			t.Fatalf("choice %d at preserved step %d changed: before=%#v after=%#v", index, step, before, after)
+		}
 	}
 }
 

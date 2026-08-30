@@ -146,9 +146,17 @@ func (s *SwapNodeMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]
 	if numNodeChoiceIndices == 0 {
 		return nil, false
 	}
+	if s.scope != nil && s.scope.preservePrefix && len(s.scope.steps) > 0 && numNodeChoiceIndices < 2 {
+		return nil, false
+	}
 	choices := numNodeChoiceIndices
 	if s.NumSwaps < choices {
 		choices = s.NumSwaps
+	}
+	// sample returns the complete slice unchanged when len==2, so only one
+	// distinct ordered pair can be produced by the legacy pair loop.
+	if s.scope != nil && s.scope.preservePrefix && len(s.scope.steps) > 0 && numNodeChoiceIndices == 2 {
+		choices = 1
 	}
 	toSwap := make([]mutationPair, 0, choices)
 	seen := make(map[string]bool)
@@ -376,16 +384,41 @@ func (c *combinedMutator) SetGuidance(guidance Guidance) {
 }
 
 func (c *combinedMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
-	// 串联多个 mutator，任意一步失败则本次组合变异失败。
+	// 全局和位置局部基线保持原语义：任意一步失败则组合失败。逐状态后缀模式可以跳过
+	// 当前后缀无法应用的单个算子，但绝不扩大候选边界。
 	curTrace := copyTrace(trace, defaultCopyFilter())
+	applied := false
 	for _, m := range c.mutators {
 		nextTrace, ok := m.Mutate(curTrace, eventTrace)
 		if !ok {
+			if c.scope != nil && c.scope.preservePrefix && len(c.scope.steps) > 0 {
+				continue
+			}
 			return nil, false
 		}
 		curTrace = nextTrace
+		applied = true
+	}
+	if c.scope != nil && c.scope.preservePrefix && len(c.scope.steps) > 0 {
+		if !applied || schedulingTracesEqual(trace, curTrace) {
+			return nil, false
+		}
 	}
 	return curTrace, true
+}
+
+func schedulingTracesEqual(first, second *List[*SchedulingChoice]) bool {
+	if first.Size() != second.Size() {
+		return false
+	}
+	for i := 0; i < first.Size(); i++ {
+		left, _ := first.Get(i)
+		right, _ := second.Get(i)
+		if *left != *right {
+			return false
+		}
+	}
+	return true
 }
 
 func CombineMutators(mutators ...Mutator) Mutator {
@@ -420,10 +453,10 @@ func NewLocalizedModelFuzzMutator() Mutator {
 	}
 }
 
-// NewPrefixPreservingModelFuzzMutator keeps every scheduling choice through
-// the earliest newly covered state's step and applies the original ModelFuzz
-// operators only to the remaining suffix. If guidance has no located origin,
-// the scope is empty and the operators retain their original global behavior.
+// NewPrefixPreservingModelFuzzMutator keeps every scheduling choice through a
+// specific newly covered state's step and applies bounded ModelFuzz operators
+// only to that state's remaining suffix. Initial states retain the original
+// global fallback behavior.
 func NewPrefixPreservingModelFuzzMutator() Mutator {
 	scope := &localMutationScope{preservePrefix: true}
 	crash := NewSwapCrashNodeMutator(2)
@@ -446,6 +479,16 @@ type prefixPreservingModelFuzzMutator struct {
 }
 
 func (p *prefixPreservingModelFuzzMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
+	target := StateAttribution{Status: AttributionInitialState}
+	if len(p.scope.steps) > 0 {
+		target.Status = AttributionLocated
+		target.Origin = &EventOrigin{Step: p.scope.steps[0]}
+	}
+	return p.MutateForTarget(trace, eventTrace, target)
+}
+
+func (p *prefixPreservingModelFuzzMutator) MutateForTarget(trace *List[*SchedulingChoice], eventTrace *List[*Event], target StateAttribution) (*List[*SchedulingChoice], bool) {
+	p.scope.setTarget(target)
 	p.stats.Attempts++
 	if len(p.scope.steps) == 0 {
 		p.stats.GlobalFallback++
@@ -530,6 +573,13 @@ func (s *localMutationScope) setGuidance(guidance Guidance) {
 	sort.Ints(s.steps)
 }
 
+func (s *localMutationScope) setTarget(target StateAttribution) {
+	s.steps = s.steps[:0]
+	if target.Status == AttributionLocated && target.Origin != nil {
+		s.steps = append(s.steps, target.Origin.Step)
+	}
+}
+
 type scopedChoice struct {
 	index    int
 	distance int
@@ -603,13 +653,17 @@ func (s *SwapCrashNodeMutator) Mutate(trace *List[*SchedulingChoice], eventTrace
 	// 这样可以保留“故障发生的时间结构”，只改变哪个 replica 承受故障。
 	nodeChoices := mutationChoiceIndices(trace, StopNode, s.NumSwaps*2, s.scope)
 
-	if len(nodeChoices) < s.NumSwaps*2 {
+	numSwaps := s.NumSwaps
+	if s.scope != nil && s.scope.preservePrefix && len(s.scope.steps) > 0 {
+		numSwaps = min(numSwaps, len(nodeChoices)/2)
+	}
+	if numSwaps == 0 || len(nodeChoices) < numSwaps*2 {
 		return nil, false
 	}
 
-	selected := sample(nodeChoices, s.NumSwaps*2, s.r)
-	swaps := make([]mutationPair, s.NumSwaps)
-	for i := 0; i < s.NumSwaps; i++ {
+	selected := sample(nodeChoices, numSwaps*2, s.r)
+	swaps := make([]mutationPair, numSwaps)
+	for i := 0; i < numSwaps; i++ {
 		swaps[i] = mutationPair{first: selected[i*2], second: selected[i*2+1]}
 	}
 
@@ -654,13 +708,23 @@ func (s *SwapMaxMessagesMutator) Mutate(trace *List[*SchedulingChoice], eventTra
 	// 这会影响网络拥塞程度：同样的 from/to 方向，批量越大越容易让 raft 快速追上。
 	nodeChoices := mutationChoiceIndices(trace, Node, max(s.NumSwaps, 2), s.scope)
 
-	if len(nodeChoices) < s.NumSwaps {
+	numSwaps := s.NumSwaps
+	if s.scope != nil && s.scope.preservePrefix && len(s.scope.steps) > 0 {
+		if len(nodeChoices) < 2 {
+			return nil, false
+		}
+		numSwaps = min(numSwaps, len(nodeChoices))
+		if len(nodeChoices) == 2 {
+			numSwaps = 1
+		}
+	}
+	if numSwaps == 0 || len(nodeChoices) < numSwaps {
 		return nil, false
 	}
 
-	swaps := make([]mutationPair, 0, s.NumSwaps)
+	swaps := make([]mutationPair, 0, numSwaps)
 	seen := make(map[string]bool)
-	for len(swaps) < s.NumSwaps {
+	for len(swaps) < numSwaps {
 		sp := sample(nodeChoices, 2, s.r)
 		key := fmt.Sprintf("%d_%d", sp[0], sp[1])
 		if !seen[key] {

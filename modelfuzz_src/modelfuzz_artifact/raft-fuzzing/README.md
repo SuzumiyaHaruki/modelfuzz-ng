@@ -85,11 +85,12 @@ remains the original global ModelFuzz mutator.
 Mixed exploration uses `--local-mutation-percent 50` or `70`; the summary records the actual
 local/global mutation attempts.
 
-Prefix-preserving suffix exploration uses `--prefix-preserving-mutation`. It selects the earliest
-located new-state origin, leaves every scheduling choice through that step unchanged, and applies
-the original three random operators only to the complete suffix. If only the initial state is new,
-it falls back to the original global candidate set; a located origin with an insufficient suffix
-does not fall back across the preserved boundary.
+Prefix-preserving suffix exploration uses `--prefix-preserving-mutation`. Each located new state
+receives its own `MutPerTrace` children; each child leaves every scheduling choice through that
+state's Origin step unchanged and mutates only the complete suffix. Operator counts are capped by
+their original values and shrink when a late target has fewer suffix candidates. An unavailable
+operator is skipped without crossing the preserved boundary. Initial states retain the original
+global fallback behavior.
 The run summary records prefix mutation attempts, guided attempts, initial-only global fallbacks,
 successfully generated children, and rejected attempts whose suffix could not support the original
 combined operator.

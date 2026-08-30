@@ -41,8 +41,11 @@ type Fuzzer struct {
 }
 
 type queuedTrace struct {
-	trace      *List[*SchedulingChoice]
-	isMutation bool
+	trace          *List[*SchedulingChoice]
+	isMutation     bool
+	hasTargetState bool
+	targetStateKey int64
+	targetStep     int
 }
 
 // traceCtx 保存单次 iteration 的输入计划和输出记录。
@@ -272,6 +275,10 @@ func NewFuzzer(config *FuzzerConfig) *Fuzzer {
 	f.stats["seed_replay_executions"] = 0
 	f.stats["mutation_executions"] = 0
 	f.stats["random_executions"] = 0
+	f.stats["prefix_target_executions"] = 0
+	f.stats["prefix_target_preserved"] = 0
+	f.stats["prefix_target_lost"] = 0
+	f.stats["prefix_target_unchecked"] = 0
 	f.stats["execution_errors"] = make(map[string]bool, 0)
 	f.stats["error_executions"] = make(map[string][]string)
 	f.stats["buggy_executions"] = make(map[string]bool, 0)
@@ -370,10 +377,13 @@ func (f *Fuzzer) Run() []CoverageStats {
 		}
 		fmt.Printf("\rRunning iteration: %d/%d", i+1, f.config.Iterations)
 		var mimic *List[*SchedulingChoice] = nil
+		var queued queuedTrace
+		hasQueuedTrace := false
 		if f.candidateTracesQueue.Size() > 0 {
-			candidate, _ := f.candidateTracesQueue.Pop()
-			mimic = candidate.trace
-			if candidate.isMutation {
+			queued, _ = f.candidateTracesQueue.Pop()
+			hasQueuedTrace = true
+			mimic = queued.trace
+			if queued.isMutation {
 				f.incrementStat("mutation_executions")
 			} else {
 				f.incrementStat("seed_replay_executions")
@@ -384,19 +394,51 @@ func (f *Fuzzer) Run() []CoverageStats {
 		trace, eventTrace := f.RunIteration(fmt.Sprintf("fuzz_%d", i), mimic)
 		f.incrementStat("feedback_executions")
 		f.incrementStat("total_executions")
-		if numNewStates, _ := f.config.Guider.Check(trace, eventTrace); numNewStates > 0 {
-			if guided, ok := f.config.Mutator.(GuidanceAwareMutator); ok {
-				guided.SetGuidance(f.config.Guider.LastGuidance())
+		numNewStates, _ := f.config.Guider.Check(trace, eventTrace)
+		if hasQueuedTrace && queued.hasTargetState {
+			f.incrementStat("prefix_target_executions")
+			if provider, ok := f.config.Guider.(LastExecutionStateProvider); ok {
+				if provider.LastExecutionContainsState(queued.targetStateKey) {
+					f.incrementStat("prefix_target_preserved")
+				} else {
+					f.incrementStat("prefix_target_lost")
+				}
+			} else {
+				f.incrementStat("prefix_target_unchecked")
 			}
-			// 新覆盖越多，围绕这条 trace 生成的变异越多。
-			numMutations := numNewStates * f.config.MutPerTrace
-			for j := 0; j < numMutations; j++ {
-				new, ok := f.config.Mutator.Mutate(trace, eventTrace)
-				if ok {
-					f.candidateTracesQueue.Push(queuedTrace{
-						trace:      copyTrace(new, defaultCopyFilter()),
-						isMutation: true,
-					})
+		}
+		if numNewStates > 0 {
+			guidance := f.config.Guider.LastGuidance()
+			if guided, ok := f.config.Mutator.(GuidanceAwareMutator); ok {
+				guided.SetGuidance(guidance)
+			}
+			if targeted, ok := f.config.Mutator.(TargetedGuidanceMutator); ok && len(guidance.NewStates) > 0 {
+				for _, target := range guidance.NewStates {
+					for j := 0; j < f.config.MutPerTrace; j++ {
+						new, applied := targeted.MutateForTarget(trace, eventTrace, target)
+						if !applied {
+							continue
+						}
+						child := queuedTrace{trace: copyTrace(new, defaultCopyFilter()), isMutation: true}
+						if target.Status == AttributionLocated && target.Origin != nil {
+							child.hasTargetState = true
+							child.targetStateKey = target.State.Key
+							child.targetStep = target.Origin.Step
+						}
+						f.candidateTracesQueue.Push(child)
+					}
+				}
+			} else {
+				// 非 target-aware Mutator 保持原 ModelFuzz 的 mutation energy。
+				numMutations := numNewStates * f.config.MutPerTrace
+				for j := 0; j < numMutations; j++ {
+					new, applied := f.config.Mutator.Mutate(trace, eventTrace)
+					if applied {
+						f.candidateTracesQueue.Push(queuedTrace{
+							trace:      copyTrace(new, defaultCopyFilter()),
+							isMutation: true,
+						})
+					}
 				}
 			}
 		}
@@ -639,6 +681,14 @@ type Mutator interface {
 
 type GuidanceAwareMutator interface {
 	SetGuidance(Guidance)
+}
+
+type TargetedGuidanceMutator interface {
+	MutateForTarget(*List[*SchedulingChoice], *List[*Event], StateAttribution) (*List[*SchedulingChoice], bool)
+}
+
+type LastExecutionStateProvider interface {
+	LastExecutionContainsState(int64) bool
 }
 
 type MutationSelectionStatsProvider interface {

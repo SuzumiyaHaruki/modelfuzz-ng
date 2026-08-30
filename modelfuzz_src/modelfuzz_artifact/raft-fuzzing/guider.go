@@ -129,6 +129,7 @@ type TLCStateGuider struct {
 	attributeStates  bool
 	count            int
 	lastGuidance     Guidance
+	lastStateKeys    map[int64]bool
 	attributionStats AttributionStats
 
 	lock *sync.Mutex
@@ -155,6 +156,7 @@ func NewTLCStateGuider(tlcAddr, recordPath string, recordTraces bool) *TLCStateG
 		attributeStates:  false,
 		count:            0,
 		lastGuidance:     Guidance{NewStates: make([]StateAttribution, 0)},
+		lastStateKeys:    make(map[int64]bool),
 		attributionStats: AttributionStats{},
 		lock:             new(sync.Mutex),
 	}
@@ -183,6 +185,15 @@ func (t *TLCStateGuider) AttributionStats() AttributionStats {
 	return t.attributionStats
 }
 
+// LastExecutionContainsState reports against the un-compacted transition
+// provenance when available, so a state omitted from the legacy state trace is
+// still recognized as having occurred in the latest execution.
+func (t *TLCStateGuider) LastExecutionContainsState(key int64) bool {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	return t.lastStateKeys[key]
+}
+
 func (t *TLCStateGuider) Reset(key string) {
 	// key 目前没有用于路径区分，主要是为了和其他 guider/benchmark 接口保持一致。
 	t.lock.Lock()
@@ -190,6 +201,7 @@ func (t *TLCStateGuider) Reset(key string) {
 	t.tracesMap = make(map[string]bool)
 	t.stateTracesMap = make(map[string]bool)
 	t.lastGuidance = Guidance{NewStates: make([]StateAttribution, 0)}
+	t.lastStateKeys = make(map[int64]bool)
 	t.attributionStats = AttributionStats{}
 	t.lock.Unlock()
 }
@@ -226,6 +238,17 @@ func (t *TLCStateGuider) Check(trace *List[*SchedulingChoice], eventTrace *List[
 	if execution, err := t.tlcClient.ExecuteTrace(eventTrace); err == nil {
 		fullCheckDuration := time.Since(fullCheckStart)
 		tlcStates := execution.States
+		lastStateKeys := make(map[int64]bool, len(tlcStates)+len(execution.Transitions))
+		for _, state := range tlcStates {
+			lastStateKeys[state.Key] = true
+		}
+		for _, transition := range execution.Transitions {
+			lastStateKeys[transition.PreKey] = true
+			lastStateKeys[transition.PostKey] = true
+		}
+		t.lock.Lock()
+		t.lastStateKeys = lastStateKeys
+		t.lock.Unlock()
 		// TLC 返回的是执行 event trace 后经过的模型状态序列。
 		// SendTrace 在独立切片上追加 Reset，因此 eventTrace 可以安全地用于后续前缀探测。
 		for _, s := range tlcStates {
