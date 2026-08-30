@@ -436,10 +436,27 @@ localized    38.6
 因此当前结果不支持“按 step 距离限制随机候选”这一位置局部性假设。该实现和混合参数
 保留为负基线，但不继续搜索窗口或混合比例，也不据此进入 AI 阶段。
 
-Phase B2 第一版已通过 `--prefix-preserving-mutation` 独立接入。30-iteration smoke 中
-72次 guided 尝试生成66个后缀 child、拒绝6次，未发生全局回退、归因失败或
-missing-origin；该 smoke 只验证实现可运行，不作为效果结论。下一步应使用与 M1 相同的
-5-seed、100-episode 配置做配对 pilot。
+Phase B2 第一版已通过 `--prefix-preserving-mutation` 独立接入，并完成与 M1 相同配置的
+5-seed、100-episode 配对 pilot：
+
+| 指标 | global | prefix-preserving | 变化 |
+|---|---:|---:|---:|
+| 最终状态均值 | 51.8 | 44.4 | -14.3% |
+| coverage AUC 均值 | 2843.6 | 2497.8 | -12.2% |
+| unique state traces 总数 | 146 | 172 | +17.8% |
+| 总运行时间 | 25.51s | 25.84s | +1.3% |
+| 空 state trace 数 | 282 | 99 | -64.9% |
+
+前缀策略共尝试666次变异，其中663次有 located Origin、3次因只有 initial state 回退全局；
+生成504个 child、拒绝162次，拒绝率24.3%。最终实际执行371条 mutation 和29条 random，
+而 global 为396/4。通过调度前缀与 transition provenance 离线匹配到368条实际执行的
+guided child；所有匹配目标状态都重新出现在 child transition 中。部分 child 可匹配多个
+具有相同前缀的祖先，因此该检查证明目标状态保持，但不声称唯一父子归属。
+
+结果说明前缀保持确实减少无效/空执行并提高模型路径多样性，但没有提高新模型状态覆盖；
+当前实现更偏向在已知状态区域内 exploit。Phase B2 第一版保留为独立基线，不据此进入
+AI 阶段。后续若继续，应分别控制后缀拒绝和 global/prefix 探索比例，不能把二者混成一个
+无消融的新策略。
 
 关系感知变异作为后续独立消融，优先研究消息投递与 Tick、
 消息与消息、crash/restart 与关键消息、client request 与 leader 形成之间的先后关系。
