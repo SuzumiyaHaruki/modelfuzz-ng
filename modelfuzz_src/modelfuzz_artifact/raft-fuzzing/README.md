@@ -97,4 +97,5 @@ operator is skipped without crossing the preserved boundary. Initial states reta
 global fallback behavior.
 The run summary records prefix mutation attempts, guided attempts, initial-only global fallbacks,
 successfully generated children, and rejected attempts whose suffix could not support the original
-combined operator.
+combined operator. It also reports target preservation and subsequent novelty, grouped by target
+step bucket and mapped model action, so prefix correctness can be separated from suffix utility.

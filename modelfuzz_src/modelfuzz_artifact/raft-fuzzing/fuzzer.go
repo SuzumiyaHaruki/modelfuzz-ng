@@ -46,6 +46,7 @@ type queuedTrace struct {
 	hasTargetState bool
 	targetStateKey int64
 	targetStep     int
+	targetAction   string
 }
 
 // traceCtx 保存单次 iteration 的输入计划和输出记录。
@@ -279,6 +280,16 @@ func NewFuzzer(config *FuzzerConfig) *Fuzzer {
 	f.stats["prefix_target_preserved"] = 0
 	f.stats["prefix_target_lost"] = 0
 	f.stats["prefix_target_unchecked"] = 0
+	f.stats["prefix_target_new_states"] = 0
+	f.stats["prefix_target_interesting_executions"] = 0
+	f.stats["prefix_target_executions_by_step_bucket"] = make(map[string]int)
+	f.stats["prefix_target_preserved_by_step_bucket"] = make(map[string]int)
+	f.stats["prefix_target_new_states_by_step_bucket"] = make(map[string]int)
+	f.stats["prefix_target_interesting_by_step_bucket"] = make(map[string]int)
+	f.stats["prefix_target_executions_by_action"] = make(map[string]int)
+	f.stats["prefix_target_preserved_by_action"] = make(map[string]int)
+	f.stats["prefix_target_new_states_by_action"] = make(map[string]int)
+	f.stats["prefix_target_interesting_by_action"] = make(map[string]int)
 	f.stats["execution_errors"] = make(map[string]bool, 0)
 	f.stats["error_executions"] = make(map[string][]string)
 	f.stats["buggy_executions"] = make(map[string]bool, 0)
@@ -291,6 +302,24 @@ func NewFuzzer(config *FuzzerConfig) *Fuzzer {
 
 func (f *Fuzzer) incrementStat(name string) {
 	f.stats[name] = f.stats[name].(int) + 1
+}
+
+func (f *Fuzzer) incrementGroupedStat(name, key string, amount int) {
+	group := f.stats[name].(map[string]int)
+	group[key] += amount
+}
+
+func prefixTargetStepBucket(step int) string {
+	switch {
+	case step < 25:
+		return "0-24"
+	case step < 50:
+		return "25-49"
+	case step < 75:
+		return "50-74"
+	default:
+		return "75+"
+	}
 }
 
 func (f *Fuzzer) Schedule(from uint64, to uint64, maxMessages int) []pb.Message {
@@ -397,9 +426,26 @@ func (f *Fuzzer) Run() []CoverageStats {
 		numNewStates, _ := f.config.Guider.Check(trace, eventTrace)
 		if hasQueuedTrace && queued.hasTargetState {
 			f.incrementStat("prefix_target_executions")
+			bucket := prefixTargetStepBucket(queued.targetStep)
+			action := queued.targetAction
+			if action == "" {
+				action = "unknown"
+			}
+			f.incrementGroupedStat("prefix_target_executions_by_step_bucket", bucket, 1)
+			f.incrementGroupedStat("prefix_target_executions_by_action", action, 1)
+			f.stats["prefix_target_new_states"] = f.stats["prefix_target_new_states"].(int) + numNewStates
+			f.incrementGroupedStat("prefix_target_new_states_by_step_bucket", bucket, numNewStates)
+			f.incrementGroupedStat("prefix_target_new_states_by_action", action, numNewStates)
+			if numNewStates > 0 {
+				f.incrementStat("prefix_target_interesting_executions")
+				f.incrementGroupedStat("prefix_target_interesting_by_step_bucket", bucket, 1)
+				f.incrementGroupedStat("prefix_target_interesting_by_action", action, 1)
+			}
 			if provider, ok := f.config.Guider.(LastExecutionStateProvider); ok {
 				if provider.LastExecutionContainsState(queued.targetStateKey) {
 					f.incrementStat("prefix_target_preserved")
+					f.incrementGroupedStat("prefix_target_preserved_by_step_bucket", bucket, 1)
+					f.incrementGroupedStat("prefix_target_preserved_by_action", action, 1)
 				} else {
 					f.incrementStat("prefix_target_lost")
 				}
@@ -427,6 +473,7 @@ func (f *Fuzzer) Run() []CoverageStats {
 								child.targetStateKey = target.TransitionKey
 							}
 							child.targetStep = target.Origin.Step
+							child.targetAction = target.MappedAction
 						}
 						f.candidateTracesQueue.Push(child)
 					}

@@ -142,10 +142,10 @@ func TestTLCStateGuiderPrefersServerTransitionProvenance(t *testing.T) {
 	if hit := hits[1]; hit.Status != AttributionInitialState || hit.Source != AttributionSourceTransition {
 		t.Fatalf("initial state attribution=%#v", hit)
 	}
-	if hit := hits[2]; hit.Status != AttributionLocated || hit.EventIndex != 0 || hit.Source != AttributionSourceTransition || !hit.HasTransitionKey || hit.TransitionKey != 20 {
+	if hit := hits[2]; hit.Status != AttributionLocated || hit.EventIndex != 0 || hit.Source != AttributionSourceTransition || !hit.HasTransitionKey || hit.TransitionKey != 20 || hit.MappedAction != "RemoveFromActive" {
 		t.Fatalf("state B attribution=%#v", hit)
 	}
-	if hit := hits[4]; hit.Status != AttributionLocated || hit.EventIndex != 4 || hit.Source != AttributionSourceTransition || !hit.HasTransitionKey || hit.TransitionKey != 40 {
+	if hit := hits[4]; hit.Status != AttributionLocated || hit.EventIndex != 4 || hit.Source != AttributionSourceTransition || !hit.HasTransitionKey || hit.TransitionKey != 40 || hit.MappedAction != "RemoveFromActive" {
 		t.Fatalf("state C attribution=%#v", hit)
 	}
 	if !guider.LastExecutionContainsState(30) {

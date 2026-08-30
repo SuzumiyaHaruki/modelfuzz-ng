@@ -86,10 +86,10 @@ func (m *targetRecordingMutator) MutateForTarget(trace *List[*SchedulingChoice],
 
 func TestFuzzerGeneratesMutationsForEachNewStateTarget(t *testing.T) {
 	guidance := Guidance{NewStates: []StateAttribution{
-		{State: State{Key: 20}, Status: AttributionLocated, Origin: &EventOrigin{Step: 20}},
-		{State: State{Key: 35}, Status: AttributionLocated, Origin: &EventOrigin{Step: 35}},
-		{State: State{Key: 48}, Status: AttributionLocated, Origin: &EventOrigin{Step: 48}},
-		{State: State{Key: 65}, Status: AttributionLocated, Origin: &EventOrigin{Step: 65}},
+		{State: State{Key: 20}, Status: AttributionLocated, Origin: &EventOrigin{Step: 20}, MappedAction: "A20"},
+		{State: State{Key: 35}, Status: AttributionLocated, Origin: &EventOrigin{Step: 35}, MappedAction: "A35"},
+		{State: State{Key: 48}, Status: AttributionLocated, Origin: &EventOrigin{Step: 48}, MappedAction: "A48"},
+		{State: State{Key: 65}, Status: AttributionLocated, Origin: &EventOrigin{Step: 65}, MappedAction: "A65"},
 	}}
 	guider := &targetedTestGuider{guidance: guidance}
 	mutator := &targetRecordingMutator{}
@@ -123,5 +123,14 @@ func TestFuzzerGeneratesMutationsForEachNewStateTarget(t *testing.T) {
 	}
 	if got := fuzzer.stats["prefix_target_preserved"].(int); got != 1 {
 		t.Fatalf("preserved targets=%d, want 1", got)
+	}
+	if got := fuzzer.stats["prefix_target_executions_by_step_bucket"].(map[string]int)["0-24"]; got != 1 {
+		t.Fatalf("0-24 target executions=%d, want 1", got)
+	}
+	if got := fuzzer.stats["prefix_target_executions_by_action"].(map[string]int)["A20"]; got != 1 {
+		t.Fatalf("A20 target executions=%d, want 1", got)
+	}
+	if got := fuzzer.stats["prefix_target_new_states"].(int); got != 0 {
+		t.Fatalf("target child new states=%d, want 0", got)
 	}
 }

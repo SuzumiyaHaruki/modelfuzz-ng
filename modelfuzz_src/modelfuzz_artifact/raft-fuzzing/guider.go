@@ -46,6 +46,7 @@ type StateAttribution struct {
 	Status           string
 	TransitionKey    int64  `json:",omitempty"`
 	HasTransitionKey bool   `json:",omitempty"`
+	MappedAction     string `json:",omitempty"`
 	Source           string `json:",omitempty"`
 	Error            string `json:",omitempty"`
 }
@@ -376,6 +377,7 @@ func locateStateFromTransitions(state State, execution TLCExecution, trace *List
 			hit.Origin = event.Origin.Copy()
 			hit.TransitionKey = transition.PostKey
 			hit.HasTransitionKey = true
+			hit.MappedAction = transition.MappedAction
 			hit.Status = AttributionLocated
 			return hit
 		}
@@ -409,6 +411,7 @@ func locateStateFromTransitions(state State, execution TLCExecution, trace *List
 		hit.Origin = event.Origin.Copy()
 		hit.TransitionKey = transition.PostKey
 		hit.HasTransitionKey = true
+		hit.MappedAction = transition.MappedAction
 		hit.Status = AttributionLocated
 		return hit
 	}
