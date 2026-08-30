@@ -15,6 +15,41 @@ type Event struct {
 	Node   uint64 `json:"-"`
 	Params map[string]interface{}
 	Reset  bool
+	// Origin 只供 fuzzer 本地做状态归因，不发送给 TLC，也不参与 trace coverage hash。
+	// 修改版 TLC server 返回原始输入 event index，客户端再用它关联这里的本地 Origin。
+	Origin *EventOrigin `json:"-"`
+}
+
+// EventPhase 表示一个实现事件由固定 step 模板中的哪个阶段产生。
+type EventPhase string
+
+const (
+	EventPhaseRandom        EventPhase = "random"
+	EventPhaseCrash         EventPhase = "crash"
+	EventPhaseRestart       EventPhase = "restart"
+	EventPhaseDeliver       EventPhase = "deliver"
+	EventPhaseClientRequest EventPhase = "client_request"
+	EventPhaseTick          EventPhase = "tick"
+)
+
+// EventOrigin 是实现事件到调度轨迹的本地来源信息。
+//
+// ChoiceIndex 为 -1 表示该阶段没有显式 SchedulingChoice（当前主要是 Tick）。
+// DeliveryOrdinal/DeliveryCount 使用 0-based 批内序号和实际批量；非投递事件均为 -1。
+type EventOrigin struct {
+	Step            int
+	Phase           EventPhase
+	ChoiceIndex     int
+	DeliveryOrdinal int
+	DeliveryCount   int
+}
+
+func (o *EventOrigin) Copy() *EventOrigin {
+	if o == nil {
+		return nil
+	}
+	cpy := *o
+	return &cpy
 }
 
 var (
@@ -184,18 +219,14 @@ func min(a, b int) int {
 func sample(l []int, size int, r *rand.Rand) []int {
 	// 从候选 step 中无放回采样，用于随机安排 crash/start/request 的位置。
 	if size >= len(l) {
-		return l
+		result := make([]int, len(l))
+		copy(result, l)
+		return result
 	}
-	indexes := make(map[int]bool)
-	for len(indexes) < size {
-		i := r.Intn(len(l))
-		indexes[i] = true
-	}
+	permutation := r.Perm(len(l))
 	samples := make([]int, size)
-	i := 0
-	for k := range indexes {
-		samples[i] = l[k]
-		i++
+	for i := 0; i < size; i++ {
+		samples[i] = l[permutation[i]]
 	}
 	return samples
 }

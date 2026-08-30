@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"strconv"
 
 	"github.com/zeu5/raft-fuzzing/raft"
@@ -52,6 +53,8 @@ type RaftEnvironmentConfig struct {
 	HeartbeatTick int
 	// TicksPerStep 表示每个 fuzz step 中对每个 RawNode 调用 Tick 的次数。
 	TicksPerStep int
+	// RandomSeed 固定每个 RawNode 的选举随机源；由 Fuzzer 注入实际运行 seed。
+	RandomSeed int64
 }
 
 // RaftEnvironment 是 etcd-raft 版对通用 modelfuzz Cluster 的内联实现。
@@ -72,14 +75,17 @@ type RaftEnvironment struct {
 	storages map[uint64]*raft.MemoryStorage
 	// curStates 用于发现状态变化，并转换成模型可见事件，如 Timeout/BecomeLeader。
 	curStates map[uint64]raft.Status
+	// restartCounts 让同一节点每次 restart 使用不同但可重现的随机序列。
+	restartCounts map[uint64]int64
 }
 
 func NewRaftEnvironment(config RaftEnvironmentConfig) *RaftEnvironment {
 	r := &RaftEnvironment{
-		config:    config,
-		nodes:     make(map[uint64]*raft.RawNode),
-		storages:  make(map[uint64]*raft.MemoryStorage),
-		curStates: make(map[uint64]raft.Status),
+		config:        config,
+		nodes:         make(map[uint64]*raft.RawNode),
+		storages:      make(map[uint64]*raft.MemoryStorage),
+		curStates:     make(map[uint64]raft.Status),
+		restartCounts: make(map[uint64]int64),
 	}
 	r.makeNodes()
 	return r
@@ -96,15 +102,15 @@ func (r *RaftEnvironment) makeNodes() {
 		storage := raft.NewMemoryStorage()
 		nodeID := uint64(i + 1)
 		r.storages[nodeID] = storage
+		r.restartCounts[nodeID] = 0
 		node, _ := raft.NewRawNode(&raft.Config{
-			ID:              nodeID,
-			ElectionTick:    r.config.ElectionTick,
-			HeartbeatTick:   r.config.HeartbeatTick,
-			Storage:         storage,
-			MaxSizePerMsg:   1024 * 1024,
-			MaxInflightMsgs: 256,
-			// Rand=nil 表示使用 raft 默认随机源；因此随机选举超时不会进入 SchedulingChoice trace。
-			Rand:                      nil,
+			ID:                        nodeID,
+			ElectionTick:              r.config.ElectionTick,
+			HeartbeatTick:             r.config.HeartbeatTick,
+			Storage:                   storage,
+			MaxSizePerMsg:             1024 * 1024,
+			MaxInflightMsgs:           256,
+			Rand:                      r.nodeRand(nodeID, 0),
 			MaxUncommittedEntriesSize: 1 << 30,
 			Logger:                    &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)},
 			CheckQuorum:               true,
@@ -115,6 +121,11 @@ func (r *RaftEnvironment) makeNodes() {
 		r.curStates[nodeID] = node.Status()
 		r.nodes[nodeID] = node
 	}
+}
+
+func (r *RaftEnvironment) nodeRand(nodeID uint64, generation int64) *rand.Rand {
+	seed := r.config.RandomSeed + int64(nodeID)*1_000_003 + generation*10_000_019
+	return rand.New(rand.NewSource(seed))
 }
 
 func (r *RaftEnvironment) Reset(ctx *FuzzContext) {
@@ -138,7 +149,11 @@ func (r *RaftEnvironment) Step(ctx *FuzzContext, m pb.Message) {
 		// 因而模型看到的客户端请求只包括实际被 leader 接收的请求。
 		haveLeader := false
 		leader := uint64(0)
-		for id, node := range r.nodes {
+		for id := uint64(1); id <= uint64(r.config.Replicas); id++ {
+			node, ok := r.nodes[id]
+			if !ok {
+				continue
+			}
 			if node.Status().RaftState == raft.StateLeader {
 				haveLeader = true
 				leader = id
@@ -174,13 +189,21 @@ func (r *RaftEnvironment) Tick(ctx *FuzzContext) []pb.Message {
 	// 推进所有存活节点的逻辑时间。这里不是随机 tick，而是固定 TicksPerStep 次。
 	// 由于 fuzzer 每个 step 都会调用 Tick，TicksPerStep 实际上控制了“时间推进”和“网络调度”
 	// 的相对速度：越大越容易超时/心跳，越小则网络队列调度更细。
-	for _, node := range r.nodes {
+	for id := uint64(1); id <= uint64(r.config.Replicas); id++ {
+		node, ok := r.nodes[id]
+		if !ok {
+			continue
+		}
 		for i := 0; i < r.config.TicksPerStep; i++ {
 			node.Tick()
 		}
 	}
 	r.updateStates(ctx)
-	for id, node := range r.nodes {
+	for id := uint64(1); id <= uint64(r.config.Replicas); id++ {
+		node, ok := r.nodes[id]
+		if !ok {
+			continue
+		}
 		if node.HasReady() {
 			// RawNode 不提供 Node 的 channel 封装，所以环境需要手动执行 Ready/Advance 契约。
 			// 这里实现了最小化的 Ready 消费：应用快照、追加 unstable entries、收集 outbound messages、
@@ -209,7 +232,11 @@ func (r *RaftEnvironment) Tick(ctx *FuzzContext) []pb.Message {
 }
 
 func (r *RaftEnvironment) updateStates(ctx *FuzzContext) {
-	for id, node := range r.nodes {
+	for id := uint64(1); id <= uint64(r.config.Replicas); id++ {
+		node, ok := r.nodes[id]
+		if !ok {
+			continue
+		}
 		newStatus := node.Status()
 		// 对比上一次状态，把 raft 内部状态变化映射成 TLA+ 模型动作。
 		// 这些事件不是网络消息，而是从实现状态中“观察”出来的抽象动作。
@@ -259,6 +286,7 @@ func (r *RaftEnvironment) Start(ctx *FuzzContext, nodeID uint64) {
 	if storage, ok := r.storages[nodeID]; ok {
 		// 用原来的 MemoryStorage 重建 RawNode，模拟进程重启但磁盘未丢失。
 		// 这会丢失易失状态，例如当前角色、计时器和内存中的未持久化状态。
+		r.restartCounts[nodeID]++
 		node, err := raft.NewRawNode(&raft.Config{
 			ID:                        nodeID,
 			ElectionTick:              r.config.ElectionTick,
@@ -266,7 +294,7 @@ func (r *RaftEnvironment) Start(ctx *FuzzContext, nodeID uint64) {
 			Storage:                   storage,
 			MaxSizePerMsg:             1024 * 1024,
 			MaxInflightMsgs:           256,
-			Rand:                      nil,
+			Rand:                      r.nodeRand(nodeID, r.restartCounts[nodeID]),
 			MaxUncommittedEntriesSize: 1 << 30,
 			Logger:                    &raft.DefaultLogger{Logger: log.New(io.Discard, "", 0)},
 			CheckQuorum:               true,

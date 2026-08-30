@@ -30,14 +30,19 @@ type Fuzzer struct {
 	// nodes 包含 0..Replicas。0 不是 raft replica，而是客户端/外部环境占位。
 	nodes  []uint64
 	config *FuzzerConfig
-	// mutatedTracesQueue 保存 guider 认为有价值的 trace 经过 mutator 扩展后的候选执行。
-	mutatedTracesQueue *Queue[*List[*SchedulingChoice]]
-	rand               *rand.Rand
+	// candidateTracesQueue 同时保存待反馈检查的 seed replay 和真正的 mutation。
+	candidateTracesQueue *Queue[queuedTrace]
+	rand                 *rand.Rand
 	// raftEnvironment 是 etcd-raft 的内存执行环境，相当于通用版的 Cluster 实现。
 	raftEnvironment *RaftEnvironment
 
 	// stats 记录错误、随机执行数、变异执行数和 checker 发现的 buggy iteration。
 	stats map[string]interface{}
+}
+
+type queuedTrace struct {
+	trace      *List[*SchedulingChoice]
+	isMutation bool
 }
 
 // traceCtx 保存单次 iteration 的输入计划和输出记录。
@@ -72,7 +77,7 @@ func (t *traceCtx) IsError() bool {
 	return t.Error != nil
 }
 
-func (t *traceCtx) GetNextNodeChoice() (uint64, uint64, int) {
+func (t *traceCtx) GetNextNodeChoice() (uint64, uint64, int, int) {
 	// Node choice 不指定具体消息，而是指定一条方向队列和最多投递条数。
 	// 具体投递哪些消息，由 Fuzzer.Schedule 从该队列头部取出。
 	var fromChoice uint64
@@ -92,6 +97,7 @@ func (t *traceCtx) GetNextNodeChoice() (uint64, uint64, int) {
 		toChoice = t.fuzzer.nodes[j]
 		maxMessages = t.rand.Intn(t.fuzzer.config.MaxMessages)
 	}
+	choiceIndex := t.trace.Size()
 	t.trace.Append(&SchedulingChoice{
 		Type:        Node,
 		From:        fromChoice,
@@ -99,7 +105,7 @@ func (t *traceCtx) GetNextNodeChoice() (uint64, uint64, int) {
 		MaxMessages: maxMessages,
 	})
 
-	return fromChoice, toChoice, maxMessages
+	return fromChoice, toChoice, maxMessages, choiceIndex
 }
 
 func (t *traceCtx) GetRandomBoolean() (choice bool) {
@@ -110,15 +116,23 @@ func (t *traceCtx) GetRandomBoolean() (choice bool) {
 	} else {
 		choice = t.rand.Intn(2) == 0
 	}
+	choiceIndex := t.trace.Size()
+	t.trace.Append(&SchedulingChoice{
+		Type:          RandomBoolean,
+		BooleanChoice: choice,
+	})
 	t.eventTrace.Append(&Event{
 		Name: "RandomBooleanChoice",
 		Params: map[string]interface{}{
 			"choice": choice,
 		},
-	})
-	t.trace.Append(&SchedulingChoice{
-		Type:          RandomBoolean,
-		BooleanChoice: choice,
+		Origin: &EventOrigin{
+			Step:            -1,
+			Phase:           EventPhaseRandom,
+			ChoiceIndex:     choiceIndex,
+			DeliveryOrdinal: -1,
+			DeliveryCount:   -1,
+		},
 	})
 	return
 }
@@ -132,69 +146,72 @@ func (t *traceCtx) GetRandomInteger(max int) (choice int) {
 	} else {
 		choice = t.rand.Intn(max)
 	}
+	choiceIndex := t.trace.Size()
+	t.trace.Append(&SchedulingChoice{
+		Type:          RandomInteger,
+		IntegerChoice: choice,
+	})
 	t.eventTrace.Append(&Event{
 		Name: "RandomIntegerChoice",
 		Params: map[string]interface{}{
 			"choice": choice,
 		},
-	})
-	t.trace.Append(&SchedulingChoice{
-		Type:          RandomInteger,
-		IntegerChoice: choice,
+		Origin: &EventOrigin{
+			Step:            -1,
+			Phase:           EventPhaseRandom,
+			ChoiceIndex:     choiceIndex,
+			DeliveryOrdinal: -1,
+			DeliveryCount:   -1,
+		},
 	})
 	return
 }
 
-func (t *traceCtx) CanCrash(step int) (uint64, bool) {
-	// crashPoints 是“计划表”，key 是 step。真正是否能 crash 由 RunIteration 调用 Stop 后决定。
+func (t *traceCtx) CanCrash(step int) (uint64, int, bool) {
+	// crashPoints 是“计划表”，key 是 step。这里只记录调度 choice；只有 RunIteration
+	// 确认节点当前存活并实际调用 Stop 时，才记录模型可见的 Remove event。
 	node, ok := t.crashPoints[step]
 	if ok {
-		t.eventTrace.Append(&Event{
-			Name: "Remove",
-			Node: node,
-			Params: map[string]interface{}{
-				"i": int(node),
-			},
-		})
+		choiceIndex := t.trace.Size()
 		t.trace.Append(&SchedulingChoice{
 			Type: StopNode,
 			Node: node,
 			Step: step,
 		})
+		return node, choiceIndex, true
 	}
-	return node, ok
+	return node, -1, false
 }
 
-func (t *traceCtx) CanStart(step int) (uint64, bool) {
-	// startPoints 与 crashPoints 配对使用；RunIteration 会额外确认节点确实处于 crashed 集合中。
+func (t *traceCtx) CanStart(step int) (uint64, int, bool) {
+	// startPoints 与 crashPoints 配对使用。这里只记录调度 choice；只有 RunIteration
+	// 确认节点确实处于 crashed 集合并调用 Start 时，才记录 Add event。
 	node, ok := t.startPoints[step]
 	if ok {
-		t.eventTrace.Append(&Event{
-			Name: "Add",
-			Node: node,
-			Params: map[string]interface{}{
-				"i": int(node),
-			},
-		})
+		choiceIndex := t.trace.Size()
 		t.trace.Append(&SchedulingChoice{
 			Type: StartNode,
 			Node: node,
 			Step: step,
 		})
+		return node, choiceIndex, true
 	}
-	return node, ok
+	return node, -1, false
 }
 
-func (t *traceCtx) IsClientRequest(step int) (int, bool) {
+func (t *traceCtx) IsClientRequest(step int) (int, int, bool) {
 	// 客户端请求也是 trace 的一部分，否则同一调度重放时输入请求数量和位置会不稳定。
 	req, ok := t.clientRequests[step]
 	if ok {
+		choiceIndex := t.trace.Size()
 		t.trace.Append(&SchedulingChoice{
 			Type:    ClientRequest,
 			Request: req,
+			Step:    step,
 		})
+		return req, choiceIndex, true
 	}
-	return req, ok
+	return req, -1, false
 }
 
 type FuzzerConfig struct {
@@ -220,17 +237,26 @@ type FuzzerConfig struct {
 	MaxMessages int
 	// ReseedFrequency 控制多久重新生成一批随机种子，避免陷入局部搜索。
 	ReseedFrequency int
+	// RandomSeed 非零时固定 Fuzzer 和所有 RandomizedMutator 的共享随机源；
+	// 0 保留原有的基于当前时间播种行为。
+	RandomSeed int64
 }
 
 func NewFuzzer(config *FuzzerConfig) *Fuzzer {
+	seed := config.RandomSeed
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+	environmentConfig := config.RaftEnvironmentConfig
+	environmentConfig.RandomSeed = seed
 	f := &Fuzzer{
-		config:             config,
-		nodes:              make([]uint64, 0),
-		messageQueues:      make(map[string]*Queue[pb.Message]),
-		mutatedTracesQueue: NewQueue[*List[*SchedulingChoice]](),
-		rand:               rand.New(rand.NewSource(time.Now().UnixNano())),
-		raftEnvironment:    NewRaftEnvironment(config.RaftEnvironmentConfig),
-		stats:              make(map[string]interface{}),
+		config:               config,
+		nodes:                make([]uint64, 0),
+		messageQueues:        make(map[string]*Queue[pb.Message]),
+		candidateTracesQueue: NewQueue[queuedTrace](),
+		rand:                 rand.New(rand.NewSource(seed)),
+		raftEnvironment:      NewRaftEnvironment(environmentConfig),
+		stats:                make(map[string]interface{}),
 	}
 	for i := 0; i <= f.config.RaftEnvironmentConfig.Replicas; i++ {
 		// 节点 0 用作客户端/外部环境占位，真实 raft replica 是 1..Replicas。
@@ -240,12 +266,24 @@ func NewFuzzer(config *FuzzerConfig) *Fuzzer {
 			f.messageQueues[key] = NewQueue[pb.Message]()
 		}
 	}
+	f.stats["total_executions"] = 0
+	f.stats["feedback_executions"] = 0
+	f.stats["seed_generation_executions"] = 0
+	f.stats["seed_replay_executions"] = 0
+	f.stats["mutation_executions"] = 0
 	f.stats["random_executions"] = 0
-	f.stats["mutated_executions"] = 0
 	f.stats["execution_errors"] = make(map[string]bool, 0)
 	f.stats["error_executions"] = make(map[string][]string)
 	f.stats["buggy_executions"] = make(map[string]bool, 0)
+	f.stats["random_seed"] = seed
+	if randomized, ok := config.Mutator.(RandomizedMutator); ok {
+		randomized.SetRandom(f.rand)
+	}
 	return f
+}
+
+func (f *Fuzzer) incrementStat(name string) {
+	f.stats[name] = f.stats[name].(int) + 1
 }
 
 func (f *Fuzzer) Schedule(from uint64, to uint64, maxMessages int) []pb.Message {
@@ -266,11 +304,12 @@ func (f *Fuzzer) Schedule(from uint64, to uint64, maxMessages int) []pb.Message 
 	return messages
 }
 
-func recordReceive(message pb.Message, eventTrace *List[*Event]) {
+func recordReceive(message pb.Message, eventTrace *List[*Event], origin *EventOrigin) {
 	// DeliverMessage 是模型看到的“消息被交付给目标节点”事件。
 	eventTrace.Append(&Event{
-		Name: "DeliverMessage",
-		Node: message.To,
+		Name:   "DeliverMessage",
+		Node:   message.To,
+		Origin: origin.Copy(),
 		Params: map[string]interface{}{
 			"type":     message.Type.String(),
 			"term":     message.Term,
@@ -286,11 +325,12 @@ func recordReceive(message pb.Message, eventTrace *List[*Event]) {
 	})
 }
 
-func recordSend(message pb.Message, eventTrace *List[*Event]) {
+func recordSend(message pb.Message, eventTrace *List[*Event], origin *EventOrigin) {
 	// SendMessage 是模型看到的“节点发出了网络消息”事件。
 	eventTrace.Append(&Event{
-		Name: "SendMessage",
-		Node: message.From,
+		Name:   "SendMessage",
+		Node:   message.From,
+		Origin: origin.Copy(),
 		Params: map[string]interface{}{
 			"type":     message.Type.String(),
 			"term":     message.Term,
@@ -309,10 +349,14 @@ func recordSend(message pb.Message, eventTrace *List[*Event]) {
 func (f *Fuzzer) seed() {
 	// reseed 时先随机跑一批 trace，再把它们作为后续变异的种子。
 	// 注意 seed 本身也会真实执行 raft，因此可能产生 eventTrace 和副作用；随后会在下一轮前 reset。
-	f.mutatedTracesQueue.Reset()
+	f.candidateTracesQueue.Reset()
 	for i := 0; i < f.config.SeedPopulationSize; i++ {
 		trace, _ := f.RunIteration(fmt.Sprintf("pop_%d", i), nil)
-		f.mutatedTracesQueue.Push(copyTrace(trace, defaultCopyFilter()))
+		f.incrementStat("seed_generation_executions")
+		f.incrementStat("total_executions")
+		f.candidateTracesQueue.Push(queuedTrace{
+			trace: copyTrace(trace, defaultCopyFilter()),
+		})
 	}
 }
 
@@ -326,24 +370,42 @@ func (f *Fuzzer) Run() []CoverageStats {
 		}
 		fmt.Printf("\rRunning iteration: %d/%d", i+1, f.config.Iterations)
 		var mimic *List[*SchedulingChoice] = nil
-		if f.mutatedTracesQueue.Size() > 0 {
-			f.stats["mutated_executions"] = f.stats["mutated_executions"].(int) + 1
-			mimic, _ = f.mutatedTracesQueue.Pop()
+		if f.candidateTracesQueue.Size() > 0 {
+			candidate, _ := f.candidateTracesQueue.Pop()
+			mimic = candidate.trace
+			if candidate.isMutation {
+				f.incrementStat("mutation_executions")
+			} else {
+				f.incrementStat("seed_replay_executions")
+			}
 		} else {
-			f.stats["random_executions"] = f.stats["random_executions"].(int) + 1
+			f.incrementStat("random_executions")
 		}
 		trace, eventTrace := f.RunIteration(fmt.Sprintf("fuzz_%d", i), mimic)
+		f.incrementStat("feedback_executions")
+		f.incrementStat("total_executions")
 		if numNewStates, _ := f.config.Guider.Check(trace, eventTrace); numNewStates > 0 {
+			if guided, ok := f.config.Mutator.(GuidanceAwareMutator); ok {
+				guided.SetGuidance(f.config.Guider.LastGuidance())
+			}
 			// 新覆盖越多，围绕这条 trace 生成的变异越多。
 			numMutations := numNewStates * f.config.MutPerTrace
 			for j := 0; j < numMutations; j++ {
 				new, ok := f.config.Mutator.Mutate(trace, eventTrace)
 				if ok {
-					f.mutatedTracesQueue.Push(copyTrace(new, defaultCopyFilter()))
+					f.candidateTracesQueue.Push(queuedTrace{
+						trace:      copyTrace(new, defaultCopyFilter()),
+						isMutation: true,
+					})
 				}
 			}
 		}
 		coverages = append(coverages, f.config.Guider.Coverage())
+	}
+	if provider, ok := f.config.Mutator.(MutationSelectionStatsProvider); ok {
+		local, global := provider.MutationSelectionStats()
+		f.stats["local_mutation_attempts"] = local
+		f.stats["global_mutation_attempts"] = global
 	}
 	return coverages
 }
@@ -436,16 +498,46 @@ EpisodeLoop:
 	for j := 0; j < f.config.Steps; j++ {
 		// 一个 step 的顺序：故障/恢复 -> 投递消息 -> 客户端请求 -> Tick 收集新消息。
 		// 这个固定顺序本身也是测试语义的一部分：例如本 step crash 后，投递到该节点的消息会被跳过。
-		if toCrash, ok := tCtx.CanCrash(j); ok {
-			f.raftEnvironment.Stop(fCtx, toCrash)
-			if tCtx.IsError() {
-				break EpisodeLoop
+		if toCrash, choiceIndex, ok := tCtx.CanCrash(j); ok {
+			origin := &EventOrigin{
+				Step:            j,
+				Phase:           EventPhaseCrash,
+				ChoiceIndex:     choiceIndex,
+				DeliveryOrdinal: -1,
+				DeliveryCount:   -1,
 			}
-			crashed[toCrash] = true
+			if _, alreadyCrashed := crashed[toCrash]; !alreadyCrashed {
+				fCtx.SetOrigin(origin)
+				tCtx.eventTrace.Append(&Event{
+					Name:   "Remove",
+					Node:   toCrash,
+					Params: map[string]interface{}{"i": int(toCrash)},
+					Origin: origin.Copy(),
+				})
+				f.raftEnvironment.Stop(fCtx, toCrash)
+				if tCtx.IsError() {
+					break EpisodeLoop
+				}
+				crashed[toCrash] = true
+			}
 		}
-		if toStart, ok := tCtx.CanStart(j); ok {
+		if toStart, choiceIndex, ok := tCtx.CanStart(j); ok {
 			_, isCrashed := crashed[toStart]
 			if isCrashed {
+				origin := &EventOrigin{
+					Step:            j,
+					Phase:           EventPhaseRestart,
+					ChoiceIndex:     choiceIndex,
+					DeliveryOrdinal: -1,
+					DeliveryCount:   -1,
+				}
+				fCtx.SetOrigin(origin)
+				tCtx.eventTrace.Append(&Event{
+					Name:   "Add",
+					Node:   toStart,
+					Params: map[string]interface{}{"i": int(toStart)},
+					Origin: origin.Copy(),
+				})
 				f.raftEnvironment.Start(fCtx, toStart)
 				if tCtx.IsError() {
 					break EpisodeLoop
@@ -453,13 +545,21 @@ EpisodeLoop:
 				delete(crashed, toStart)
 			}
 		}
-		from, to, maxMessages := tCtx.GetNextNodeChoice()
+		from, to, maxMessages, choiceIndex := tCtx.GetNextNodeChoice()
 		if _, ok := crashed[to]; !ok {
 			// 只跳过目标已宕机的投递；源节点是否已宕机不在这里检查，
 			// 因为消息可能是该源节点宕机前已经进入网络队列的旧消息。
 			messages := f.Schedule(from, to, maxMessages)
-			for _, m := range messages {
-				recordReceive(m, tCtx.eventTrace)
+			for ordinal, m := range messages {
+				origin := &EventOrigin{
+					Step:            j,
+					Phase:           EventPhaseDeliver,
+					ChoiceIndex:     choiceIndex,
+					DeliveryOrdinal: ordinal,
+					DeliveryCount:   len(messages),
+				}
+				fCtx.SetOrigin(origin)
+				recordReceive(m, tCtx.eventTrace, origin)
 				f.raftEnvironment.Step(fCtx, m)
 				if tCtx.IsError() {
 					break EpisodeLoop
@@ -467,7 +567,7 @@ EpisodeLoop:
 			}
 		}
 
-		if reqNum, ok := tCtx.IsClientRequest(j); ok {
+		if reqNum, requestChoiceIndex, ok := tCtx.IsClientRequest(j); ok {
 			// 客户端请求被包装成 MsgProp；RaftEnvironment.Step 会把它交给当前 leader。
 			req := pb.Message{
 				Type: pb.MsgProp,
@@ -476,15 +576,30 @@ EpisodeLoop:
 					{Data: []byte(strconv.Itoa(reqNum))},
 				},
 			}
+			fCtx.SetOrigin(&EventOrigin{
+				Step:            j,
+				Phase:           EventPhaseClientRequest,
+				ChoiceIndex:     requestChoiceIndex,
+				DeliveryOrdinal: -1,
+				DeliveryCount:   -1,
+			})
 			f.raftEnvironment.Step(fCtx, req)
 			if tCtx.IsError() {
 				break EpisodeLoop
 			}
 		}
 
+		tickOrigin := &EventOrigin{
+			Step:            j,
+			Phase:           EventPhaseTick,
+			ChoiceIndex:     -1,
+			DeliveryOrdinal: -1,
+			DeliveryCount:   -1,
+		}
+		fCtx.SetOrigin(tickOrigin)
 		for _, n := range f.raftEnvironment.Tick(fCtx) {
 			// Tick 产生的新消息不会立刻投递，而是进入 from/to 队列等待未来调度。
-			recordSend(n, tCtx.eventTrace)
+			recordSend(n, tCtx.eventTrace, tickOrigin)
 			key := fmt.Sprintf("%d_%d", n.From, n.To)
 			f.messageQueues[key].Push(n)
 		}
@@ -514,13 +629,35 @@ type Mutator interface {
 	Mutate(*List[*SchedulingChoice], *List[*Event]) (*List[*SchedulingChoice], bool)
 }
 
+type GuidanceAwareMutator interface {
+	SetGuidance(Guidance)
+}
+
+type MutationSelectionStatsProvider interface {
+	MutationSelectionStats() (local, global int)
+}
+
+// RandomizedMutator 允许 Fuzzer 把自己的确定性随机源注入 Mutator。
+// 组合 Mutator 应把同一个源继续传给所有子 Mutator，使一个 seed 能控制完整变异过程。
+type RandomizedMutator interface {
+	SetRandom(*rand.Rand)
+}
+
 // FuzzContext 是 RaftEnvironment 向 fuzzer 反向记录事件/随机选择的窄接口。
 type FuzzContext struct {
 	traceCtx *traceCtx
+	origin   *EventOrigin
 }
 
 func (f *FuzzContext) AddEvent(e *Event) {
+	if e.Origin == nil {
+		e.Origin = f.origin.Copy()
+	}
 	f.traceCtx.eventTrace.Append(e)
+}
+
+func (f *FuzzContext) SetOrigin(origin *EventOrigin) {
+	f.origin = origin.Copy()
 }
 
 func (f *FuzzContext) RandomBooleanChoice() bool {

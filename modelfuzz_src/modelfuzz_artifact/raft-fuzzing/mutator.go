@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"time"
 )
 
@@ -27,6 +28,10 @@ func NewChoiceMutator(flips int) *ChoiceMutator {
 		NumFlips: flips,
 		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+}
+
+func (c *ChoiceMutator) SetRandom(random *rand.Rand) {
+	c.rand = random
 }
 
 var _ Mutator = &ChoiceMutator{}
@@ -81,6 +86,10 @@ func NewSkipNodeMutator(skips int) *SkipNodeMutator {
 	}
 }
 
+func (d *SkipNodeMutator) SetRandom(random *rand.Rand) {
+	d.rand = random
+}
+
 func (d *SkipNodeMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]) (*List[*SchedulingChoice], bool) {
 	// 删除若干 Node 调度点，相当于让对应网络投递机会消失。
 	// 注意它不是显式丢弃某条具体消息，而是删除一次“从某方向队列取消息”的机会。
@@ -113,6 +122,7 @@ func (d *SkipNodeMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]
 type SwapNodeMutator struct {
 	NumSwaps int
 	rand     *rand.Rand
+	scope    *localMutationScope
 }
 
 var _ Mutator = &SwapNodeMutator{}
@@ -124,15 +134,14 @@ func NewSwapNodeMutator(swaps int) *SwapNodeMutator {
 	}
 }
 
+func (s *SwapNodeMutator) SetRandom(random *rand.Rand) {
+	s.rand = random
+}
+
 func (s *SwapNodeMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]) (*List[*SchedulingChoice], bool) {
 	// 交换若干 Node 调度点，改变消息投递方向/时机。
 	// compare 命令中的 combinedMutator 会使用它，这是当前主要变异之一。
-	nodeChoiceIndices := make([]int, 0)
-	for i, choice := range trace.Iter() {
-		if choice.Type == Node {
-			nodeChoiceIndices = append(nodeChoiceIndices, i)
-		}
-	}
+	nodeChoiceIndices := mutationChoiceIndices(trace, Node, max(s.NumSwaps, 2), s.scope)
 	numNodeChoiceIndices := len(nodeChoiceIndices)
 	if numNodeChoiceIndices == 0 {
 		return nil, false
@@ -141,23 +150,23 @@ func (s *SwapNodeMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]
 	if s.NumSwaps < choices {
 		choices = s.NumSwaps
 	}
-	toSwap := make(map[string]map[int]int)
+	toSwap := make([]mutationPair, 0, choices)
+	seen := make(map[string]bool)
 	for len(toSwap) < choices {
 		i := nodeChoiceIndices[s.rand.Intn(numNodeChoiceIndices)]
 		j := nodeChoiceIndices[s.rand.Intn(numNodeChoiceIndices)]
 		key := fmt.Sprintf("%d_%d", i, j)
-		if _, ok := toSwap[key]; !ok {
-			toSwap[key] = map[int]int{i: j}
+		if !seen[key] {
+			seen[key] = true
+			toSwap = append(toSwap, mutationPair{first: i, second: j})
 		}
 	}
 	newTrace := copyTrace(trace, defaultCopyFilter())
-	for _, v := range toSwap {
-		for i, j := range v {
-			first, _ := newTrace.Get(i)
-			second, _ := newTrace.Get(j)
-			newTrace.Set(i, second.Copy())
-			newTrace.Set(j, first.Copy())
-		}
+	for _, swap := range toSwap {
+		first, _ := newTrace.Get(swap.first)
+		second, _ := newTrace.Get(swap.second)
+		newTrace.Set(swap.first, second.Copy())
+		newTrace.Set(swap.second, first.Copy())
 	}
 	return newTrace, true
 }
@@ -172,6 +181,10 @@ func NewSwapIntegerChoiceMutator(numswaps int) *SwapIntegerChoiceMutator {
 		NumSwaps: numswaps,
 		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+}
+
+func (s *SwapIntegerChoiceMutator) SetRandom(random *rand.Rand) {
+	s.rand = random
 }
 
 func (s *SwapIntegerChoiceMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]) (*List[*SchedulingChoice], bool) {
@@ -219,6 +232,10 @@ func NewScaleDownIntChoiceMutator(numPoints int) *ScaleDownIntChoiceMutator {
 		NumPoints: numPoints,
 		rand:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+}
+
+func (s *ScaleDownIntChoiceMutator) SetRandom(random *rand.Rand) {
+	s.rand = random
 }
 
 func (s *ScaleDownIntChoiceMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]) (*List[*SchedulingChoice], bool) {
@@ -272,6 +289,10 @@ func NewScaleUpIntChoiceMutator(numPoints, max int) *ScaleUpIntChoiceMutator {
 		Max:       max,
 		rand:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+}
+
+func (s *ScaleUpIntChoiceMutator) SetRandom(random *rand.Rand) {
+	s.rand = random
 }
 
 func (s *ScaleUpIntChoiceMutator) Mutate(trace *List[*SchedulingChoice], _ *List[*Event]) (*List[*SchedulingChoice], bool) {
@@ -332,6 +353,26 @@ func defaultCopyFilter() func(*SchedulingChoice) bool {
 
 type combinedMutator struct {
 	mutators []Mutator
+	scope    *localMutationScope
+}
+
+type mutationPair struct {
+	first  int
+	second int
+}
+
+func (c *combinedMutator) SetRandom(random *rand.Rand) {
+	for _, mutator := range c.mutators {
+		if randomized, ok := mutator.(RandomizedMutator); ok {
+			randomized.SetRandom(random)
+		}
+	}
+}
+
+func (c *combinedMutator) SetGuidance(guidance Guidance) {
+	if c.scope != nil {
+		c.scope.setGuidance(guidance)
+	}
 }
 
 func (c *combinedMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
@@ -354,9 +395,144 @@ func CombineMutators(mutators ...Mutator) Mutator {
 	}
 }
 
+func NewGlobalModelFuzzMutator() Mutator {
+	return CombineMutators(
+		NewSwapCrashNodeMutator(2),
+		NewSwapNodeMutator(20),
+		NewSwapMaxMessagesMutator(20),
+	)
+}
+
+// NewLocalizedModelFuzzMutator keeps the original three operators and mutation
+// counts, but limits each operator's candidate pool to choices nearest to newly
+// covered model-state origins.
+func NewLocalizedModelFuzzMutator() Mutator {
+	scope := &localMutationScope{}
+	crash := NewSwapCrashNodeMutator(2)
+	crash.scope = scope
+	node := NewSwapNodeMutator(20)
+	node.scope = scope
+	maxMessages := NewSwapMaxMessagesMutator(20)
+	maxMessages.scope = scope
+	return &combinedMutator{
+		mutators: []Mutator{crash, node, maxMessages},
+		scope:    scope,
+	}
+}
+
+type mixedModelFuzzMutator struct {
+	local          Mutator
+	global         Mutator
+	localPercent   int
+	localCredit    int
+	localAttempts  int
+	globalAttempts int
+}
+
+func NewMixedModelFuzzMutator(localPercent int) Mutator {
+	if localPercent <= 0 {
+		return NewGlobalModelFuzzMutator()
+	}
+	if localPercent >= 100 {
+		return NewLocalizedModelFuzzMutator()
+	}
+	return &mixedModelFuzzMutator{
+		local:        NewLocalizedModelFuzzMutator(),
+		global:       NewGlobalModelFuzzMutator(),
+		localPercent: localPercent,
+		localCredit:  100 - localPercent,
+	}
+}
+
+func (m *mixedModelFuzzMutator) SetRandom(random *rand.Rand) {
+	m.local.(RandomizedMutator).SetRandom(random)
+	m.global.(RandomizedMutator).SetRandom(random)
+}
+
+func (m *mixedModelFuzzMutator) SetGuidance(guidance Guidance) {
+	m.local.(GuidanceAwareMutator).SetGuidance(guidance)
+}
+
+func (m *mixedModelFuzzMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
+	m.localCredit += m.localPercent
+	if m.localCredit >= 100 {
+		m.localCredit -= 100
+		m.localAttempts++
+		return m.local.Mutate(trace, eventTrace)
+	}
+	m.globalAttempts++
+	return m.global.Mutate(trace, eventTrace)
+}
+
+func (m *mixedModelFuzzMutator) MutationSelectionStats() (int, int) {
+	return m.localAttempts, m.globalAttempts
+}
+
+type localMutationScope struct {
+	steps []int
+}
+
+func (s *localMutationScope) setGuidance(guidance Guidance) {
+	seen := make(map[int]bool)
+	s.steps = s.steps[:0]
+	for _, hit := range guidance.NewStates {
+		if hit.Status == AttributionLocated && hit.Origin != nil && !seen[hit.Origin.Step] {
+			seen[hit.Origin.Step] = true
+			s.steps = append(s.steps, hit.Origin.Step)
+		}
+	}
+}
+
+type scopedChoice struct {
+	index    int
+	distance int
+}
+
+func mutationChoiceIndices(trace *List[*SchedulingChoice], choiceType SchedulingChoiceType, poolSize int, scope *localMutationScope) []int {
+	candidates := make([]scopedChoice, 0)
+	nodeStep := 0
+	for index, choice := range trace.Iter() {
+		step := choice.Step
+		if choice.Type == Node {
+			step = nodeStep
+			nodeStep++
+		}
+		if choice.Type != choiceType {
+			continue
+		}
+		distance := 0
+		if scope != nil && len(scope.steps) > 0 {
+			distance = abs(step - scope.steps[0])
+			for _, center := range scope.steps[1:] {
+				distance = min(distance, abs(step-center))
+			}
+		}
+		candidates = append(candidates, scopedChoice{index: index, distance: distance})
+	}
+	if scope != nil && len(scope.steps) > 0 && len(candidates) > poolSize {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].distance < candidates[j].distance
+		})
+		candidates = candidates[:poolSize]
+	}
+	indices := make([]int, len(candidates))
+	for i, candidate := range candidates {
+		indices[i] = candidate.index
+	}
+	return indices
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 type SwapCrashNodeMutator struct {
 	NumSwaps int
 	r        *rand.Rand
+	scope    *localMutationScope
 }
 
 var _ Mutator = &SwapCrashNodeMutator{}
@@ -368,29 +544,28 @@ func NewSwapCrashNodeMutator(swaps int) *SwapCrashNodeMutator {
 	}
 }
 
+func (s *SwapCrashNodeMutator) SetRandom(random *rand.Rand) {
+	s.r = random
+}
+
 func (s *SwapCrashNodeMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
 	// 交换 StopNode 选择中的节点编号，保留 crash 发生的 step。
 	// 这样可以保留“故障发生的时间结构”，只改变哪个 replica 承受故障。
-	swaps := make(map[int]int)
-
-	nodeChoices := make([]int, 0)
-	for i, ch := range trace.Iter() {
-		if ch.Type == StopNode {
-			nodeChoices = append(nodeChoices, i)
-		}
-	}
+	nodeChoices := mutationChoiceIndices(trace, StopNode, s.NumSwaps*2, s.scope)
 
 	if len(nodeChoices) < s.NumSwaps*2 {
 		return nil, false
 	}
 
-	for len(swaps) < s.NumSwaps {
-		sp := sample(nodeChoices, 2, s.r)
-		swaps[sp[0]] = sp[1]
+	selected := sample(nodeChoices, s.NumSwaps*2, s.r)
+	swaps := make([]mutationPair, s.NumSwaps)
+	for i := 0; i < s.NumSwaps; i++ {
+		swaps[i] = mutationPair{first: selected[i*2], second: selected[i*2+1]}
 	}
 
 	newTrace := copyTrace(trace, defaultCopyFilter())
-	for i, j := range swaps {
+	for _, swap := range swaps {
+		i, j := swap.first, swap.second
 		iCh, _ := newTrace.Get(i)
 		jCh, _ := newTrace.Get(j)
 
@@ -408,6 +583,7 @@ func (s *SwapCrashNodeMutator) Mutate(trace *List[*SchedulingChoice], eventTrace
 type SwapMaxMessagesMutator struct {
 	NumSwaps int
 	r        *rand.Rand
+	scope    *localMutationScope
 }
 
 var _ Mutator = &SwapMaxMessagesMutator{}
@@ -419,29 +595,33 @@ func NewSwapMaxMessagesMutator(swaps int) *SwapMaxMessagesMutator {
 	}
 }
 
+func (s *SwapMaxMessagesMutator) SetRandom(random *rand.Rand) {
+	s.r = random
+}
+
 func (s *SwapMaxMessagesMutator) Mutate(trace *List[*SchedulingChoice], eventTrace *List[*Event]) (*List[*SchedulingChoice], bool) {
 	// 交换 Node 调度点的 MaxMessages，改变一次投递的消息批量大小。
 	// 这会影响网络拥塞程度：同样的 from/to 方向，批量越大越容易让 raft 快速追上。
-	swaps := make(map[int]int)
-
-	nodeChoices := make([]int, 0)
-	for i, ch := range trace.Iter() {
-		if ch.Type == Node {
-			nodeChoices = append(nodeChoices, i)
-		}
-	}
+	nodeChoices := mutationChoiceIndices(trace, Node, max(s.NumSwaps, 2), s.scope)
 
 	if len(nodeChoices) < s.NumSwaps {
 		return nil, false
 	}
 
+	swaps := make([]mutationPair, 0, s.NumSwaps)
+	seen := make(map[string]bool)
 	for len(swaps) < s.NumSwaps {
 		sp := sample(nodeChoices, 2, s.r)
-		swaps[sp[0]] = sp[1]
+		key := fmt.Sprintf("%d_%d", sp[0], sp[1])
+		if !seen[key] {
+			seen[key] = true
+			swaps = append(swaps, mutationPair{first: sp[0], second: sp[1]})
+		}
 	}
 
 	newTrace := copyTrace(trace, defaultCopyFilter())
-	for i, j := range swaps {
+	for _, swap := range swaps {
+		i, j := swap.first, swap.second
 		iCh, _ := newTrace.Get(i)
 		jCh, _ := newTrace.Get(j)
 

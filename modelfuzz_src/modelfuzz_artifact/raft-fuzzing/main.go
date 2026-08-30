@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -22,6 +26,11 @@ var (
 	numRuns int
 	// recordTraces 控制 guider 是否把探索到的 trace/eventTrace/stateTrace 写入磁盘。
 	recordTraces bool
+	// stateAttribution 控制 tlcstate guider 是否定位新增状态；新服务端直接返回 transition，
+	// 旧服务端才需要额外的 TLC 前缀探测。
+	stateAttribution bool
+	// randomSeed 非零时固定 Fuzzer 和 Mutator 的共享随机源。
+	randomSeed int64
 )
 
 func main() {
@@ -36,6 +45,8 @@ func main() {
 	rootCommand.PersistentFlags().IntVar(&requests, "requests", 1, "Number of client requests to inject per random trace")
 	rootCommand.PersistentFlags().IntVar(&numRuns, "runs", 5, "Number of runs to average over")
 	rootCommand.PersistentFlags().BoolVar(&recordTraces, "record-traces", false, "Record the traces explored")
+	rootCommand.PersistentFlags().BoolVar(&stateAttribution, "state-attribution", false, "Locate each new TLC state using server transitions or legacy prefix fallback")
+	rootCommand.PersistentFlags().Int64Var(&randomSeed, "seed", 0, "Random seed shared by the fuzzer and mutators (0 uses current time)")
 
 	// fuzz：跑单一配置的 fuzz。
 	// compare：对比 trace coverage、line coverage、TLC state coverage、random 等策略。
@@ -43,10 +54,138 @@ func main() {
 	rootCommand.AddCommand(FuzzCommand())
 	rootCommand.AddCommand(OneCommand())
 	rootCommand.AddCommand(MeasureCommand())
+	rootCommand.AddCommand(PhaseACommand())
 
 	if err := rootCommand.Execute(); err != nil {
 		fmt.Println(err)
 	}
+}
+
+type phaseAResult struct {
+	Seed          int64                  `json:"seed"`
+	Config        map[string]interface{} `json:"config"`
+	Runtime       string                 `json:"runtime"`
+	RuntimeNanos  int64                  `json:"runtime_nanos"`
+	Coverage      []CoverageStats        `json:"coverage"`
+	FinalCoverage CoverageStats          `json:"final_coverage"`
+	Attribution   AttributionStats       `json:"attribution"`
+	FuzzerStats   map[string]interface{} `json:"fuzzer_stats"`
+}
+
+// PhaseACommand 只运行 tlcstate guider 和原 ModelFuzz mutator，用于测量归因质量与开销。
+// 它不启用任何局部或语义变异。
+func PhaseACommand() *cobra.Command {
+	var tlcAddr string
+	var localizedMutation bool
+	var localMutationPercent int
+	cmd := &cobra.Command{
+		Use:   "phase-a",
+		Short: "Run the Phase A end-to-end attribution experiment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if episodes <= 0 {
+				return fmt.Errorf("episodes must be greater than zero")
+			}
+			if horizon <= 0 {
+				return fmt.Errorf("horizon must be greater than zero")
+			}
+			if replicas != 3 {
+				return fmt.Errorf("Phase A currently uses ModelFuzz RAFT_5_3 and requires --replicas 3")
+			}
+			if requests != 1 {
+				return fmt.Errorf("Phase A matches the original etcd configuration and requires --requests 1")
+			}
+			if localMutationPercent < 0 || localMutationPercent > 100 {
+				return fmt.Errorf("local-mutation-percent must be in [0,100]")
+			}
+			if err := os.MkdirAll(savePath, 0755); err != nil {
+				return fmt.Errorf("create Phase A result directory: %w", err)
+			}
+
+			tracePath := filepath.Join(savePath, "traces")
+			guider := NewTLCStateGuider(tlcAddr, tracePath, recordTraces).WithStateAttribution(true)
+			var mutator Mutator = NewGlobalModelFuzzMutator()
+			mutationMode := "global"
+			if localizedMutation {
+				localMutationPercent = 100
+			}
+			if localMutationPercent > 0 {
+				mutator = NewMixedModelFuzzMutator(localMutationPercent)
+				if localMutationPercent == 100 {
+					mutationMode = "localized"
+				} else {
+					mutationMode = fmt.Sprintf("mixed-%d", localMutationPercent)
+				}
+			}
+			config := &FuzzerConfig{
+				Iterations: episodes,
+				Steps:      horizon,
+				Strategy:   NewRandomStrategy(),
+				Mutator:    mutator,
+				Guider:     guider,
+				Checker:    SerializabilityChecker(),
+				RaftEnvironmentConfig: RaftEnvironmentConfig{
+					Replicas:      replicas,
+					ElectionTick:  20,
+					HeartbeatTick: 4,
+					TicksPerStep:  3,
+				},
+				MutPerTrace:        3,
+				NumberRequests:     requests,
+				CrashQuota:         10,
+				MaxMessages:        5,
+				SeedPopulationSize: 20,
+				ReseedFrequency:    200,
+				RandomSeed:         randomSeed,
+			}
+
+			fuzzer := NewFuzzer(config)
+			start := time.Now()
+			coverage := fuzzer.Run()
+			runtime := time.Since(start)
+			actualSeed := fuzzer.stats["random_seed"].(int64)
+			result := phaseAResult{
+				Seed: actualSeed,
+				Config: map[string]interface{}{
+					"episodes":               episodes,
+					"horizon":                horizon,
+					"replicas":               replicas,
+					"requests":               requests,
+					"crash_quota":            config.CrashQuota,
+					"max_messages":           config.MaxMessages,
+					"seed_population_size":   config.SeedPopulationSize,
+					"reseed_frequency":       config.ReseedFrequency,
+					"mutations_per_trace":    config.MutPerTrace,
+					"tlc_addr":               tlcAddr,
+					"state_attribution":      true,
+					"record_traces":          recordTraces,
+					"model":                  "RAFT_5_3",
+					"mutation_mode":          mutationMode,
+					"local_mutation_percent": localMutationPercent,
+				},
+				Runtime:       runtime.String(),
+				RuntimeNanos:  runtime.Nanoseconds(),
+				Coverage:      coverage,
+				FinalCoverage: coverage[len(coverage)-1],
+				Attribution:   guider.AttributionStats(),
+				FuzzerStats:   fuzzer.stats,
+			}
+			data, err := json.MarshalIndent(result, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encode Phase A result: %w", err)
+			}
+			resultPath := filepath.Join(savePath, "summary.json")
+			if err := os.WriteFile(resultPath, data, 0644); err != nil {
+				return fmt.Errorf("write Phase A result: %w", err)
+			}
+			fmt.Printf("\nPhase A summary written to %s\n", resultPath)
+			fmt.Printf("Attribution: %+v\n", result.Attribution)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&tlcAddr, "tlc", "127.0.0.1:2023", "TLC server address")
+	cmd.Flags().BoolVar(&localizedMutation, "localized-mutation", false, "Limit the original three mutators to choices nearest new-state origins")
+	cmd.Flags().IntVar(&localMutationPercent, "local-mutation-percent", 0, "Percentage of mutation attempts using localized candidates (0 keeps original global behavior)")
+	return cmd
 }
 
 func MeasureCommand() *cobra.Command {
@@ -111,6 +250,7 @@ func FuzzCommand() *cobra.Command {
 				MaxMessages: 10,
 				// SeedPopulationSize 控制 reseed 时生成多少条随机种子 trace。
 				SeedPopulationSize: 10,
+				RandomSeed:         randomSeed,
 			})
 			fuzzer.Run()
 			return nil
@@ -154,6 +294,7 @@ func OneCommand() *cobra.Command {
 				// 每隔 ReseedFrequency 次 iteration 重新注入一批随机种子 trace，
 				// 避免搜索完全被早期发现的轨迹牵引。
 				ReseedFrequency: 200,
+				RandomSeed:      randomSeed,
 			}, numRuns)
 			// 组合 mutator 会在已有有效 trace 上同时扰动：
 			//  1. 哪些节点 crash；
@@ -165,7 +306,7 @@ func OneCommand() *cobra.Command {
 			// lineCov：以 Go 代码行覆盖率作为反馈。
 			c.Add("lineCov", combinedMutator, NewLineCoverageGuider("127.0.0.1:2023", "traces", recordTraces))
 			// tlcstate：以 TLA+ 模型状态覆盖率作为反馈，这是 ModelFuzz 的核心策略。
-			c.Add("tlcstate", combinedMutator, NewTLCStateGuider("127.0.0.1:2023", "traces", recordTraces))
+			c.Add("tlcstate", combinedMutator, NewTLCStateGuider("127.0.0.1:2023", "traces", recordTraces).WithStateAttribution(stateAttribution))
 			// random：不做 trace 变异，只用随机 trace 作为 baseline。
 			c.Add("random", &EmptyMutator{}, NewTLCStateGuider("127.0.0.1:2023", "traces", recordTraces))
 

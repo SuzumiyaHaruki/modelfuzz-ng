@@ -9,4 +9,7 @@ public interface ActionMapper {
 
     // Takes a list of actions in the json form and maps it to List<Action>
     List<ActionWrapper> mapListOfActions(String actionsString);
+
+    // Keeps one result per input event, including events that do not map to a TLA+ action.
+    List<MappedAction> mapListOfActionsWithProvenance(String actionsString);
 }

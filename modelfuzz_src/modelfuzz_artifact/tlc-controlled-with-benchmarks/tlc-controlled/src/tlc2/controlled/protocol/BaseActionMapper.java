@@ -41,14 +41,27 @@ public abstract class BaseActionMapper implements ActionMapper {
 
     public List<ActionWrapper> mapListOfActions(String actionString) {
         List<ActionWrapper> outList = new ArrayList<>();
+        for (MappedAction mapped : mapListOfActionsWithProvenance(actionString)) {
+            if (!mapped.isIgnored()) {
+                outList.add(mapped.getAction());
+            }
+        }
+        return outList;
+    }
+
+    public List<MappedAction> mapListOfActionsWithProvenance(String actionString) {
+        List<MappedAction> outList = new ArrayList<>();
         List<AbstractAction> abstractActions = listFromJson(actionString);
-        for(AbstractAction a:abstractActions) {
+        for(int inputIndex = 0; inputIndex < abstractActions.size(); inputIndex++) {
+            AbstractAction a = abstractActions.get(inputIndex);
             if(a.isReset()) {
-                outList.add(ActionWrapper.reset());
+                outList.add(MappedAction.mapped(inputIndex, a.name, ActionWrapper.reset()));
             } else {
                 Action mappedAction = mapAction(a);
                 if (mappedAction != null) {
-                    outList.add(ActionWrapper.action(mappedAction));
+                    outList.add(MappedAction.mapped(inputIndex, a.name, ActionWrapper.action(mappedAction)));
+                } else {
+                    outList.add(MappedAction.ignored(inputIndex, a.name));
                 }
             }
         }

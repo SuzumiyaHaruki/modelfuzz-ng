@@ -16,6 +16,7 @@ import com.sun.net.httpserver.*;
 import tlc2.controlled.protocol.ActionMapper;
 import tlc2.controlled.protocol.ActionMapperFactory;
 import tlc2.controlled.protocol.ActionWrapper;
+import tlc2.controlled.protocol.MappedAction;
 import tlc2.controlled.protocol.StateAbstractor;
 import tlc2.controlled.protocol.StateAbstractorFactory;
 import tlc2.output.EC;
@@ -49,35 +50,49 @@ public class TLCServer extends TLC {
         FP64.Init(fpIndex);
     }
 
-    public List<TLCState> simulate(String input) throws Exception{
+    public SimulationResult simulate(String input) throws Exception{
         
         StateVec initStates = computeInitStates(this.tool);
-		Queue<ActionWrapper> actionsToRun = new ArrayDeque<ActionWrapper>();
-		List<TLCState> statesVisited = new ArrayList<TLCState>();
+			List<TLCState> statesVisited = new ArrayList<TLCState>();
+			List<SimulationTransition> transitions = new ArrayList<SimulationTransition>();
 
         StateVec nextStates = new StateVec(1);
         TLCState curState = randomState(initStates);
 
         statesVisited.add(curState);
-        actionsToRun.addAll(this.mapper.mapListOfActions(input));
-        while(true) {
+        List<MappedAction> actionsToRun = this.mapper.mapListOfActionsWithProvenance(input);
+        for (MappedAction mappedAction : actionsToRun) {
+            ActionWrapper nextAction = mappedAction.getAction();
+            if (mappedAction.isIgnored()) {
+                transitions.add(SimulationTransition.ignored(
+                    mappedAction.getInputIndex(), mappedAction.getInputName(), curState));
+                continue;
+            }
+            if(nextAction.isReset() || nextAction.isQuit() || nextAction.action.equals(Action.UNKNOWN)) {
+                break;
+            }
+
             nextStates.clear();
-            while(nextStates.empty()) {
-                ActionWrapper nextAction = actionsToRun.remove();
-                if(nextAction.isReset() || nextAction.isQuit() || nextAction.action.equals(Action.UNKNOWN)) {
-                    return this.abstractor.doAbstraction(statesVisited);
-                }
-                nextStates = nextStates.addElements(tool.getNextStates(nextAction.action, curState));
-                if(nextStates.empty()) {
-                    statesVisited.add(curState);
-                }
+            TLCState preState = curState;
+            nextStates = nextStates.addElements(tool.getNextStates(nextAction.action, curState));
+            if(nextStates.empty()) {
+                statesVisited.add(curState);
+                transitions.add(SimulationTransition.disabled(
+                    mappedAction.getInputIndex(), mappedAction.getInputName(),
+                    nextAction.action.getName().toString(), curState));
+                continue;
             }
             assert(nextStates.size() == 1);
             final TLCState s1 = nextStates.elementAt(0);
             s1.execCallable();
             curState = s1;
             statesVisited.add(curState);
+            transitions.add(SimulationTransition.executed(
+                mappedAction.getInputIndex(), mappedAction.getInputName(),
+                nextAction.action.getName().toString(), preState, curState));
         }
+        List<TLCState> abstractStates = this.abstractor.doAbstraction(statesVisited);
+        return new SimulationResult(abstractStates, transitions);
     }
 
     private TLCState randomState(StateVec states) {
@@ -149,14 +164,80 @@ public class TLCServer extends TLC {
         return initStates;
     }
 
+    public static class SimulationTransition {
+        public final int eventIndex;
+        public final String inputName;
+        public final String mappedAction;
+        public final String status;
+        public final TLCState preState;
+        public final TLCState postState;
+
+        private SimulationTransition(int eventIndex, String inputName, String mappedAction,
+                String status, TLCState preState, TLCState postState) {
+            this.eventIndex = eventIndex;
+            this.inputName = inputName;
+            this.mappedAction = mappedAction;
+            this.status = status;
+            this.preState = preState;
+            this.postState = postState;
+        }
+
+        public static SimulationTransition ignored(int eventIndex, String inputName, TLCState state) {
+            return new SimulationTransition(eventIndex, inputName, null, "ignored", state, state);
+        }
+
+        public static SimulationTransition disabled(int eventIndex, String inputName,
+                String mappedAction, TLCState state) {
+            return new SimulationTransition(eventIndex, inputName, mappedAction, "disabled", state, state);
+        }
+
+        public static SimulationTransition executed(int eventIndex, String inputName,
+                String mappedAction, TLCState preState, TLCState postState) {
+            return new SimulationTransition(
+                eventIndex, inputName, mappedAction, "executed", preState, postState);
+        }
+    }
+
+    public static class SimulationResult {
+        public final List<TLCState> states;
+        public final List<SimulationTransition> transitions;
+
+        public SimulationResult(List<TLCState> states, List<SimulationTransition> transitions) {
+            this.states = states;
+            this.transitions = transitions;
+        }
+    }
+
+    public static class TransitionResponse {
+        public int eventIndex;
+        public String inputName;
+        public String mappedAction;
+        public String status;
+        public long preKey;
+        public long postKey;
+
+        public TransitionResponse(SimulationTransition transition) {
+            this.eventIndex = transition.eventIndex;
+            this.inputName = transition.inputName;
+            this.mappedAction = transition.mappedAction;
+            this.status = transition.status;
+            this.preKey = transition.preState.fingerPrint();
+            this.postKey = transition.postState.fingerPrint();
+        }
+    }
+
     public static class ServerResponse {
         public List<String> states;
 
         public List<Long> keys;
 
-        public ServerResponse(List<String> states, List<Long> keys) {
+        public List<TransitionResponse> transitions;
+
+        public ServerResponse(List<String> states, List<Long> keys,
+                List<TransitionResponse> transitions) {
             this.states = states;
             this.keys = keys;
+            this.transitions = transitions;
         }
     }
 
@@ -195,6 +276,15 @@ public class TLCServer extends TLC {
         }
         try {
             HttpServer httpServer = HttpServer.create(new InetSocketAddress(serverPort), 0);
+            httpServer.createContext("/health", new HttpHandler() {
+                public void handle(HttpExchange t) throws IOException {
+                    byte[] response = "Ok".getBytes(StandardCharsets.UTF_8);
+                    t.sendResponseHeaders(200, response.length);
+                    OutputStream responseStream = t.getResponseBody();
+                    responseStream.write(response);
+                    responseStream.close();
+                }
+            });
             httpServer.createContext("/execute", new HttpHandler() {
                 public void handle(HttpExchange t) throws IOException {
                     if(!t.getRequestMethod().equalsIgnoreCase("POST")) {
@@ -204,15 +294,22 @@ public class TLCServer extends TLC {
                     try {
                         byte[] requestBytes = t.getRequestBody().readAllBytes();
                         String request = new String(requestBytes, StandardCharsets.UTF_8);
-                        List<TLCState> trace = tlcServer.simulate(request);
+                        SimulationResult execution = tlcServer.simulate(request);
                         List<String> stringTrace = new ArrayList<>();
                         List<Long> fingerprintTrace = new ArrayList<>();
-                        for( TLCState state : trace) {
+                        for( TLCState state : execution.states) {
                             stringTrace.add(state.toString());
                             fingerprintTrace.add(state.fingerPrint());
                         }
+                        List<TransitionResponse> transitionTrace = new ArrayList<>();
+                        for (SimulationTransition transition : execution.transitions) {
+                            transitionTrace.add(new TransitionResponse(transition));
+                        }
                         Gson gson = new Gson();
-                        String response = gson.toJson(new ServerResponse(stringTrace, fingerprintTrace));
+                        String response = gson.toJson(new ServerResponse(
+                            stringTrace,
+                            fingerprintTrace,
+                            transitionTrace));
                         t.sendResponseHeaders(200, response.length());
                         OutputStream responseStream = t.getResponseBody();
                         responseStream.write(response.getBytes());
