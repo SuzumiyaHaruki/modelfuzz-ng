@@ -63,6 +63,9 @@ var (
 	StopNode  SchedulingChoiceType = "StopNode"
 	// ClientRequest 表示在指定 step 注入一个客户端 proposal。
 	ClientRequest SchedulingChoiceType = "ClientRequest"
+	// TickAll 表示在指定 step 末尾对所有存活节点推进 Count 个逻辑 tick。
+	// 它只在显式 Tick 实验模式中写入 trace；原始 ModelFuzz trace 保持不变。
+	TickAll SchedulingChoiceType = "TickAll"
 )
 
 type SchedulingChoiceType string
@@ -83,6 +86,7 @@ type SchedulingChoice struct {
 	IntegerChoice int  `json:",omitempty"`
 	Step          int  `json:",omitempty"`
 	Request       int  `json:",omitempty"`
+	Count         int  `json:",omitempty"`
 }
 
 func (s *SchedulingChoice) Copy() *SchedulingChoice {
@@ -96,6 +100,7 @@ func (s *SchedulingChoice) Copy() *SchedulingChoice {
 		IntegerChoice: s.IntegerChoice,
 		Step:          s.Step,
 		Request:       s.Request,
+		Count:         s.Count,
 	}
 }
 

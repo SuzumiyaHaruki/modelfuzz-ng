@@ -258,6 +258,36 @@ B2-v1 把同一父轨迹的所有 child 都绑定到最早的新状态，没有�
   该算子，不允许跨回目标 step 之前；所有后缀算子都无法产生修改时才拒绝该 child；
 - 继续保持每个新状态的 child 数和总 execution budget 与 global 基线一致。
 
+## Phase B3：固定总量的 Tick 密度变异
+
+### 目标
+
+检验逻辑时间在消息调度之间的分布是否能提供比通用随机后缀更有效的状态后继探索，且不把
+“运行了更多逻辑时间”混入覆盖收益。
+
+首版通过独立的 `--tick-density-mutation` 模式接入，保持以下边界：
+
+- 原始模式仍固定每个 step 执行3次全节点 Tick，不写入额外 choice；
+- 实验模式为每个 step 写入 `TickAll(step, count)`，随机 seed 的初始 count仍全部为3；
+- 每次变异只从目标状态之后的一个 step 移走1个 Tick，并加到另一个后缀 step；
+- 每条完整轨迹的 Tick 总量固定为 `horizon * 3`，默认单 step burst上限为6；
+- 所有存活节点同步 Tick，不引入单节点时间偏差；
+- `Ready`、日志持久化、消息收集和`Advance`仍固定每个 step处理一次，即使该 step的
+  Tick count为0；本阶段只改变逻辑时间密度，不改变Ready处理频率；
+- located目标继续保持其全部调度前缀；后缀不足两个Tick边界时拒绝候选，不跨越目标；
+- 每个新状态仍请求`MutPerTrace`个child，不增加episode或TLC调用预算。
+
+首轮必须报告Tick总量、最大burst、零Tick step数、目标保持率、interesting child率、
+新状态/执行和运行时间。smoke必须超过20条seed population，确保变异child实际出队执行。
+
+由于seed population固定为20，实际smoke改用30 episodes、horizon 50、seed 101，确保候选
+能够出队执行。结果中30/30条反馈轨迹都包含50个`TickAll`，每条Tick总量均为150；8条
+mutation实际执行，其中5条携带located目标并全部保持目标状态。22条未变异轨迹的最大burst
+为3，8条变异轨迹的最大burst为4，运行期间没有零Tick step。9次变异全部成功生成，最后
+1条仍留在队列中；归因failed和missing-origin均为0。最终覆盖3个状态，5条目标child没有
+发现额外新状态。该smoke只确认实现和测量正确，样本不足以评价覆盖效果，可以进入与fixed
+global、随机后缀Prefix相同配置的5-seed配对实验。
+
 ## Phase C：模型语义变异
 
 ### 目标

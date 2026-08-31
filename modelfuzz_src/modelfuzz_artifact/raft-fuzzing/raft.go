@@ -185,16 +185,22 @@ func (r *RaftEnvironment) Step(ctx *FuzzContext, m pb.Message) {
 }
 
 func (r *RaftEnvironment) Tick(ctx *FuzzContext) []pb.Message {
+	return r.TickN(ctx, r.config.TicksPerStep)
+}
+
+// TickN advances logical time by count ticks for every live node. Ready is
+// still consumed once even when count is zero, preserving the existing
+// end-of-step message and storage processing frequency.
+func (r *RaftEnvironment) TickN(ctx *FuzzContext, count int) []pb.Message {
 	result := make([]pb.Message, 0)
-	// 推进所有存活节点的逻辑时间。这里不是随机 tick，而是固定 TicksPerStep 次。
-	// 由于 fuzzer 每个 step 都会调用 Tick，TicksPerStep 实际上控制了“时间推进”和“网络调度”
-	// 的相对速度：越大越容易超时/心跳，越小则网络队列调度更细。
+	// 推进所有存活节点的逻辑时间。原始模式传入固定 TicksPerStep；显式 Tick
+	// 模式可以传入重新分配后的 count，但所有节点仍使用同一个值。
 	for id := uint64(1); id <= uint64(r.config.Replicas); id++ {
 		node, ok := r.nodes[id]
 		if !ok {
 			continue
 		}
-		for i := 0; i < r.config.TicksPerStep; i++ {
+		for i := 0; i < count; i++ {
 			node.Tick()
 		}
 	}

@@ -99,3 +99,8 @@ The run summary records prefix mutation attempts, guided attempts, initial-only 
 successfully generated children, and rejected attempts whose suffix could not support the original
 combined operator. It also reports target preservation and subsequent novelty, grouped by target
 step bucket and mapped model action, so prefix correctness can be separated from suffix utility.
+
+Fixed-budget logical-time exploration uses `--tick-density-mutation`. It records one `TickAll`
+choice per step and moves one all-node logical tick between two boundaries after each located state.
+The per-trace Tick total stays at `horizon * TicksPerStep`; `--max-tick-burst` bounds concentration.
+Ready processing remains once per step and is not part of the mutation.

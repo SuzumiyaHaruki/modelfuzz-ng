@@ -79,6 +79,8 @@ func PhaseACommand() *cobra.Command {
 	var localizedMutation bool
 	var localMutationPercent int
 	var prefixPreservingMutation bool
+	var tickDensityMutation bool
+	var maxTickBurst int
 	cmd := &cobra.Command{
 		Use:   "phase-a",
 		Short: "Run the Phase A end-to-end attribution experiment",
@@ -101,6 +103,12 @@ func PhaseACommand() *cobra.Command {
 			if prefixPreservingMutation && (localizedMutation || localMutationPercent > 0) {
 				return fmt.Errorf("prefix-preserving-mutation cannot be combined with localized mutation flags")
 			}
+			if tickDensityMutation && (prefixPreservingMutation || localizedMutation || localMutationPercent > 0) {
+				return fmt.Errorf("tick-density-mutation cannot be combined with other mutation modes")
+			}
+			if tickDensityMutation && maxTickBurst <= 3 {
+				return fmt.Errorf("max-tick-burst must be greater than the baseline ticks-per-step (3)")
+			}
 			if err := os.MkdirAll(savePath, 0755); err != nil {
 				return fmt.Errorf("create Phase A result directory: %w", err)
 			}
@@ -109,7 +117,10 @@ func PhaseACommand() *cobra.Command {
 			guider := NewTLCStateGuider(tlcAddr, tracePath, recordTraces).WithStateAttribution(true)
 			var mutator Mutator = NewGlobalModelFuzzMutator()
 			mutationMode := "global"
-			if prefixPreservingMutation {
+			if tickDensityMutation {
+				mutator = NewTickDensityMutator(maxTickBurst)
+				mutationMode = "per-state-fixed-budget-tick-density"
+			} else if prefixPreservingMutation {
 				mutator = NewPrefixPreservingModelFuzzMutator()
 				mutationMode = "per-state-prefix-preserving-suffix"
 			} else if localizedMutation {
@@ -142,6 +153,7 @@ func PhaseACommand() *cobra.Command {
 				MaxMessages:        5,
 				SeedPopulationSize: 20,
 				ReseedFrequency:    200,
+				ExplicitTicks:      tickDensityMutation,
 				RandomSeed:         randomSeed,
 			}
 
@@ -168,7 +180,11 @@ func PhaseACommand() *cobra.Command {
 					"model":                  "RAFT_5_3",
 					"mutation_mode":          mutationMode,
 					"local_mutation_percent": localMutationPercent,
-					"prefix_preserving":      prefixPreservingMutation,
+					"prefix_preserving":      prefixPreservingMutation || tickDensityMutation,
+					"explicit_ticks":         tickDensityMutation,
+					"ticks_per_step":         config.RaftEnvironmentConfig.TicksPerStep,
+					"tick_budget_per_trace":  horizon * config.RaftEnvironmentConfig.TicksPerStep,
+					"max_tick_burst":         maxTickBurst,
 				},
 				Runtime:       runtime.String(),
 				RuntimeNanos:  runtime.Nanoseconds(),
@@ -194,6 +210,8 @@ func PhaseACommand() *cobra.Command {
 	cmd.Flags().BoolVar(&localizedMutation, "localized-mutation", false, "Limit the original three mutators to choices nearest new-state origins")
 	cmd.Flags().IntVar(&localMutationPercent, "local-mutation-percent", 0, "Percentage of mutation attempts using localized candidates (0 keeps original global behavior)")
 	cmd.Flags().BoolVar(&prefixPreservingMutation, "prefix-preserving-mutation", false, "Generate suffix mutations separately for each new-state origin")
+	cmd.Flags().BoolVar(&tickDensityMutation, "tick-density-mutation", false, "Redistribute a fixed all-node Tick budget within each new-state suffix")
+	cmd.Flags().IntVar(&maxTickBurst, "max-tick-burst", 6, "Maximum all-node logical ticks at one step in tick-density mode")
 	return cmd
 }
 

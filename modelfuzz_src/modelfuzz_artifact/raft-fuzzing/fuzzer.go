@@ -61,6 +61,8 @@ type traceCtx struct {
 	crashPoints    map[int]uint64
 	startPoints    map[int]uint64
 	clientRequests map[int]int
+	tickCounts     map[int]int
+	explicitTicks  bool
 	rand           *rand.Rand
 
 	Error  error
@@ -218,6 +220,19 @@ func (t *traceCtx) IsClientRequest(step int) (int, int, bool) {
 	return req, -1, false
 }
 
+func (t *traceCtx) GetTickCount(step int) (int, int) {
+	count := t.fuzzer.config.RaftEnvironmentConfig.TicksPerStep
+	if configured, ok := t.tickCounts[step]; ok {
+		count = configured
+	}
+	if !t.explicitTicks {
+		return count, -1
+	}
+	choiceIndex := t.trace.Size()
+	t.trace.Append(&SchedulingChoice{Type: TickAll, Step: step, Count: count})
+	return count, choiceIndex
+}
+
 type FuzzerConfig struct {
 	// Iterations 是总执行轮数；Steps 是每轮 trace 的长度。
 	Iterations int
@@ -241,6 +256,9 @@ type FuzzerConfig struct {
 	MaxMessages int
 	// ReseedFrequency 控制多久重新生成一批随机种子，避免陷入局部搜索。
 	ReseedFrequency int
+	// ExplicitTicks 把每个 step 的全局逻辑 Tick 次数写入 trace，使变异器可以在
+	// 不改变总 Tick 预算的前提下重新分配时间密度。
+	ExplicitTicks bool
 	// RandomSeed 非零时固定 Fuzzer 和所有 RandomizedMutator 的共享随机源；
 	// 0 保留原有的基于当前时间播种行为。
 	RandomSeed int64
@@ -290,6 +308,9 @@ func NewFuzzer(config *FuzzerConfig) *Fuzzer {
 	f.stats["prefix_target_preserved_by_action"] = make(map[string]int)
 	f.stats["prefix_target_new_states_by_action"] = make(map[string]int)
 	f.stats["prefix_target_interesting_by_action"] = make(map[string]int)
+	f.stats["logical_ticks_executed"] = 0
+	f.stats["max_tick_burst"] = 0
+	f.stats["zero_tick_steps"] = 0
 	f.stats["execution_errors"] = make(map[string]bool, 0)
 	f.stats["error_executions"] = make(map[string][]string)
 	f.stats["buggy_executions"] = make(map[string]bool, 0)
@@ -507,6 +528,14 @@ func (f *Fuzzer) Run() []CoverageStats {
 		f.stats["prefix_generated_attempts"] = stats.Generated
 		f.stats["prefix_rejected_attempts"] = stats.Rejected
 	}
+	if provider, ok := f.config.Mutator.(TickDensityMutationStatsProvider); ok {
+		stats := provider.TickDensityMutationStats()
+		f.stats["tick_density_attempts"] = stats.Attempts
+		f.stats["tick_density_guided_attempts"] = stats.Guided
+		f.stats["tick_density_global_fallback_attempts"] = stats.GlobalFallback
+		f.stats["tick_density_generated_attempts"] = stats.Generated
+		f.stats["tick_density_rejected_attempts"] = stats.Rejected
+	}
 	return coverages
 }
 
@@ -521,6 +550,8 @@ func (f *Fuzzer) RunIteration(iteration string, mimic *List[*SchedulingChoice]) 
 		crashPoints:    make(map[int]uint64),
 		startPoints:    make(map[int]uint64),
 		clientRequests: make(map[int]int),
+		tickCounts:     make(map[int]int),
+		explicitTicks:  f.config.ExplicitTicks,
 		rand:           f.rand,
 		fuzzer:         f,
 	}
@@ -543,6 +574,9 @@ func (f *Fuzzer) RunIteration(iteration string, mimic *List[*SchedulingChoice]) 
 				tCtx.crashPoints[ch.Step] = ch.Node
 			case ClientRequest:
 				tCtx.clientRequests[ch.Step] = ch.Request
+			case TickAll:
+				tCtx.explicitTicks = true
+				tCtx.tickCounts[ch.Step] = ch.Count
 			}
 		}
 	} else {
@@ -689,15 +723,23 @@ EpisodeLoop:
 			}
 		}
 
+		tickCount, tickChoiceIndex := tCtx.GetTickCount(j)
+		f.stats["logical_ticks_executed"] = f.stats["logical_ticks_executed"].(int) + tickCount
+		if tickCount > f.stats["max_tick_burst"].(int) {
+			f.stats["max_tick_burst"] = tickCount
+		}
+		if tickCount == 0 {
+			f.incrementStat("zero_tick_steps")
+		}
 		tickOrigin := &EventOrigin{
 			Step:            j,
 			Phase:           EventPhaseTick,
-			ChoiceIndex:     -1,
+			ChoiceIndex:     tickChoiceIndex,
 			DeliveryOrdinal: -1,
 			DeliveryCount:   -1,
 		}
 		fCtx.SetOrigin(tickOrigin)
-		for _, n := range f.raftEnvironment.Tick(fCtx) {
+		for _, n := range f.raftEnvironment.TickN(fCtx, tickCount) {
 			// Tick 产生的新消息不会立刻投递，而是进入 from/to 队列等待未来调度。
 			recordSend(n, tCtx.eventTrace, tickOrigin)
 			key := fmt.Sprintf("%d_%d", n.From, n.To)
@@ -755,6 +797,18 @@ type PrefixMutationStats struct {
 
 type PrefixMutationStatsProvider interface {
 	PrefixMutationStats() PrefixMutationStats
+}
+
+type TickDensityMutationStats struct {
+	Attempts       int
+	Guided         int
+	GlobalFallback int
+	Generated      int
+	Rejected       int
+}
+
+type TickDensityMutationStatsProvider interface {
+	TickDensityMutationStats() TickDensityMutationStats
 }
 
 // RandomizedMutator 允许 Fuzzer 把自己的确定性随机源注入 Mutator。
