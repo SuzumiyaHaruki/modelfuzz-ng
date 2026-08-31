@@ -134,3 +134,35 @@ func TestFuzzerGeneratesMutationsForEachNewStateTarget(t *testing.T) {
 		t.Fatalf("target child new states=%d, want 0", got)
 	}
 }
+
+func TestFuzzerRecordsTickDensityYieldByDelta(t *testing.T) {
+	guidance := Guidance{NewStates: []StateAttribution{{
+		State: State{Key: 9}, Status: AttributionLocated, Origin: &EventOrigin{Step: 0}, MappedAction: "ElectLeader",
+	}}}
+	fuzzer := NewFuzzer(&FuzzerConfig{
+		Iterations:         4,
+		Steps:              6,
+		Mutator:            NewTickDensityMutator(6, 1, 2, 3),
+		Guider:             &targetedTestGuider{guidance: guidance},
+		MutPerTrace:        3,
+		SeedPopulationSize: 1,
+		MaxMessages:        2,
+		ReseedFrequency:    100,
+		ExplicitTicks:      true,
+		RandomSeed:         61,
+		RaftEnvironmentConfig: RaftEnvironmentConfig{
+			Replicas: 3, ElectionTick: 20, HeartbeatTick: 4, TicksPerStep: 3,
+		},
+	})
+	fuzzer.Run()
+
+	executions := fuzzer.stats["tick_density_executions_by_delta"].(map[string]int)
+	for _, delta := range []string{"1", "2", "3"} {
+		if executions[delta] != 1 {
+			t.Fatalf("delta %s executions=%d, want 1", delta, executions[delta])
+		}
+	}
+	if got := fuzzer.stats["prefix_target_preserved"].(int); got != 3 {
+		t.Fatalf("preserved targets=%d, want 3", got)
+	}
+}

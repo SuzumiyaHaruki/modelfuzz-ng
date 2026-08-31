@@ -105,3 +105,6 @@ Fixed-budget logical-time exploration uses `--tick-density-mutation`. It records
 choice per step and moves one all-node logical tick between two boundaries after each located state.
 The per-trace Tick total stays at `horizon * TicksPerStep`; `--max-tick-burst` bounds concentration.
 Ready processing remains once per step and is not part of the mutation.
+`--tick-density-deltas 1,2,3` generates three strengths at the same randomly selected pair of
+suffix boundaries for each target. Per-delta execution and novelty counts are included in the run
+summary. Use `--tick-density-deltas 1` to reproduce the original single-Tick variant.

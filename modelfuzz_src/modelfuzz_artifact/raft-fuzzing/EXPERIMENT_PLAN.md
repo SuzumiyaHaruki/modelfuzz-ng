@@ -288,6 +288,13 @@ mutation实际执行，其中5条携带located目标并全部保持目标状态�
 发现额外新状态。该smoke只确认实现和测量正确，样本不足以评价覆盖效果，可以进入与fixed
 global、随机后缀Prefix相同配置的5-seed配对实验。
 
+5-seed结果表明单Tick随机密度是负基线：342条实际mutation均保持总Tick和目标状态，但
+没有任何一条产生新模型状态；最大burst始终只有4，因为第一层child不interesting，无法
+递归形成更强扰动。T1因此改为多强度随机位置消融：同一目标随机选择同一对后缀Tick边界，
+三个child分别直接转移1、2、3个Tick，形成`2/4`、`1/5`、`0/6`。三个候选均从同一个父
+轨迹产生，不依赖递归反馈。运行参数使用`--tick-density-deltas 1,2,3`；结果必须按delta
+分别报告执行数、interesting数和新状态数。使用`--tick-density-deltas 1`可复现T0。
+
 ## Phase C：模型语义变异
 
 ### 目标

@@ -47,6 +47,8 @@ type queuedTrace struct {
 	targetStateKey int64
 	targetStep     int
 	targetAction   string
+	hasTickDelta   bool
+	tickDelta      int
 }
 
 // traceCtx 保存单次 iteration 的输入计划和输出记录。
@@ -311,6 +313,9 @@ func NewFuzzer(config *FuzzerConfig) *Fuzzer {
 	f.stats["logical_ticks_executed"] = 0
 	f.stats["max_tick_burst"] = 0
 	f.stats["zero_tick_steps"] = 0
+	f.stats["tick_density_executions_by_delta"] = make(map[string]int)
+	f.stats["tick_density_new_states_by_delta"] = make(map[string]int)
+	f.stats["tick_density_interesting_by_delta"] = make(map[string]int)
 	f.stats["execution_errors"] = make(map[string]bool, 0)
 	f.stats["error_executions"] = make(map[string][]string)
 	f.stats["buggy_executions"] = make(map[string]bool, 0)
@@ -445,6 +450,14 @@ func (f *Fuzzer) Run() []CoverageStats {
 		f.incrementStat("feedback_executions")
 		f.incrementStat("total_executions")
 		numNewStates, _ := f.config.Guider.Check(trace, eventTrace)
+		if hasQueuedTrace && queued.hasTickDelta {
+			delta := strconv.Itoa(queued.tickDelta)
+			f.incrementGroupedStat("tick_density_executions_by_delta", delta, 1)
+			f.incrementGroupedStat("tick_density_new_states_by_delta", delta, numNewStates)
+			if numNewStates > 0 {
+				f.incrementGroupedStat("tick_density_interesting_by_delta", delta, 1)
+			}
+		}
 		if hasQueuedTrace && queued.hasTargetState {
 			f.incrementStat("prefix_target_executions")
 			bucket := prefixTargetStepBucket(queued.targetStep)
@@ -487,6 +500,9 @@ func (f *Fuzzer) Run() []CoverageStats {
 							continue
 						}
 						child := queuedTrace{trace: copyTrace(new, defaultCopyFilter()), isMutation: true}
+						if metadata, ok := f.config.Mutator.(TickDensityMutationMetadataProvider); ok {
+							child.tickDelta, child.hasTickDelta = metadata.LastTickDensityDelta()
+						}
 						if target.Status == AttributionLocated && target.Origin != nil {
 							child.hasTargetState = true
 							child.targetStateKey = target.State.Key
@@ -505,10 +521,14 @@ func (f *Fuzzer) Run() []CoverageStats {
 				for j := 0; j < numMutations; j++ {
 					new, applied := f.config.Mutator.Mutate(trace, eventTrace)
 					if applied {
-						f.candidateTracesQueue.Push(queuedTrace{
+						child := queuedTrace{
 							trace:      copyTrace(new, defaultCopyFilter()),
 							isMutation: true,
-						})
+						}
+						if metadata, ok := f.config.Mutator.(TickDensityMutationMetadataProvider); ok {
+							child.tickDelta, child.hasTickDelta = metadata.LastTickDensityDelta()
+						}
+						f.candidateTracesQueue.Push(child)
 					}
 				}
 			}
@@ -809,6 +829,10 @@ type TickDensityMutationStats struct {
 
 type TickDensityMutationStatsProvider interface {
 	TickDensityMutationStats() TickDensityMutationStats
+}
+
+type TickDensityMutationMetadataProvider interface {
+	LastTickDensityDelta() (int, bool)
 }
 
 // RandomizedMutator 允许 Fuzzer 把自己的确定性随机源注入 Mutator。

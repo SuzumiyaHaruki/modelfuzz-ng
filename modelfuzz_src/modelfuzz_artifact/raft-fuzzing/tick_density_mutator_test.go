@@ -52,6 +52,50 @@ func TestTickDensityMutatorRejectsTargetWithoutTwoSuffixBoundaries(t *testing.T)
 	}
 }
 
+func TestTickDensityMultiscaleUsesOnePairForAllDeltas(t *testing.T) {
+	trace := tickTrace(10, 3)
+	mutator := NewTickDensityMutator(6, 1, 2, 3)
+	mutator.(RandomizedMutator).SetRandom(rand.New(rand.NewSource(59)))
+	target := StateAttribution{State: State{Key: 7}, Status: AttributionLocated, Origin: &EventOrigin{Step: 4}}
+	var changedSteps []int
+	for _, delta := range []int{1, 2, 3} {
+		mutated, ok := mutator.(TargetedGuidanceMutator).MutateForTarget(trace, NewList[*Event](), target)
+		if !ok {
+			t.Fatalf("delta %d mutation failed", delta)
+		}
+		currentSteps := make([]int, 0, 2)
+		total := 0
+		for index, before := range trace.Iter() {
+			after, _ := mutated.Get(index)
+			total += after.Count
+			if before.Count != after.Count {
+				currentSteps = append(currentSteps, before.Step)
+				if abs(before.Count-after.Count) != delta {
+					t.Fatalf("step %d changed by %d for delta %d", before.Step, abs(before.Count-after.Count), delta)
+				}
+			}
+		}
+		if total != 30 {
+			t.Fatalf("delta %d changed total Tick budget to %d", delta, total)
+		}
+		if len(currentSteps) != 2 {
+			t.Fatalf("delta %d changed steps %v, want two", delta, currentSteps)
+		}
+		if changedSteps == nil {
+			changedSteps = currentSteps
+		} else if changedSteps[0] != currentSteps[0] || changedSteps[1] != currentSteps[1] {
+			t.Fatalf("deltas used different boundaries: first=%v delta%d=%v", changedSteps, delta, currentSteps)
+		}
+		if got, applied := mutator.(TickDensityMutationMetadataProvider).LastTickDensityDelta(); !applied || got != delta {
+			t.Fatalf("last delta=(%d,%t), want (%d,true)", got, applied, delta)
+		}
+	}
+	stats := mutator.(TickDensityMutationStatsProvider).TickDensityMutationStats()
+	if stats.Attempts != 3 || stats.Guided != 3 || stats.Generated != 3 || stats.Rejected != 0 {
+		t.Fatalf("unexpected multiscale stats: %#v", stats)
+	}
+}
+
 func TestExplicitTickTraceReplaysItsDensity(t *testing.T) {
 	fuzzer := NewFuzzer(&FuzzerConfig{
 		Steps:         4,

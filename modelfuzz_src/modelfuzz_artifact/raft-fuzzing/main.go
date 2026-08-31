@@ -81,6 +81,7 @@ func PhaseACommand() *cobra.Command {
 	var prefixPreservingMutation bool
 	var tickDensityMutation bool
 	var maxTickBurst int
+	var tickDensityDeltas []int
 	cmd := &cobra.Command{
 		Use:   "phase-a",
 		Short: "Run the Phase A end-to-end attribution experiment",
@@ -106,8 +107,20 @@ func PhaseACommand() *cobra.Command {
 			if tickDensityMutation && (prefixPreservingMutation || localizedMutation || localMutationPercent > 0) {
 				return fmt.Errorf("tick-density-mutation cannot be combined with other mutation modes")
 			}
-			if tickDensityMutation && maxTickBurst <= 3 {
-				return fmt.Errorf("max-tick-burst must be greater than the baseline ticks-per-step (3)")
+			if tickDensityMutation {
+				if len(tickDensityDeltas) == 0 {
+					return fmt.Errorf("tick-density-deltas must not be empty")
+				}
+				maxDelta := 0
+				for _, delta := range tickDensityDeltas {
+					if delta <= 0 || delta > 3 {
+						return fmt.Errorf("tick-density-deltas must be in [1,3]")
+					}
+					maxDelta = max(maxDelta, delta)
+				}
+				if maxTickBurst < 3+maxDelta {
+					return fmt.Errorf("max-tick-burst must be at least %d for the requested deltas", 3+maxDelta)
+				}
 			}
 			if err := os.MkdirAll(savePath, 0755); err != nil {
 				return fmt.Errorf("create Phase A result directory: %w", err)
@@ -118,8 +131,11 @@ func PhaseACommand() *cobra.Command {
 			var mutator Mutator = NewGlobalModelFuzzMutator()
 			mutationMode := "global"
 			if tickDensityMutation {
-				mutator = NewTickDensityMutator(maxTickBurst)
+				mutator = NewTickDensityMutator(maxTickBurst, tickDensityDeltas...)
 				mutationMode = "per-state-fixed-budget-tick-density"
+				if len(tickDensityDeltas) > 1 {
+					mutationMode += "-multiscale"
+				}
 			} else if prefixPreservingMutation {
 				mutator = NewPrefixPreservingModelFuzzMutator()
 				mutationMode = "per-state-prefix-preserving-suffix"
@@ -185,6 +201,7 @@ func PhaseACommand() *cobra.Command {
 					"ticks_per_step":         config.RaftEnvironmentConfig.TicksPerStep,
 					"tick_budget_per_trace":  horizon * config.RaftEnvironmentConfig.TicksPerStep,
 					"max_tick_burst":         maxTickBurst,
+					"tick_density_deltas":    tickDensityDeltas,
 				},
 				Runtime:       runtime.String(),
 				RuntimeNanos:  runtime.Nanoseconds(),
@@ -212,6 +229,7 @@ func PhaseACommand() *cobra.Command {
 	cmd.Flags().BoolVar(&prefixPreservingMutation, "prefix-preserving-mutation", false, "Generate suffix mutations separately for each new-state origin")
 	cmd.Flags().BoolVar(&tickDensityMutation, "tick-density-mutation", false, "Redistribute a fixed all-node Tick budget within each new-state suffix")
 	cmd.Flags().IntVar(&maxTickBurst, "max-tick-burst", 6, "Maximum all-node logical ticks at one step in tick-density mode")
+	cmd.Flags().IntSliceVar(&tickDensityDeltas, "tick-density-deltas", []int{1, 2, 3}, "Tick counts transferred for successive children of the same target")
 	return cmd
 }
 
