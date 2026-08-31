@@ -25,6 +25,7 @@ From this directory, build and start it on port 2023 with:
 ```bash
 cd ../tlc-controlled-with-benchmarks/tlc-controlled
 ant -f customBuild.xml compile
+ant -f customBuild.xml compile-test
 ant -f customBuild.xml dist
 
 java -Xms256m -Xmx2g \
